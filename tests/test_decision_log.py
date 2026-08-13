@@ -175,3 +175,121 @@ def test_record_invocation_shape(log_path: Path) -> None:
     assert ev["payload"]["exit_code"] == 2
     assert ev["payload"]["duration_ms"] == 42
     assert ev["payload"]["args"] == {"paths": 1}      # arg-shape summary, never raw argv
+
+
+# ---------------------------------------------------------------------------
+# path resolution
+
+def test_env_override_sets_log_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "custom.jsonl"
+    monkeypatch.setenv("CFS_DECISION_LOG", str(target))
+    assert dl.default_log_path() == target
+
+
+def test_default_path_in_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+    monkeypatch.setattr("studio.utils.files.find_studio_directory", lambda *_a, **_k: tmp_path)
+    assert dl.default_log_path() == tmp_path / ".cache" / "decisions.jsonl"
+
+
+def test_default_path_survives_locator_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no working directory")
+
+    monkeypatch.setattr("studio.utils.files.find_studio_directory", _boom)
+    assert dl.default_log_path() is None          # locator error → no project, no raise
+
+
+# ---------------------------------------------------------------------------
+# fail-safe opt-out / redaction branches
+
+def test_is_enabled_survives_unreadable_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+
+    class _Unreadable:
+        def exists(self):
+            raise OSError("home directory unreadable")
+
+    monkeypatch.setattr(dl, "opt_out_sentinel_path", lambda: _Unreadable())
+    assert dl.is_enabled() is False               # can't check opt-out → stay disabled, don't crash
+
+
+def test_redact_survives_missing_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom():
+        raise RuntimeError("no home directory")
+
+    monkeypatch.setattr(Path, "home", _boom)
+    assert dl._redact("/some/absolute/path") == "/some/absolute/path"   # returned unchanged, no raise
+
+
+def test_rotation_failure_is_swallowed(log_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dl, "_MAX_BYTES", 50)
+    dl.record("routing", {"pad": "x" * 80}, path=log_path)     # push the log over the limit
+
+    def _boom(*_a, **_k):
+        raise OSError("cannot rename")
+
+    monkeypatch.setattr(dl.os, "replace", _boom)
+    assert dl.record("routing", {"i": 1}, path=log_path) is True   # rotation fails, write still proceeds
+
+
+def test_append_without_fcntl_still_writes(log_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_fcntl(name, *a, **k):
+        if name == "fcntl":
+            raise ImportError("fcntl unavailable on this platform")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_fcntl)
+    assert dl.record("routing", {"x": 1}, path=log_path) is True    # unlocked fallback path
+    assert len(list(dl.read_events(log_path))) == 1
+
+
+# ---------------------------------------------------------------------------
+# read_events branches
+
+def test_read_events_no_project_yields_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+    monkeypatch.setattr("studio.utils.files.find_studio_directory", lambda *_a, **_k: None)
+    assert list(dl.read_events()) == []
+
+
+def test_read_events_missing_file_yields_nothing(tmp_path: Path) -> None:
+    assert list(dl.read_events(tmp_path / "absent.jsonl")) == []
+
+
+def test_read_events_unreadable_file_yields_nothing(log_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    dl.record("routing", {"a": 1}, path=log_path)
+    real_open = Path.open
+
+    def _boom(self, *a, **k):
+        if self == log_path:
+            raise OSError("permission denied")
+        return real_open(self, *a, **k)
+
+    monkeypatch.setattr(Path, "open", _boom)
+    assert list(dl.read_events(log_path)) == []      # unreadable log → empty, not a raise
+
+
+def test_read_events_skips_non_dict_json(log_path: Path) -> None:
+    dl.record("routing", {"a": 1}, path=log_path)
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write("123\n[1, 2]\n")                     # valid JSON, but not event objects
+    events = list(dl.read_events(log_path))
+    assert len(events) == 1
+    assert events[0]["event"] == "routing"
+
+
+def test_read_events_filters_and_limit(log_path: Path) -> None:
+    dl.record("routing", {"a": 1}, path=log_path)
+    dl.record("validation", {"status": "PASS"}, path=log_path)
+    dl.record("routing", {"a": 2}, path=log_path)
+    assert [e["payload"]["a"] for e in dl.read_events(log_path, event="routing")] == [1, 2]
+    assert list(dl.read_events(log_path, run_id="does-not-exist")) == []
+    assert len(list(dl.read_events(log_path, limit=1))) == 1
