@@ -224,6 +224,17 @@ def test_redact_survives_missing_home(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dl._redact("/some/absolute/path") == "/some/absolute/path"   # returned unchanged, no raise
 
 
+def test_redact_respects_home_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # $HOME is only collapsed at a path boundary — a sibling dir must not be mangled.
+    monkeypatch.setattr(Path, "home", lambda: Path("/Users/max"))
+    assert dl._redact("/Users/maxine/x") == "/Users/maxine/x"   # sibling untouched (not "~ine/x")
+    assert dl._redact("/Users/max/x") == "~/x"                  # real home redacted
+    assert dl._redact("/Users/max") == "~"                      # bare home
+    assert dl._redact("run /Users/max/x") == "run ~/x"          # mid-string, at boundary
+    monkeypatch.setattr(Path, "home", lambda: Path("/"))
+    assert dl._redact("/Users/max/x") == "/Users/max/x"         # root home -> no-op (never redact "/")
+
+
 def test_rotation_failure_is_swallowed(log_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dl, "_MAX_BYTES", 50)
     dl.record("routing", {"pad": "x" * 80}, path=log_path)     # push the log over the limit

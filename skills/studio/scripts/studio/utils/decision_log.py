@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -151,10 +152,14 @@ def _redact(value: Any) -> Any:
     """
     if isinstance(value, str):
         try:
-            home = str(Path.home())
+            home = str(Path.home()).rstrip(os.sep)
         except (OSError, RuntimeError):
             return value
-        return value.replace(home, "~") if home and home in value else value
+        if not home:
+            return value
+        # Substitute $HOME only at a path boundary (separator or end-of-string), so a
+        # sibling like ``/Users/maxine`` is never mangled into ``~ine`` for home ``/Users/max``.
+        return re.sub(re.escape(home) + r"(?=" + re.escape(os.sep) + r"|$)", "~", value)
     if isinstance(value, dict):
         return {_redact(k): _redact(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
