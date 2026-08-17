@@ -37,6 +37,7 @@ instrumentation never breaks an older reader.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -68,6 +69,11 @@ _MAX_BYTES = 5 * 1024 * 1024
 #: Fixed for the life of the process, so every event of one invocation shares it.
 _RUN_ID = uuid.uuid4().hex[:12]
 
+#: Correlation id for the current context. The dispatcher sets this once per run so
+#: events recorded deep inside a command (e.g. validation) share the run's decision.
+_CURRENT_DECISION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "cfs_current_decision_id", default="")
+
 #: Guards the one-time transparency notice.
 _NOTICE_SHOWN = False
 
@@ -79,6 +85,15 @@ _NOTICE_SHOWN = False
 def new_decision_id() -> str:
     """Return a fresh id used to chain the events (routing → dispatch → …) of one decision."""
     return uuid.uuid4().hex[:16]
+
+
+def set_current_decision_id(decision_id: str) -> None:
+    """Set the correlation id for the current context.
+
+    Later ``record()`` calls that pass no explicit ``decision_id`` inherit this one,
+    so events emitted deep inside a command chain to the same decision as the run.
+    """
+    _CURRENT_DECISION_ID.set(decision_id)
 # @cpt-end:cpt-studio-algo-core-infra-decision-log:p1:inst-log-id
 
 
@@ -247,7 +262,7 @@ def record(
             "schema": SCHEMA_VERSION,
             "ts": datetime.now(timezone.utc).isoformat(),
             "run_id": _RUN_ID,
-            "decision_id": decision_id,
+            "decision_id": decision_id or _CURRENT_DECISION_ID.get(),
             "event": event,
             "command": _redact(command),
             "payload": _redact(payload or {}),
