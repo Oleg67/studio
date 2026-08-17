@@ -47,4 +47,5 @@ def _isolate_decision_log(tmp_path_factory, monkeypatch):
     log = tmp_path_factory.mktemp("cfs_telemetry") / "decisions.jsonl"
     monkeypatch.setenv("CFS_DECISION_LOG", str(log))
     monkeypatch.setattr(decision_log, "_NOTICE_SHOWN", True)
+    monkeypatch.setattr(decision_log, "_FAILURE_WARNED", False)   # each test can observe the warning
     decision_log.set_current_decision_id("")   # start each test with a clean correlation id

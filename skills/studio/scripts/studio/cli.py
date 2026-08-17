@@ -342,15 +342,12 @@ def _main_impl(argv_list: List[str]) -> int:
         return _report_unknown_command(cmd)
     # @cpt-end:cpt-studio-algo-core-infra-route-command:p1:inst-if-no-handler
     # @cpt-begin:cpt-studio-algo-core-infra-route-command:p1:inst-execute-handler
-    # Telemetry is fail-open: it must never change command behaviour or exit code
-    # (fail-open, not fail-silent). Establish one decision id for the run so events
-    # recorded inside the handler (e.g. validation) correlate to this invocation.
-    decision_id = ""
-    try:
-        decision_id = decision_log.new_decision_id()
-        decision_log.set_current_decision_id(decision_id)
-    except Exception as exc:  # pylint: disable=broad-except
-        logging.getLogger("studio").debug("decision-log setup failed: %s", exc)
+    # Telemetry never changes command behaviour: new_decision_id / set_current /
+    # record_invocation are all non-raising (record() is fail-safe and surfaces a real
+    # write failure itself), so no guard is needed here. One decision id per run lets
+    # events recorded inside the handler (e.g. validation) correlate to this invocation.
+    decision_id = decision_log.new_decision_id()
+    decision_log.set_current_decision_id(decision_id)
     started = perf_counter()
     handler_result = 1
     try:
@@ -364,25 +361,17 @@ def _main_impl(argv_list: List[str]) -> int:
             handler_result = 0 if exc.code is None else 1
         raise
     finally:
-        # Record on every exit — normal, SystemExit, or a raising handler.
-        try:
-            decision_log.record_invocation(
-                cmd,
-                exit_code=handler_result,
-                duration_ms=int((perf_counter() - started) * 1000),
-                args_shape={"argc": len(rest),
-                            "flags": sum(1 for arg in rest if arg.startswith("-"))},
-                decision_id=decision_id,
-            )
-        except Exception as exc:  # pylint: disable=broad-except
-            # Fail-open, not fail-silent: surface one line via the logger (→ stderr).
-            logging.getLogger("studio").warning(
-                "decision-log invocation record failed (ignored): %s", exc)
-        # Always scope the id to this run, even if recording raised.
-        try:
-            decision_log.set_current_decision_id("")
-        except Exception as exc:  # pylint: disable=broad-except
-            logging.getLogger("studio").debug("decision-log reset failed (ignored): %s", exc)
+        # Record on every exit — normal, SystemExit, or a raising handler — then scope
+        # the id to this run so a later event can't inherit it.
+        decision_log.record_invocation(
+            cmd,
+            exit_code=handler_result,
+            duration_ms=int((perf_counter() - started) * 1000),
+            args_shape={"argc": len(rest),
+                        "flags": sum(1 for arg in rest if arg.startswith("-"))},
+            decision_id=decision_id,
+        )
+        decision_log.set_current_decision_id("")
     # @cpt-end:cpt-studio-algo-core-infra-route-command:p1:inst-execute-handler
 
 

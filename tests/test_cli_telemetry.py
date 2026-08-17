@@ -70,31 +70,19 @@ def test_events_inside_a_command_share_the_run_decision_id(
 # ---------------------------------------------------------------------------
 # fail-open: telemetry never changes command behaviour
 
-def test_wrapper_fail_open_when_record_raises(tmp_path: Path,
-                                              monkeypatch: pytest.MonkeyPatch,
-                                              caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.setenv("CFS_DECISION_LOG", str(tmp_path / "d.jsonl"))
-    monkeypatch.setattr(cli, "_resolve_command_handler", _fixed_handler(7))
+def test_command_survives_an_unwritable_log(tmp_path: Path,
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    log = tmp_path / "decisions.jsonl"
+    monkeypatch.setenv("CFS_DECISION_LOG", str(log))
+    monkeypatch.setattr(cli, "_resolve_command_handler", _fixed_handler(5))
 
     def boom(*_a, **_k):
-        raise RuntimeError("record boom")
+        raise OSError("unwritable log")
 
-    monkeypatch.setattr(decision_log, "record_invocation", boom)
-    with caplog.at_level(logging.WARNING, logger="studio"):
-        assert cli.main(["demo"]) == 7                          # exit code unchanged
-    assert "decision-log invocation record failed" in caplog.text   # surfaced, not silent
-
-
-def test_wrapper_fail_open_when_setup_raises(tmp_path: Path,
-                                             monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CFS_DECISION_LOG", str(tmp_path / "d.jsonl"))
-    monkeypatch.setattr(cli, "_resolve_command_handler", _fixed_handler(3))
-
-    def boom(_decision_id):
-        raise RuntimeError("setup boom")
-
-    monkeypatch.setattr(decision_log, "set_current_decision_id", boom)
-    assert cli.main(["demo"]) == 3                              # setup failure never blocks
+    monkeypatch.setattr(decision_log, "_append_locked", boom)
+    assert cli.main(["demo"]) == 5      # a real write failure never changes the exit code
+    assert not log.exists()              # ...and no event is written
+    # (the single visible warning is asserted at the decision_log level)
 
 
 def test_handler_exception_records_invocation_and_propagates(

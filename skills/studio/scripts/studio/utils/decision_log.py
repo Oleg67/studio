@@ -77,6 +77,9 @@ _CURRENT_DECISION_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 #: Guards the one-time transparency notice.
 _NOTICE_SHOWN = False
 
+#: Guards the one-time "could not write the log" warning (fail-open, not fail-silent).
+_FAILURE_WARNED = False
+
 
 # ---------------------------------------------------------------------------
 # Correlation
@@ -251,8 +254,13 @@ def record(
     or an unwritable/unserialisable record). **Never raises** — callers are
     instrumentation, so a failure here must not change what the command does.
     """
+    global _FAILURE_WARNED  # pylint: disable=global-statement
     try:
         if not is_enabled():
+            return False
+        if _FAILURE_WARNED:
+            # A prior write failed and we already warned: telemetry is genuinely off for
+            # the rest of this run. Don't keep retrying a target we know is unwritable.
             return False
         target = path or default_log_path()
         if target is None:
@@ -274,8 +282,15 @@ def record(
             _show_notice_once(target)
         return True
     except Exception as exc:  # pylint: disable=broad-except
-        # Deliberately broad: instrumentation must degrade to silence.
-        logger.debug("decision log write skipped: %s", exc)
+        # A real write/serialization failure (disabled, no-project and already-warned
+        # cases return early above and never reach here, so this only fires on the first
+        # failure). Surface it once — fail-open, not fail-silent — and latch telemetry off
+        # for the run via _FAILURE_WARNED. Redact the exception: an OSError carries the
+        # absolute log path ($HOME included).
+        _FAILURE_WARNED = True
+        logger.warning(
+            "Constructor Studio could not write its decision log; "
+            "telemetry is off for this run: %s", _redact(str(exc)))
         return False
 # @cpt-end:cpt-studio-algo-core-infra-decision-log:p1:inst-log-record
 
