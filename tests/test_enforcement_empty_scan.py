@@ -1,14 +1,18 @@
 """Enforcement reachability: an empty scan must not read as compliance.
 
 Each test names the repository state it builds and the verdict that state
-produces. The rule this corpus argues for is that "cannot assess" is not
-"PASS", and that the exit code should follow whether the caller asked for a
-guarantee:
+produces. The corpus separates two questions that a single ``status`` field
+currently conflates:
 
-* a guarantee was requested (thresholds passed, or a checked ``to_code="true"``
-  ID exists) and it cannot be assessed -> non-zero exit;
-* only a report was requested -> exit 0, but the output says plainly that
-  nothing was measured.
+* **"did anything fail?"** -> ``status``. An empty scope fails nothing: the
+  check ran and correctly found nothing to cover, so ``PASS`` is honest.
+* **"was there anything to assess?"** -> a separate boolean. This is what the
+  report cannot currently express, so a legitimately empty repository and a
+  misconfigured one that scans nothing are indistinguishable.
+
+The exit code is a third, independent question: it should turn non-zero only
+when the caller demanded a guarantee that cannot be given -- thresholds were
+passed, or a checked ``to_code="true"`` ID exists with nothing backing it.
 
 Most tests here pin behaviour that is already correct, so they are ordinary
 regression cover. The three marked ``xfail(strict=True)`` state the verdict this
@@ -162,8 +166,9 @@ class TestKnownGoodStaysGreen:
     def test_an_unassessable_report_without_thresholds_still_exits_zero(self):
         """No guarantee was requested, so the exit code must not move.
 
-        Only the *status* should change (see the xfail below). Keeping this exit
-        code is what lets the fix land without failing spec-first projects.
+        ``status`` stays PASS too -- nothing failed. Only the applicability flag
+        below is missing. Keeping this exit code is what lets the change land
+        without failing spec-first projects.
         """
         with TemporaryDirectory() as directory:
             ctx = _context(Path(directory), codebase=[])
@@ -195,18 +200,29 @@ class TestVerdictIsDeterministic:
 # Known-bad must go red. These fail today; that is the defect.
 # ---------------------------------------------------------------------------
 
-class TestUnassessableIsNotCompliant:
+class TestEmptyScopeIsVisibleAndGuaranteesAreHonoured:
+    """An empty scope is honest-green -- but it must be *visible*, and a
+    demanded guarantee must still be honoured."""
+
     @pytest.mark.xfail(
         strict=True,
-        reason="_empty_coverage_result() hard-codes status PASS when nothing was scanned",
+        reason="_empty_coverage_result() reports no applicability flag, so an empty "
+               "scope is indistinguishable from a scope that was fully covered",
     )
-    def test_an_empty_scan_is_not_reported_as_pass(self):
+    def test_an_empty_scan_is_flagged_as_not_applicable(self):
+        """``status`` stays PASS -- nothing failed -- but that is not the whole answer.
+
+        The check ran and found nothing to cover, so PASS is honest. What the
+        report cannot currently say is that there was nothing to assess in the
+        first place. Field name is provisional pending discussion.
+        """
         with TemporaryDirectory() as directory:
             ctx = _context(Path(directory), codebase=[])
 
             _, report = _run_spec_coverage(ctx)
 
-        assert report["status"] != "PASS"
+        assert report["status"] == "PASS"
+        assert report.get("applicable") is False
 
     @pytest.mark.xfail(
         strict=True,
