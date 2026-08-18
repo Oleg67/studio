@@ -64,6 +64,42 @@ def _context(project_root: Path, codebase: list[CodebaseEntry] | None = None) ->
     return ctx
 
 
+def _nested_context(project_root: Path, child_codebase: list[CodebaseEntry]) -> MagicMock:
+    """Build a context where a *child* system holds the only codebase entry.
+
+    File collection recurses into children, so a parent match scans its
+    descendants' entries too. Anything that reports the registered-entry count
+    has to walk the same subtree or it contradicts the scan it describes.
+    """
+    child = SystemNode(
+        name="sub1",
+        slug="sub1",
+        kit="test",
+        artifacts=[],
+        codebase=child_codebase,
+        children=[],
+    )
+    meta = ArtifactsMeta(
+        version=1,
+        project_root=".",
+        kits={"test": Kit("test", "CFS", "kits/test")},
+        systems=[
+            SystemNode(
+                name="sys1",
+                slug="sys1",
+                kit="test",
+                artifacts=[],
+                codebase=[],
+                children=[child],
+            ),
+        ],
+    )
+    ctx = MagicMock()
+    ctx.meta = meta
+    ctx.project_root = project_root
+    return ctx
+
+
 def _run_spec_coverage(ctx: MagicMock, argv: list[str] | None = None) -> tuple[int, dict]:
     """Run spec-coverage against ``ctx`` and return (exit code, parsed report)."""
     with patch("studio.utils.context.get_context", return_value=ctx):
@@ -237,3 +273,34 @@ class TestEmptyScopeIsVisibleAndGuaranteesAreHonoured:
             )
 
         assert unregistered != resolved_to_nothing
+
+    def test_a_child_systems_entry_counts_towards_the_denominator(self):
+        """The count must cover the subtree the scan itself walks.
+
+        ``_collect_codebase_files`` recurses into a matched node's children, so
+        a parent match scans its descendants' entries. A count that stops at
+        the matched node calls a repository unregistered when it registered
+        something and got zero files back -- reintroducing, one level down, the
+        exact confusion this change removes.
+        """
+        with TemporaryDirectory() as directory:
+            ctx = _nested_context(
+                Path(directory), [CodebaseEntry(path="does/not/exist", extensions=[".py"])]
+            )
+
+            _, report = _run_spec_coverage(ctx)
+
+        assert report["message"] == (
+            "No code files found: 1 registered codebase entry resolved to 0 files"
+        )
+
+    def test_selecting_the_parent_counts_the_childs_entry(self):
+        """Same rule under an explicit ``--system`` selector on the parent."""
+        with TemporaryDirectory() as directory:
+            ctx = _nested_context(
+                Path(directory), [CodebaseEntry(path="does/not/exist", extensions=[".py"])]
+            )
+
+            _, report = _run_spec_coverage(ctx, ["--system", "sys1"])
+
+        assert "1 registered codebase entry" in report["message"]

@@ -190,10 +190,17 @@ def _count_selected_codebase_entries(meta, system_slugs: set[str] | None) -> int
     # @cpt-begin:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
     total = 0
 
+    def count_subtree(node: object) -> int:
+        """Entries registered by ``node`` and every descendant of it."""
+        return len(getattr(node, "codebase", None) or []) + sum(
+            count_subtree(child) for child in getattr(node, "children", [])
+        )
+
     def visit(node: object) -> None:
+        """Add the subtree of ``node`` once it is in scope, mirroring file collection."""
         nonlocal total
         if system_slugs is None or getattr(node, "slug", "") in system_slugs:
-            total += len(getattr(node, "codebase", None) or [])
+            total += count_subtree(node)
             return
         for child in getattr(node, "children", []):
             visit(child)
