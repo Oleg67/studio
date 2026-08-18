@@ -181,18 +181,80 @@ def _filter_ignored_files(code_files_to_scan: List[Path], project_root: Path, me
     # @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-filter-ignored-files
 
 
-def _empty_coverage_result() -> dict:
+def _count_selected_codebase_entries(meta, system_slugs: set[str] | None) -> int:
+    """Count codebase entries registered by the selected systems.
+
+    Distinguishes "nothing is registered" from "what is registered resolves to
+    no files" -- two different mistakes that otherwise produce identical output.
+    """
+    # @cpt-begin:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
+    total = 0
+
+    def visit(node: object) -> None:
+        nonlocal total
+        if system_slugs is None or getattr(node, "slug", "") in system_slugs:
+            total += len(getattr(node, "codebase", None) or [])
+            return
+        for child in getattr(node, "children", []):
+            visit(child)
+
+    for system_node in meta.systems:
+        visit(system_node)
+    return total
+    # @cpt-end:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
+
+
+def _requested_thresholds(args) -> List[str]:
+    """Names of the thresholds the caller asked to be enforced."""
+    # @cpt-begin:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
+    requested = []
+    for flag, attr in (
+        ("--min-coverage", "min_coverage"),
+        ("--min-file-coverage", "min_file_coverage"),
+        ("--min-granularity", "min_granularity"),
+        ("--min-file-granularity", "min_file_granularity"),
+    ):
+        if getattr(args, attr, None) is not None:
+            requested.append(flag)
+    return requested
+    # @cpt-end:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
+
+
+def _empty_coverage_result(registered_entries: int = 0, requested_thresholds=None) -> dict:
+    """Report for a scan that completed with nothing in scope.
+
+    The check ran and found nothing to cover, so nothing failed -- unless the
+    caller demanded a guarantee, which cannot be given over an empty scope.
+    Either way ``applicable`` records that there was nothing to assess, so an
+    empty result is no longer indistinguishable from a fully covered one.
+    """
     # @cpt-begin:cpt-studio-flow-spec-coverage-report:p1:inst-empty-report
-    return {
-        "status": "PASS",
+    requested_thresholds = requested_thresholds or []
+    if registered_entries:
+        message = (
+            f"No code files found: {registered_entries} registered codebase "
+            f"{'entry' if registered_entries == 1 else 'entries'} resolved to 0 files"
+        )
+    else:
+        message = "No codebase entries are registered, so no code files were scanned"
+    result = {
+        "status": "FAIL" if requested_thresholds else "PASS",
+        "applicable": False,
         "summary": {
             "total_files": 0,
             "covered_files": 0,
             "coverage_pct": 0.0,
             "granularity_score": 0.0,
         },
-        "message": "No codebase files found in registry",
+        "message": message,
     }
+    if requested_thresholds:
+        result["threshold_failures"] = [
+            f"cannot assess {flag}: 0 files from {registered_entries} registered "
+            f"codebase {'entry' if registered_entries == 1 else 'entries'}"
+            for flag in requested_thresholds
+        ]
+    return result
     # @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-empty-report
 
 
@@ -317,7 +379,11 @@ def _generate_spec_coverage_report(args, meta, project_root: Path) -> tuple[dict
     )
     # @cpt-begin:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
     if not filtered_files:
-        return _empty_coverage_result(), 0
+        requested = _requested_thresholds(args)
+        empty = _empty_coverage_result(
+            _count_selected_codebase_entries(meta, system_slugs), requested
+        )
+        return empty, 2 if requested else 0
     # @cpt-end:cpt-studio-state-spec-coverage-report:p1:inst-state-uncovered
     file_coverages = _scan_file_coverages(filtered_files)
     report = calculate_metrics(file_coverages)
