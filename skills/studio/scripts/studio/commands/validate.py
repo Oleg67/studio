@@ -757,7 +757,7 @@ def _scan_codebase_entry(
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
     scan_targets = list(_resolve_code_scan_targets(session, entry))
     if traceability == "FULL" and not scan_targets:
-        results.empty_full_codebase_entries.append(str(getattr(entry, "path", "")))
+        results.empty_full_codebase_entries.append(_codebase_entry_path(entry))
     for file_path in scan_targets:
         try:
             rel_path = file_path.resolve().relative_to(session.project_root).as_posix()
@@ -794,6 +794,15 @@ def _scan_codebase_entry(
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
 
 
+def _codebase_entry_path(entry: object) -> str:
+    """Configured path of a codebase entry, which may be a record or a raw dict."""
+    # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
+    if isinstance(entry, dict):
+        return str(entry.get("path", ""))
+    return str(getattr(entry, "path", ""))
+    # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
+
+
 def _resolve_code_scan_targets(session: _ValidateSession, entry: object) -> List[Path]:
     """Resolve concrete files for one codebase entry."""
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
@@ -801,8 +810,7 @@ def _resolve_code_scan_targets(session: _ValidateSession, entry: object) -> List
     if src_name and session.ws_ctx is not None:
         code_path = session.ws_ctx.resolve_artifact_path(entry, session.project_root)
     else:
-        entry_path = getattr(entry, "path", "") if not isinstance(entry, dict) else entry.get("path", "")
-        code_path = (session.project_root / entry_path).resolve()
+        code_path = (session.project_root / _codebase_entry_path(entry)).resolve()
     if code_path is None or not code_path.exists():
         return []
     if code_path.is_file():

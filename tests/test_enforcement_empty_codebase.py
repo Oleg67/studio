@@ -34,6 +34,7 @@ from _test_helpers import run_cli_in_project, write_constraints_toml
 CLAIMED_ID = "cpt-test-flow-login"
 # `algo` is not configured to_code, so this ID declares work without claiming code.
 UNCLAIMED_ID = "cpt-test-algo-bucket"
+INSTRUCTIONS = ("bucket-put", "bucket-get")
 
 
 def _project(
@@ -42,16 +43,18 @@ def _project(
     claim_id: bool,
     code: dict[str, str] | None = None,
     codebase_path: str | None = "src",
-    declare_instructions: bool = False,
+    instructions_under: str | None = None,
 ) -> None:
     """Build a project with a FULL artifact and a registered codebase entry.
 
     ``claim_id`` controls whether the artifact checks a ``to_code = true`` ID --
     that is, whether anything is being claimed. ``code`` maps relative paths to
     file contents; omitting it leaves the registered tree empty, which is the
-    state under test. ``declare_instructions`` adds checked CDSL steps under an
-    ID that is *not* ``to_code``, which is what an over-broad fix would turn
-    into a wall of missing-instruction errors.
+    state under test. ``instructions_under`` attaches two checked CDSL steps to
+    the given ID: under ``UNCLAIMED_ID`` they are declared work with no code
+    claim, which an over-broad fix would turn into a wall of missing-instruction
+    errors; under ``CLAIMED_ID`` they are instructions of a claim that must
+    resolve to code blocks.
     """
     from studio.utils import toml_utils
 
@@ -73,12 +76,19 @@ def _project(
     art_dir.mkdir(parents=True)
     checkbox = "x" if claim_id else " "
     content = f"- [{checkbox}] **ID**: `{CLAIMED_ID}`\n"
-    if declare_instructions:
+    if instructions_under == CLAIMED_ID:
+        # Steps bind to the most recent ID above them, so they attach to the claim.
+        content += (
+            "\n**Steps**:\n"
+            f"- [x] - `p1` - Put the thing in the bucket - `inst-{INSTRUCTIONS[0]}`\n"
+            f"- [x] - `p1` - Read the thing back out - `inst-{INSTRUCTIONS[1]}`\n"
+        )
+    elif instructions_under == UNCLAIMED_ID:
         content += (
             f"\n- [x] **ID**: `{UNCLAIMED_ID}`\n"
             "\n**Steps**:\n"
-            "- [x] - `p1` - Put the thing in the bucket - `inst-bucket-put`\n"
-            "- [x] - `p1` - Read the thing back out - `inst-bucket-get`\n"
+            f"- [x] - `p1` - Put the thing in the bucket - `inst-{INSTRUCTIONS[0]}`\n"
+            f"- [x] - `p1` - Read the thing back out - `inst-{INSTRUCTIONS[1]}`\n"
         )
     (art_dir / "PRD.md").write_text(content, encoding="utf-8")
 
@@ -159,6 +169,31 @@ class TestAClaimWithNoCodeIsNotClean:
         assert len(unmet) == 1
         assert unmet[0].get("id") == CLAIMED_ID
 
+    def test_every_instruction_of_the_claim_is_also_reported_missing(self):
+        """A claim's instructions must resolve too, not just its ID.
+
+        Both checks are needed to describe the state honestly: `code-no-marker`
+        says the ID has no marker anywhere, and one `code-inst-missing` per
+        declared step says which pieces of the claim have no code block. A fix
+        that reached only the first would report an unbacked claim without
+        saying how much of it was unbacked.
+        """
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _project(root, claim_id=True, instructions_under=CLAIMED_ID)
+
+            code, report = run_cli_in_project(root, ["--json", "validate", "--verbose"])
+
+        assert code == 2
+        codes = _codes(report, "errors")
+        assert codes.count("code-no-marker") == 1
+        assert codes.count("code-inst-missing") == len(INSTRUCTIONS)
+        missing = {
+            str(issue.get("inst")) for issue in report["errors"]
+            if issue.get("code") == "code-inst-missing"
+        }
+        assert missing == set(INSTRUCTIONS)
+
     def test_the_scan_size_does_not_change_the_verdict(self):
         """0 files and 1 unmarked file are the same claim, so the same verdict.
 
@@ -204,6 +239,24 @@ class TestAnEmptyRegisteredTreeSaysSo:
         ]
         assert len(empty) == 1
         assert "does/not/exist" in str(empty[0].get("message"))
+
+    def test_a_raw_dict_entry_is_named_the_same_way(self):
+        """Entries reach this code as records or as raw dicts; both must be named.
+
+        `_resolve_code_scan_targets` reads either shape, so a warning built with
+        attribute access only would report `<unset>` for exactly the entry a
+        user needs to find.
+        """
+        from studio.commands.validate import _build_empty_codebase_entry_warnings
+        from studio.commands import validate as validate_mod
+
+        assert validate_mod._codebase_entry_path({"path": "does/not/exist"}) == "does/not/exist"
+
+        warnings = _build_empty_codebase_entry_warnings(["does/not/exist"])
+
+        assert len(warnings) == 1
+        assert "does/not/exist" in str(warnings[0]["message"])
+        assert warnings[0]["code"] == "codebase-entry-empty"
 
     def test_a_populated_entry_produces_no_such_warning(self):
         with TemporaryDirectory() as tmpdir:
@@ -258,7 +311,7 @@ class TestNothingClaimedIsNothingOwed:
         """
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            _project(root, claim_id=False, codebase_path=None, declare_instructions=True)
+            _project(root, claim_id=False, codebase_path=None, instructions_under=UNCLAIMED_ID)
 
             code, report = run_cli_in_project(root, ["--json", "validate", "--verbose"])
 
