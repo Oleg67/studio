@@ -41,26 +41,29 @@ def _build_spec_coverage_parser() -> argparse.ArgumentParser:
         "--min-coverage",
         type=float,
         default=None,
-        help="Minimum coverage percentage (0-100). Exit 2 if below, or if nothing was assessed.",
+        help="Minimum coverage percentage (0-100). Exit 2 if below; a positive value also "
+             "exits 2 if nothing was assessed.",
     )
     parser.add_argument(
         "--min-file-coverage",
         type=float,
         default=None,
-        help="Minimum per-file coverage percentage (0-100). Exit 2 if any file is below, or if nothing was assessed.",
+        help="Minimum per-file coverage percentage (0-100). Exit 2 if any file is below; "
+             "a positive value also exits 2 if nothing was assessed.",
     )
     parser.add_argument(
         "--min-granularity",
         type=float,
         default=None,
-        help="Minimum granularity score (0-1). Exit 2 if below, or if nothing was assessed.",
+        help="Minimum granularity score (0-1). Exit 2 if below; a positive value also "
+             "exits 2 if nothing was assessed.",
     )
     parser.add_argument(
         "--min-file-granularity",
         type=float,
         default=None,
-        help="Minimum per-file granularity score (0-1). Exit 2 if any covered file is below, "
-             "or if nothing was assessed.",
+        help="Minimum per-file granularity score (0-1). Exit 2 if any covered file is below; "
+             "a positive value also exits 2 if nothing was assessed.",
     )
     parser.add_argument(
         "--system",
