@@ -520,6 +520,13 @@ def _human_spec_coverage(data: dict) -> None:
         ui.blank()
         return
 
+    # Say up front when nothing was assessed, so the zeroes below are read as the
+    # denominator they are and not as a measured result.
+    applicable = data.get("applicable", True)
+    if applicable is False:
+        ui.warn(data.get("message", "Nothing was assessed"))
+        ui.blank()
+
     summary = data.get("summary", {})
     ui.detail("Files", f"{summary.get('covered_files', 0)}/{summary.get('total_files', 0)} covered")
     ui.detail("Coverage", f"{summary.get('coverage_pct', 0):.1f}%")
@@ -530,11 +537,6 @@ def _human_spec_coverage(data: dict) -> None:
     if files and isinstance(files, dict):
         ui.blank()
         _show_spec_coverage_files(files)
-
-    applicable = data.get("applicable", True)
-    if applicable is False:
-        ui.blank()
-        ui.warn(data.get("message", "Nothing was assessed"))
 
     failures = data.get("threshold_failures", [])
     _show_spec_coverage_status(status, failures, assessed=applicable is not False)

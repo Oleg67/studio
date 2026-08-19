@@ -585,6 +585,32 @@ class TestHumanSpecCoverage(_HumanModeBase):
         self.assertNotIn("thresholds met", out)
         self.assertIn("No codebase entries are registered", out)
 
+    def test_the_disclaimer_precedes_the_zero_metrics(self):
+        """Order matters: the zeroes must be framed before they are read.
+
+        "Coverage: 0.0%" on its own line reads like a measured result. Printed
+        after the note that nothing was scanned, it reads as the denominator it
+        actually is. The metrics are kept rather than suppressed because a
+        verdict should still state what it measured -- 0 of 0 files is a
+        materially different statement from 63 of 261 lines.
+        """
+        out = self._render({
+            "status": "PASS",
+            "applicable": False,
+            "summary": {"covered_files": 0, "total_files": 0,
+                        "coverage_pct": 0.0, "granularity_score": 0.0},
+            "message": "No codebase entries are registered, so no code files were scanned",
+        })
+
+        # Anchor on the metric values, not the labels: the "Spec Coverage"
+        # header contains the word "Coverage" and would match ahead of both.
+        assert "No codebase entries are registered" in out
+        assert "0/0 covered" in out
+        self.assertLess(
+            out.index("No codebase entries are registered"),
+            min(out.index("0/0 covered"), out.index("0.0%"), out.index("0.0000")),
+        )
+
     def test_an_unassessable_scope_with_a_demanded_threshold_still_reads_as_failed(self):
         out = self._render({
             "status": "FAIL",
