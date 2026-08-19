@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scr
 from studio.commands.spec_coverage import cmd_spec_coverage
 from studio.utils.artifacts_meta import ArtifactsMeta, CodebaseEntry, Kit, SystemNode
 from studio.utils.codebase import CodeFile, cross_validate_code
+from studio.utils.ui import set_json_mode
 
 TO_CODE_IDS = {
     "cpt-flags-flow-evaluate",
@@ -250,13 +251,52 @@ class TestEmptyScopeIsVisibleAndGuaranteesAreHonoured:
         assert report.get("applicable") is False
 
     def test_requested_thresholds_cannot_be_satisfied_by_an_empty_scan(self):
-        """0.0% against a required 90 is the maximum possible miss, not a pass."""
-        with TemporaryDirectory() as directory:
-            ctx = _context(Path(directory), codebase=[])
+        """0.0% against a required 90 is the maximum possible miss, not a pass.
 
-            code, _ = _run_spec_coverage(ctx, ["--min-coverage", "90"])
+        All four flags are exercised, and the failure text is asserted rather
+        than just the exit code -- a per-flag regression in the message would
+        otherwise pass unnoticed.
+        """
+        for flag, value in (
+            ("--min-coverage", "90"),
+            ("--min-file-coverage", "60"),
+            ("--min-granularity", "0.46"),
+            ("--min-file-granularity", "0.3"),
+        ):
+            with TemporaryDirectory() as directory:
+                ctx = _context(Path(directory), codebase=[])
 
-        assert code != 0
+                code, report = _run_spec_coverage(ctx, [flag, value])
+
+            assert code == 2, flag
+            assert report["status"] == "FAIL", flag
+            assert report["applicable"] is False, flag
+            assert report["threshold_failures"] == [
+                f"cannot assess {flag}: 0 files from 0 registered codebase entries"
+            ], flag
+
+    def test_a_threshold_no_scope_can_miss_is_not_a_demanded_guarantee(self):
+        """A non-positive floor is met by any scope, so it must not fail one.
+
+        A populated repository sitting at 0.0% coverage passes
+        ``--min-coverage 0``; an empty one has to agree, or the flag means two
+        different things depending on what happens to be registered.
+        """
+        for flag in (
+            "--min-coverage",
+            "--min-file-coverage",
+            "--min-granularity",
+            "--min-file-granularity",
+        ):
+            for value in ("0", "-5"):
+                with TemporaryDirectory() as directory:
+                    ctx = _context(Path(directory), codebase=[])
+
+                    code, report = _run_spec_coverage(ctx, [flag, value])
+
+                assert code == 0, (flag, value)
+                assert report["status"] == "PASS", (flag, value)
+                assert "threshold_failures" not in report, (flag, value)
 
     def test_unregistered_and_resolved_to_nothing_are_distinguishable(self):
         """Two different setup mistakes must not produce the same report.
@@ -304,3 +344,59 @@ class TestEmptyScopeIsVisibleAndGuaranteesAreHonoured:
             _, report = _run_spec_coverage(ctx, ["--system", "sys1"])
 
         assert "1 registered codebase entry" in report["message"]
+
+
+class TestTheHumanSurfaceSaysTheSameThing:
+    """The report is only honest if the default output surface says so too.
+
+    The suite runs in JSON mode by default (``conftest.py``), so without an
+    explicit opt-out every assertion above could hold while a developer running
+    ``cfs spec-coverage`` still read ``All thresholds met`` off an empty scope.
+    """
+
+    @staticmethod
+    def _run_human(ctx, argv=None) -> tuple[int, str]:
+        set_json_mode(False)
+        try:
+            with patch("studio.utils.context.get_context", return_value=ctx):
+                with patch("sys.stdout", new_callable=StringIO) as out:
+                    code = cmd_spec_coverage(argv or [])
+            return code, out.getvalue()
+        finally:
+            set_json_mode(True)
+
+    def test_an_empty_scope_is_not_reported_as_all_thresholds_met(self):
+        with TemporaryDirectory() as directory:
+            code, out = self._run_human(_context(Path(directory), codebase=[]))
+
+        assert code == 0
+        assert "thresholds met" not in out
+        assert "No codebase entries are registered" in out
+
+    def test_the_two_empty_states_differ_on_the_human_surface_too(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, unregistered = self._run_human(_context(root, codebase=[]))
+            _, resolved_to_nothing = self._run_human(
+                _context(root, [CodebaseEntry(path="does/not/exist", extensions=[".py"])])
+            )
+
+        assert unregistered != resolved_to_nothing
+        assert "resolved to 0 files" in resolved_to_nothing
+
+    def test_a_populated_scope_still_reports_its_verdict(self):
+        """Regression pin: the ordinary run must be untouched by all of this."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            src = root / "src"
+            src.mkdir()
+            (src / "main.py").write_text(
+                "# @cpt-algo:cpt-flags-algo-core-bucket:p1\nx = 1\n", encoding="utf-8"
+            )
+
+            code, out = self._run_human(
+                _context(root, [CodebaseEntry(path="src", extensions=[".py"])])
+            )
+
+        assert code == 0
+        assert "All thresholds met." in out
