@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from ..utils import decision_log
 from ..utils import error_codes as EC
-from ..utils.codebase import CodeFile, cross_validate_code
+from ..utils.codebase import CodeFile, cross_validate_code, error as code_issue
 from ..utils.constraints import (
     ArtifactRecord,
     cross_validate_artifacts,
@@ -57,6 +57,7 @@ class _ValidateResults:
     parsed_code_files_full: List[CodeFile] = field(default_factory=list)
     code_ids_found: Set[str] = field(default_factory=set)
     to_code_ids: Set[str] = field(default_factory=set)
+    empty_full_codebase_entries: List[str] = field(default_factory=list)
 
 # @cpt-begin:cpt-studio-algo-workspace-determine-target:p1:inst-validate-source-flag
 def _resolve_source_context(source_name: str, ws_ctx: Optional["WorkspaceContext"]) -> Optional["StudioContext"]:
@@ -754,7 +755,10 @@ def _scan_codebase_entry(
 ) -> None:
     """Scan one configured codebase entry and collect code traceability state."""
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
-    for file_path in _resolve_code_scan_targets(session, entry):
+    scan_targets = list(_resolve_code_scan_targets(session, entry))
+    if traceability == "FULL" and not scan_targets:
+        results.empty_full_codebase_entries.append(str(getattr(entry, "path", "")))
+    for file_path in scan_targets:
         try:
             rel_path = file_path.resolve().relative_to(session.project_root).as_posix()
         except ValueError as exc:
@@ -840,6 +844,28 @@ def _scan_system_codebase(
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
 
 
+def _build_empty_codebase_entry_warnings(entry_paths: List[str]) -> List[Dict[str, object]]:
+    """Warn for each FULL codebase entry that is registered but resolves to no files.
+
+    A registered entry matching nothing is a configuration mistake -- usually a
+    stale or misspelled path -- and it silently shrinks what the run was able to
+    check. It is reported separately from any unmet ID, because the subject is
+    the registration rather than the claim.
+    """
+    # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-warn-empty-codebase-entry
+    return [
+        code_issue(
+            "structure",
+            f"codebase entry `{path or '<unset>'}` is registered with FULL traceability "
+            "but resolved to 0 files — nothing from it was checked",
+            code=EC.CODEBASE_ENTRY_EMPTY,
+            path=Path(path or "."),
+        )
+        for path in entry_paths
+    ]
+    # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-warn-empty-codebase-entry
+
+
 def _run_code_validation(
     session: _ValidateSession,
     results: _ValidateResults,
@@ -871,7 +897,12 @@ def _run_code_validation(
             results=results,
             strict_code_validation=strict_code_validation,
         )
-    if not strict_code_validation or not results.parsed_code_files_full:
+    if not strict_code_validation:
+        return
+    results.all_warnings.extend(
+        _build_empty_codebase_entry_warnings(results.empty_full_codebase_entries)
+    )
+    if not results.parsed_code_files_full and not results.to_code_ids:
         return
     artifact_instances, artifact_instances_all = _collect_full_artifact_instances(
         all_artifacts_for_cross,
