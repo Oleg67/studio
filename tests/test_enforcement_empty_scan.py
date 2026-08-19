@@ -275,6 +275,32 @@ class TestEmptyScopeIsVisibleAndGuaranteesAreHonoured:
                 f"cannot assess {flag}: 0 files from 0 registered codebase entries"
             ], flag
 
+    def test_every_demanded_threshold_is_reported_not_just_the_first(self):
+        """One invocation demanding all four must answer for all four.
+
+        The per-flag cases above would all still pass if the report emitted a
+        single entry and dropped the rest, so this pins one failure per
+        requested flag against a short-circuit or overwrite.
+        """
+        flags = [
+            "--min-coverage", "90",
+            "--min-file-coverage", "60",
+            "--min-granularity", "0.46",
+            "--min-file-granularity", "0.3",
+        ]
+        with TemporaryDirectory() as directory:
+            ctx = _context(Path(directory), codebase=[])
+
+            code, report = _run_spec_coverage(ctx, flags)
+
+        assert code == 2
+        assert report["status"] == "FAIL"
+        assert report["applicable"] is False
+        assert report["threshold_failures"] == [
+            f"cannot assess {flag}: 0 files from 0 registered codebase entries"
+            for flag in flags[::2]
+        ]
+
     def test_a_threshold_no_scope_can_miss_is_not_a_demanded_guarantee(self):
         """A non-positive floor is met by any scope, so it must not fail one.
 
