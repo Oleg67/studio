@@ -126,6 +126,91 @@ def _project(
     )
 
 
+def _run_human(root: Path, args: list[str]) -> tuple[int, str, str]:
+    """Run the CLI in *root* with JSON mode off, returning (exit, stdout, stderr)."""
+    import io
+    import os
+    from contextlib import redirect_stderr, redirect_stdout
+
+    from studio.cli import main
+    from studio.utils.ui import is_json_mode, set_json_mode
+
+    cwd = os.getcwd()
+    saved = is_json_mode()
+    out, err = io.StringIO(), io.StringIO()
+    try:
+        set_json_mode(False)
+        os.chdir(str(root))
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(args)
+        return code, out.getvalue(), err.getvalue()
+    finally:
+        set_json_mode(saved)
+        os.chdir(cwd)
+
+
+def _nested_project(root: Path, *, marker_in_child: bool) -> None:
+    """Parent owns the FULL artifact and the claim; a child owns the codebase.
+
+    A supported layout: the claim is declared once at the top and the code that
+    backs it lives in a subsystem with no artifact of its own.
+    """
+    from studio.utils import toml_utils
+
+    (root / "kits" / "sdlc").mkdir(parents=True)
+    write_constraints_toml(
+        root / "kits" / "sdlc",
+        {"PRD": {"identifiers": {"flow": {"to_code": True}}}},
+    )
+    (root / "architecture").mkdir(parents=True)
+    (root / "architecture" / "PRD.md").write_text(
+        f"- [x] **ID**: `{CLAIMED_ID}`\n", encoding="utf-8"
+    )
+    child_src = root / "src" / "child"
+    child_src.mkdir(parents=True)
+    body = (
+        f"# @cpt-flow:{CLAIMED_ID}:p1\ndef f():\n    return 1\n"
+        if marker_in_child
+        else "def f():\n    return 1\n"
+    )
+    (child_src / "impl.py").write_text(body, encoding="utf-8")
+
+    (root / ".git").mkdir(exist_ok=True)
+    (root / "AGENTS.md").write_text(
+        '<!-- @cf:root-agents -->\n```toml\ncf-studio-path = "adapter"\n```\n',
+        encoding="utf-8",
+    )
+    config = root / "adapter" / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "AGENTS.md").write_text("# Test adapter\n", encoding="utf-8")
+    toml_utils.dump(
+        {
+            "version": "1.0",
+            "project_root": "..",
+            "kits": {"cypilot": {"format": "CFS", "path": "kits/sdlc"}},
+            "systems": [
+                {
+                    "name": "Parent",
+                    "slug": "test",
+                    "kit": "cypilot",
+                    "artifacts": [
+                        {"path": "architecture/PRD.md", "kind": "PRD", "traceability": "FULL"}
+                    ],
+                    "children": [
+                        {
+                            "name": "Child",
+                            "slug": "child",
+                            "kit": "cypilot",
+                            "codebase": [{"path": "src/child", "extensions": [".py"]}],
+                        }
+                    ],
+                }
+            ],
+        },
+        config / "artifacts.toml",
+    )
+
+
 def _codes(report: dict, bucket: str) -> list[str]:
     """Issue codes from a report bucket. Requires ``--verbose`` to be populated."""
     assert bucket in report, f"report has no `{bucket}` array — pass --verbose"
@@ -240,6 +325,64 @@ class TestAnEmptyRegisteredTreeSaysSo:
         assert len(empty) == 1
         assert "does/not/exist" in str(empty[0].get("message"))
 
+    def test_a_passing_run_names_the_entry_without_verbose(self):
+        """The default report must say what it did not check.
+
+        A non-verbose report omits warning bodies and prints only a count, so
+        the warning alone left a green run silent about the entry it skipped --
+        which is the whole point of reporting it. The entry is therefore named
+        in the report itself, not only in the warning list.
+        """
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _project(root, claim_id=False, codebase_path="does/not/exist")
+
+            code, report = run_cli_in_project(root, ["--json", "validate"])
+
+        assert code == 0
+        assert report["status"] == "PASS"
+        assert report["unscanned_codebase_entries"] == ["does/not/exist"]
+
+    def test_the_human_surface_names_it_too(self):
+        """Same requirement on the surface a developer sees by default."""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _project(root, claim_id=False, codebase_path="does/not/exist")
+
+            code, out, _ = _run_human(root, ["validate"])
+
+        assert code == 0
+        assert "does/not/exist" in out
+        assert "resolved to 0 files" in out
+
+    def test_a_workspace_entry_names_its_source(self):
+        """Two entries can share a path; only the source tells them apart.
+
+        It also tells the reader which thing to fix -- an unreachable source is
+        a different problem from a wrong path.
+        """
+        from studio.commands.validate import _build_empty_codebase_entry_warnings
+
+        warnings = _build_empty_codebase_entry_warnings(
+            [{"path": "src", "source": "ghost"}]
+        )
+
+        assert len(warnings) == 1
+        message = str(warnings[0]["message"])
+        assert "ghost:src" in message
+        assert "workspace source `ghost` did not resolve" in message
+        assert warnings[0]["source"] == "ghost"
+
+    def test_a_local_entry_says_what_to_check_instead(self):
+        from studio.commands.validate import _build_empty_codebase_entry_warnings
+
+        warnings = _build_empty_codebase_entry_warnings([{"path": "src", "source": ""}])
+
+        message = str(warnings[0]["message"])
+        assert "`src`" in message
+        assert "workspace source" not in message
+        assert "configured extensions" in message
+
     def test_a_raw_dict_entry_is_named_the_same_way(self):
         """Entries reach this code as records or as raw dicts; both must be named.
 
@@ -252,7 +395,9 @@ class TestAnEmptyRegisteredTreeSaysSo:
 
         assert validate_mod._codebase_entry_path({"path": "does/not/exist"}) == "does/not/exist"
 
-        warnings = _build_empty_codebase_entry_warnings(["does/not/exist"])
+        warnings = _build_empty_codebase_entry_warnings(
+            [{"path": "does/not/exist", "source": ""}]
+        )
 
         assert len(warnings) == 1
         assert "does/not/exist" in str(warnings[0]["message"])
@@ -346,6 +491,57 @@ class TestNothingClaimedIsNothingOwed:
         assert code == 0
         assert report["status"] == "PASS"
         assert "code-no-marker" not in _codes(report, "errors")
+
+
+class TestANestedClaimIsBackedByItsChildsCode:
+    """FULL traceability is inherited, so a child's markers still count.
+
+    Without inheritance a child system with no artifact of its own was scanned
+    as DOCS-ONLY, so its files never entered the FULL set. Reaching the checks
+    at zero FULL files then turned a correctly marked implementation into a
+    missing-marker error -- a false positive on a supported layout, and the one
+    case the flat registry of this repository cannot exhibit.
+    """
+
+    def test_a_marker_in_a_child_system_satisfies_the_parents_claim(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _nested_project(root, marker_in_child=True)
+
+            code, report = run_cli_in_project(root, ["--json", "validate", "--verbose"])
+
+        assert code == 0, report.get("errors")
+        assert report["status"] == "PASS"
+        assert "code-no-marker" not in _codes(report, "errors")
+
+    def test_an_unmarked_child_system_still_fails_the_parents_claim(self):
+        """The inheritance must not become a way to escape the check."""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _nested_project(root, marker_in_child=False)
+
+            code, report = run_cli_in_project(root, ["--json", "validate", "--verbose"])
+
+        assert code == 2
+        assert "code-no-marker" in _codes(report, "errors")
+
+    def test_an_empty_child_entry_is_reported_under_the_parents_claim(self):
+        """An empty descendant registration is visible for the same reason."""
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _nested_project(root, marker_in_child=True)
+            # Point the child's entry at nothing, leaving the parent's claim in place.
+            config = root / "adapter" / "config" / "artifacts.toml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace("src/child", "src/gone"),
+                encoding="utf-8",
+            )
+
+            code, report = run_cli_in_project(root, ["--json", "validate", "--verbose"])
+
+        assert report["unscanned_codebase_entries"] == ["src/gone"]
+        assert code == 2  # the claim is now unbacked
+        assert "code-no-marker" in _codes(report, "errors")
 
 
 class TestTheVerdictIsDeterministic:
