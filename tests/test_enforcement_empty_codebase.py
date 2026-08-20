@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scr
 sys.path.insert(0, str(Path(__file__).parent))
 
 from _test_helpers import run_cli_in_project, write_constraints_toml
+from studio.commands.validate import _ValidateResults
 
 CLAIMED_ID = "cpt-test-flow-login"
 # `algo` is not configured to_code, so this ID declares work without claiming code.
@@ -382,6 +383,44 @@ class TestAnEmptyRegisteredTreeSaysSo:
         assert "`src`" in message
         assert "workspace source" not in message
         assert "configured extensions" in message
+
+    def test_a_dict_entry_naming_a_source_does_not_fall_back_to_the_local_path(self):
+        """A mapping's `source` must survive, or the wrong tree gets validated.
+
+        Both `_resolve_code_scan_targets` and `resolve_artifact_path` read
+        `source` by attribute, so an unnormalised mapping took the local-path
+        branch: with a local directory of the same name present, an unavailable
+        workspace source would quietly validate local code and emit no
+        empty-entry warning at all.
+        """
+        from unittest.mock import MagicMock
+
+        from studio.commands.validate import _scan_codebase_entry
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            local = root / "src"
+            local.mkdir()
+            (local / "decoy.py").write_text("x = 1\n", encoding="utf-8")
+
+            session = MagicMock()
+            session.project_root = root
+            session.meta.is_ignored.return_value = False
+            # The named source is unavailable, so it resolves to nothing.
+            session.ws_ctx.resolve_artifact_path.return_value = None
+            results = _ValidateResults()
+
+            _scan_codebase_entry(
+                entry={"source": "ghost", "path": "src", "extensions": [".py"]},
+                traceability="FULL",
+                session=session,
+                results=results,
+                strict_code_validation=True,
+            )
+
+        assert results.parsed_code_files_full == []
+        assert results.empty_full_codebase_entries == [{"path": "src", "source": "ghost"}]
+        session.ws_ctx.resolve_artifact_path.assert_called_once()
 
     def test_a_raw_dict_entry_is_named_the_same_way(self):
         """Entries reach this code as records or as raw dicts; both must be named.

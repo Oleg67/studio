@@ -755,13 +755,21 @@ def _scan_codebase_entry(
 ) -> None:
     """Scan one configured codebase entry and collect code traceability state."""
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-code-scan
+    # Normalise before resolving. A raw mapping would otherwise lose its
+    # `source`: both this function and `resolve_artifact_path` read it by
+    # attribute, so a dict naming a workspace source would silently resolve
+    # against the local path instead — and the warning below would then name a
+    # source that was never consulted.
+    if isinstance(entry, dict):
+        from ..utils.artifacts_meta import CodebaseEntry
+
+        entry = CodebaseEntry.from_dict(entry)
+
     scan_targets = list(_resolve_code_scan_targets(session, entry))
     if traceability == "FULL" and not scan_targets:
         results.empty_full_codebase_entries.append({
             "path": _codebase_entry_path(entry),
-            "source": str(
-                entry.get("source") or "" if isinstance(entry, dict) else getattr(entry, "source", "") or ""
-            ),
+            "source": str(getattr(entry, "source", "") or ""),
         })
     for file_path in scan_targets:
         try:
