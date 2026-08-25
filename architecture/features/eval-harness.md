@@ -104,7 +104,7 @@ Loads scenarios and completed-run artifacts, applies scorers, and aggregates the
 under the gate contract (only deterministic verdicts affect the exit code).
 
 **Steps**:
-1. [x] - `p1` - Discover scenarios by globbing `*/scenario.toml` under the root, skipping malformed or escaping descriptors - `inst-load-scenarios`
+1. [x] - `p1` - Discover scenarios by globbing `*/scenario.toml` under the root, skipping malformed, escaping, or duplicate-id descriptors (ids stay unique so calibration identities are unambiguous) - `inst-load-scenarios`
 2. [x] - `p1` - Load a completed run's `plan.toml` and phase files, returning `None` (UNKNOWN) instead of raising on a missing or malformed plan - `inst-load-run`
 3. [x] - `p1` - Load one scenario's run and apply every scorer to it, isolating a raising scorer as UNKNOWN - `inst-run-scenario`
 4. [x] - `p1` - Run every scenario under the root through the scorers and aggregate into a report - `inst-run-suite`

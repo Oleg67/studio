@@ -162,11 +162,13 @@ class ReferencePresenceScorer:  # pylint: disable=too-few-public-methods
 def load_scenarios(root: Path) -> List[Scenario]:
     """Discover scenarios under ``root`` by globbing ``*/scenario.toml``.
 
-    A malformed or id-less descriptor is skipped with a warning, never raised, and a
-    ``run_dir``/gold path that escapes the scenario directory (absolute or ``..``) is
-    rejected — one bad or unsafe scenario must not sink the whole suite.
+    A malformed, id-less, or **duplicate-id** descriptor is skipped with a warning, never
+    raised, and a ``run_dir``/gold path that escapes the scenario directory (absolute or
+    ``..``) is rejected — one bad or unsafe scenario must not sink the whole suite. IDs are
+    kept unique because calibration identities (``covered``/``excluded``/rows) key on them.
     """
     scenarios: List[Scenario] = []
+    seen_ids = set()
     for descriptor in sorted(root.glob("*/scenario.toml")):
         try:
             with open(descriptor, "rb") as handle:
@@ -199,6 +201,13 @@ def load_scenarios(root: Path) -> List[Scenario]:
             else:
                 logger.warning("eval: scenario %s gold path escapes its directory, ignoring: %s",
                                scenario_id, gold_rel)
+        if str(scenario_id) in seen_ids:
+            # A duplicate id would make calibration identities (covered/excluded/rows) ambiguous
+            # and hide duplicate counting — keep the first, skip the rest.
+            logger.warning("eval: duplicate [scenario].id %r, skipping later descriptor: %s",
+                           scenario_id, descriptor)
+            continue
+        seen_ids.add(str(scenario_id))
         scenarios.append(Scenario(
             id=str(scenario_id),
             workflow=str(section.get("workflow", "unknown")),
