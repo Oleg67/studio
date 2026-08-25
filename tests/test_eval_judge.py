@@ -290,12 +290,36 @@ def test_split_ignores_a_rules_heading_inside_a_fenced_block() -> None:
     assert reference_stub_judge(req).verdict == "non_compliant"
 
 
-def test_evidence_enforces_a_bounded_total_with_an_omission_signal() -> None:
-    # Many long phases must not blow the total budget: evidence stays bounded and the omitted
-    # phases are flagged, so the judge never rules on a silently truncated set.
+def test_evidence_enforces_a_hard_total_cap_with_an_omission_signal() -> None:
+    # Many long phases must not blow the total budget: the whole evidence string — headers,
+    # truncation markers, separators and the omission line included — stays within _EVIDENCE_CAP,
+    # and the omitted phases are flagged.
     from studio.utils.eval_judge import _EVIDENCE_CAP  # noqa: PLC0415
     phases = {f"phase-{i:02d}.md": f"## What\n\n{'filler ' * 300}\n" for i in range(30)}
     req = build_judge_request(_run(phase_texts=phases), _scenario())
-    assert len(req.evidence) < _EVIDENCE_CAP * 2           # bounded, not ~30 phases * a 400 floor
+    assert len(req.evidence) <= _EVIDENCE_CAP              # a real hard cap, not ~2x
     assert "omitted to stay within the evidence budget" in req.evidence
-    assert "evidence is incomplete" in req.evidence
+    assert req.evidence_incomplete is True
+
+
+def test_incomplete_evidence_forces_unknown_without_calling_the_model() -> None:
+    # When whole phases are omitted, the verdict must be UNKNOWN regardless of the model — a
+    # compliant answer would certify phases the judge never saw — and the model is not even called.
+    phases = {f"phase-{i:02d}.md": f"## What\n\n{'filler ' * 300}\n" for i in range(30)}
+    calls: list = []
+
+    def always_compliant(_request: JudgeRequest) -> JudgeReply:
+        calls.append(1)
+        return JudgeReply("compliant", "looks fine")
+
+    result = AdvisoryJudge(always_compliant).score(_run(phase_texts=phases), _scenario())
+    assert result.verdict == VERDICT_UNKNOWN
+    assert calls == []                                    # short-circuited: no model call
+
+
+def test_trimmed_but_complete_evidence_is_still_judged() -> None:
+    # A merely trimmed phase (all phases still shown, with a marker) is NOT incomplete — the judge
+    # runs normally, so trimming does not collapse every real run to UNKNOWN.
+    phases = {"phase-1.md": f"## What\n\n{'filler ' * 2000}\n"}   # one long phase, trimmed
+    req = build_judge_request(_run(phase_texts=phases), _scenario())
+    assert "[…truncated]" in req.evidence and req.evidence_incomplete is False

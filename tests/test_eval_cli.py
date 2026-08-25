@@ -363,7 +363,8 @@ def test_human_report_explains_advisory_unknown(capsys, tmp_path: Path) -> None:
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "scorers:" in out and "advisory" in out
+    assert "scorers:" in out
+    assert "advisory" in out
     assert "does not affect the gate" in out
 
 
@@ -377,7 +378,8 @@ def test_human_report_prints_calibration_under_flag(capsys, tmp_path: Path) -> N
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "calibrate" in out and "accuracy" in out
+    assert "calibrate" in out
+    assert "accuracy" in out
 
 
 def test_advisory_count_only_counts_the_unwired_judge() -> None:
@@ -420,7 +422,8 @@ def test_no_note_or_calibration_line_when_absent(capsys) -> None:
     finally:
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
-    assert "advisory UNKNOWN" not in out and "calibrate" not in out
+    assert "advisory UNKNOWN" not in out
+    assert "calibrate" not in out
 
 
 def test_report_calibration_tolerates_malformed(capsys) -> None:

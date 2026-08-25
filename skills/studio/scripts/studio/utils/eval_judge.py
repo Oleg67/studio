@@ -47,10 +47,15 @@ _VERDICT_BY_LABEL = {GOLD_COMPLIANT: VERDICT_PASS, GOLD_NON_COMPLIANT: VERDICT_F
 #: Cap on the run-evidence handed to the judge — bounded so the prompt stays deterministic
 #: and small; the judge assesses compliance from this, not from the rule declarations.
 _EVIDENCE_CAP = 4000
-#: Floor a single phase needs to be shown meaningfully. When the equal share of ``_EVIDENCE_CAP``
-#: falls below this (many phases), only as many phases as fit at the floor are shown and the rest
-#: are flagged omitted — so the total stays bounded and no verdict rests on silently dropped work.
+#: Floor a single phase needs to be shown meaningfully. When too little of the total budget is
+#: left to show a phase at this size, that phase and the rest are omitted (and the run is marked
+#: incomplete → UNKNOWN upstream) rather than shown as unreadable slivers.
 _MIN_PHASE_EVIDENCE = 200
+#: The marker appended to a phase trimmed to fit, and the omission line when whole phases do not
+#: fit — both counted against the budget so the evidence total never exceeds ``_EVIDENCE_CAP``.
+_TRUNCATED = "\n[…truncated]"
+_OMISSION_TEMPLATE = ("[{n} further phase(s) omitted to stay within the evidence budget; "
+                      "evidence is incomplete]")
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-imports
 
 
@@ -72,6 +77,7 @@ class JudgeRequest:
     rules: List[str]              # the `## Rules` prose extracted from the run, in phase order
     evidence: str                 # bounded phase-body content (rules removed) — what was *done*
     prompt: str                   # the full assembled prompt (deterministic), incl. a run summary
+    evidence_incomplete: bool = False  # whole phases were omitted to fit the budget → forces UNKNOWN
 
 
 @dataclass
@@ -131,38 +137,40 @@ def _extract_rules(run: RunArtifacts) -> List[str]:
 
 
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-evidence
-def _run_evidence(run: RunArtifacts) -> str:
-    """Bounded, deterministic evidence of what the run actually contains — each phase body with
-    its ``## Rules`` declaration removed — so compliance is judged from the work, not the rules.
+def _run_evidence(run: RunArtifacts) -> "Tuple[str, int]":
+    """Deterministic evidence of what the run contains — each phase body with its ``## Rules``
+    removed — as ``(text, omitted_phase_count)``, so compliance is judged from the work.
 
-    ``_EVIDENCE_CAP`` bounds the **total**: phases share it equally, so a long first phase can
-    never swallow the budget and hide a later phase's violation. When there are too many phases to
-    show each meaningfully (equal share below ``_MIN_PHASE_EVIDENCE``), only as many as fit at the
-    floor are included and the rest are flagged omitted — the total stays bounded and the judge is
-    told the evidence is incomplete rather than ruling on a silently truncated set. A phase trimmed
-    to fit is marked ``[…truncated]``.
+    The total (headers, ``[…truncated]`` markers, separators and the omission line included) is a
+    **hard** ``_EVIDENCE_CAP``: phases share an equal body budget and are appended until the next
+    would overflow. A phase merely trimmed to fit is marked ``[…truncated]`` and is still judged;
+    when whole phases will not fit they are **omitted** and counted — the caller marks the request
+    incomplete so a verdict is never certified from evidence with entire phases unseen.
     """
     bodies = [(name, "\n".join(_split_sections(run.phase_texts[name])[1]).strip())
               for name in sorted(run.phase_texts)]
     bodies = [(name, body) for name, body in bodies if body]
     if not bodies:
-        return ""
-    shown = len(bodies)
-    per_phase = _EVIDENCE_CAP // shown
-    omitted = 0
-    if per_phase < _MIN_PHASE_EVIDENCE:
-        shown = max(1, _EVIDENCE_CAP // _MIN_PHASE_EVIDENCE)
-        per_phase = _MIN_PHASE_EVIDENCE
-        omitted = len(bodies) - shown
+        return "", 0
+    reserve = 2 + len(_OMISSION_TEMPLATE.format(n=len(bodies)))   # room the omission line may need
+    fair = max(_MIN_PHASE_EVIDENCE, _EVIDENCE_CAP // len(bodies))
     chunks: List[str] = []
-    for name, body in bodies[:shown]:
-        if len(body) > per_phase:
-            body = body[:per_phase].rstrip() + "\n[…truncated]"
-        chunks.append(f"### {name}\n{body}")
+    used = 0
+    for name, body in bodies:
+        header = f"### {name}\n"
+        separator = 2 if chunks else 0                           # the "\n\n" between chunks
+        room = _EVIDENCE_CAP - reserve - used - separator - len(header)
+        if room < _MIN_PHASE_EVIDENCE:                           # not enough left to show it fairly
+            break
+        budget = min(fair, room)
+        if len(body) > budget:
+            body = body[:budget - len(_TRUNCATED)].rstrip() + _TRUNCATED
+        chunks.append(header + body)
+        used += separator + len(header + body)
+    omitted = len(bodies) - len(chunks)
     if omitted:
-        chunks.append(f"[{omitted} further phase(s) omitted to stay within the evidence budget; "
-                      "evidence is incomplete]")
-    return "\n\n".join(chunks)
+        chunks.append(_OMISSION_TEMPLATE.format(n=omitted))
+    return "\n\n".join(chunks), omitted
 
 
 def _run_summary(run: RunArtifacts) -> str:
@@ -181,7 +189,7 @@ def build_judge_request(run: RunArtifacts, scenario: Scenario) -> JudgeRequest:
     """Assemble the deterministic judge prompt for ``run`` — a pure function, no model call."""
     rules = _extract_rules(run)
     summary = _run_summary(run)
-    evidence = _run_evidence(run)
+    evidence, omitted = _run_evidence(run)
     rules_block = "\n".join(f"- {rule}" for rule in rules) or "(no rules declared)"
     prompt = (
         f"You are judging whether a completed '{scenario.workflow}' workflow run followed its "
@@ -191,7 +199,8 @@ def build_judge_request(run: RunArtifacts, scenario: Scenario) -> JudgeRequest:
         f"EVIDENCE — what the run actually contains (judge compliance from this, not the "
         f"rules):\n{evidence or '(no evidence beyond the plan)'}\n\n"
         "Answer with a verdict of 'compliant' or 'non_compliant' and a one-line rationale.")
-    return JudgeRequest(workflow=scenario.workflow, rules=rules, evidence=evidence, prompt=prompt)
+    return JudgeRequest(workflow=scenario.workflow, rules=rules, evidence=evidence, prompt=prompt,
+                        evidence_incomplete=omitted > 0)
 
 
 def _reply_to_verdict(reply: object) -> str:
@@ -254,6 +263,12 @@ class AdvisoryJudge:  # pylint: disable=too-few-public-methods
             return self._result(VERDICT_UNKNOWN, ["no judge model wired (advisory)"],
                                 "no judge_fn: model supplied out-of-tree", scenario)
         request = build_judge_request(run, scenario)
+        if request.evidence_incomplete:
+            # Whole phases were dropped to fit the budget — a compliant/non_compliant verdict would
+            # certify work the judge never saw. "Cannot fully assess" is UNKNOWN, and we skip the
+            # model call entirely. (A merely trimmed phase is still shown and is judged normally.)
+            return self._result(VERDICT_UNKNOWN, ["evidence incomplete: phase(s) omitted to fit the "
+                                                 "budget"], "unscoreable: incomplete evidence", scenario)
         try:
             reply = self._judge_fn(request)
         # A misbehaving injected judge must degrade to UNKNOWN, never sink the run.
