@@ -101,23 +101,40 @@ class JudgeFn(Protocol):  # pylint: disable=too-few-public-methods
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-datamodel
 
 
+# @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-fence
+def _fence_delim(stripped: str) -> "Optional[Tuple[str, int]]":
+    """A Markdown fenced-code delimiter — three or more backticks or tildes — as
+    ``(char, run_length)``, else ``None``. Both fence characters are recognised, and the length
+    lets a closer be matched per CommonMark (same character, at least as long as the opener)."""
+    for char in ("`", "~"):
+        if stripped.startswith(char * 3):
+            return char, len(stripped) - len(stripped.lstrip(char))
+    return None
+# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-fence
+
+
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-prompt
 def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
     """Partition a phase body into ``(rules_lines, other_lines)`` by ``## Rules`` heading.
 
     Line-based on purpose — no lazy/lookahead regex (which SonarCloud flagged as super-linear /
-    ambiguous). This keeps rule *declarations* apart from the rest of the body so the judge (and
-    the reference stub) never mistake a rule's own wording for evidence of a violation.
+    ambiguous). Fenced-code state is tracked (backtick *and* tilde fences) so a ``## Rules`` inside
+    a fenced example is not read as a real heading — which would move later evidence out of scope
+    and could mask a violation as compliant.
     """
     rules: List[str] = []
     other: List[str] = []
     in_rules = False
-    in_fence = False
+    fence: "Optional[Tuple[str, int]]" = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence      # a fence toggles; ## inside it is example text, not a heading
-        elif not in_fence and stripped.startswith("## "):
+        delim = _fence_delim(stripped)
+        if delim is not None:
+            if fence is None:
+                fence = delim                        # open a fenced block
+            elif delim[0] == fence[0] and delim[1] >= fence[1]:
+                fence = None                         # a matching closer ends it
+        elif fence is None and stripped.startswith("## "):
             in_rules = stripped[3:].strip().lower().startswith("rules")
             if in_rules:
                 continue          # drop the heading line itself; keep other headings as context

@@ -322,4 +322,15 @@ def test_trimmed_but_complete_evidence_is_still_judged() -> None:
     # runs normally, so trimming does not collapse every real run to UNKNOWN.
     phases = {"phase-1.md": f"## What\n\n{'filler ' * 2000}\n"}   # one long phase, trimmed
     req = build_judge_request(_run(phase_texts=phases), _scenario())
-    assert "[…truncated]" in req.evidence and req.evidence_incomplete is False
+    assert "[…truncated]" in req.evidence
+    assert req.evidence_incomplete is False
+
+
+def test_split_ignores_a_rules_heading_inside_a_tilde_fence() -> None:
+    # Markdown allows ~~~ fences too — a `## Rules` inside one must not be read as a real heading.
+    body = ("## What\n\nwe did the work\n\n"
+            "~~~markdown\n## Rules\nexample rule text\n~~~\n\n"
+            "then we ignored the spec here\n")
+    req = build_judge_request(_run(phase_texts={"p.md": body}), _scenario())
+    assert "ignored the spec here" in req.evidence          # not hidden by the tilde-fenced heading
+    assert reference_stub_judge(req).verdict == "non_compliant"

@@ -168,6 +168,7 @@ judge coverage is derived from which scenarios carry a gold set.
 
 **Supporting**:
 - [x] - `p1` - Imports, the rules-section pattern, and the gold-label-to-verdict mapping - `inst-judge-imports`
+- [x] - `p1` - Recognise a Markdown fenced-code delimiter (backtick or tilde, by character and length) so a `## Rules` inside a fenced example is not read as a heading - `inst-judge-fence`
 - [x] - `p1` - The judge data model: gold label, judge request/reply, and the `JudgeFn` seam - `inst-judge-datamodel`
 - [x] - `p1` - Assemble the bounded run evidence (total-capped share per phase, omitted phases flagged) and the run summary - `inst-judge-evidence`
 - [x] - `p1` - Load a scenario's `gold.toml` human label, degrading to unvalidated on absence - `inst-judge-gold`
