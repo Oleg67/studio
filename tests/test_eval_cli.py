@@ -436,3 +436,19 @@ def test_report_calibration_tolerates_malformed(capsys) -> None:
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
     assert "0 gold-backed, 0 excluded" in out          # second call rendered without raising
+
+
+def test_calibrate_never_affects_the_gate(capsys, tmp_path: Path) -> None:
+    # --calibrate is advisory reporting only: the exit code still comes solely from structural
+    # compliance (and baseline regression), never from calibration data.
+    with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+        rc = cmd_eval(["--scenarios-dir", str(FIXTURES), "--check", "--calibrate"])  # 0.5 < 1.0
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 2                                      # structural gates; calibrate cannot change it
+    assert "judge_calibration" in payload              # yet calibration still ran and reported
+    scenarios = tmp_path / "s"
+    scenarios.mkdir()
+    _write_compliant(scenarios)
+    with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+        rc = cmd_eval(["--scenarios-dir", str(scenarios), "--check", "--calibrate"])
+    assert rc == 0                                      # compliant suite still passes with --calibrate

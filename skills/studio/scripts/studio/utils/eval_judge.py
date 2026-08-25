@@ -221,11 +221,29 @@ def build_judge_request(run: RunArtifacts, scenario: Scenario) -> JudgeRequest:
 
 
 def _reply_to_verdict(reply: object) -> str:
-    """Map a reply to a scaffold verdict; anything unrecognised — including ``None`` or a
-    non-``JudgeReply`` object a host might return — is UNKNOWN, never an AttributeError."""
-    verdict = (getattr(reply, "verdict", "") or "").strip().lower()
-    return _VERDICT_BY_LABEL.get(verdict, VERDICT_UNKNOWN)
+    """Map a reply to a scaffold verdict; anything unrecognised — ``None``, a non-``JudgeReply``
+    object, or a **non-string** ``verdict`` (e.g. an int) a host might return — is UNKNOWN, never
+    an AttributeError. This runs *outside* the judge_fn try/except and ``calibrate`` calls
+    ``score`` directly, so a raise here would abort scoring/calibration rather than degrade."""
+    verdict = getattr(reply, "verdict", "")
+    if not isinstance(verdict, str):
+        return VERDICT_UNKNOWN
+    return _VERDICT_BY_LABEL.get(verdict.strip().lower(), VERDICT_UNKNOWN)
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-request
+
+
+# @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-gap
+def _evidence_gap(request: JudgeRequest) -> "Optional[str]":
+    """Why the harness cannot present real evidence to the judge — no usable phase body, or whole
+    phases omitted to fit the budget — else ``None``. Such a run is UNKNOWN by the harness (not a
+    judge verdict) and is excluded from calibration, which would otherwise measure the evidence
+    budget rather than judge quality. A merely *trimmed* phase (all phases shown) is not a gap."""
+    if not request.evidence.strip():
+        return "no usable phase evidence beyond rules"
+    if request.evidence_incomplete:
+        return "phase(s) omitted to fit the evidence budget"
+    return None
+# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-gap
 
 
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-gold
@@ -280,12 +298,13 @@ class AdvisoryJudge:  # pylint: disable=too-few-public-methods
             return self._result(VERDICT_UNKNOWN, ["no judge model wired (advisory)"],
                                 "no judge_fn: model supplied out-of-tree", scenario)
         request = build_judge_request(run, scenario)
-        if request.evidence_incomplete:
-            # Whole phases were dropped to fit the budget — a compliant/non_compliant verdict would
-            # certify work the judge never saw. "Cannot fully assess" is UNKNOWN, and we skip the
-            # model call entirely. (A merely trimmed phase is still shown and is judged normally.)
-            return self._result(VERDICT_UNKNOWN, ["evidence incomplete: phase(s) omitted to fit the "
-                                                 "budget"], "unscoreable: incomplete evidence", scenario)
+        gap = _evidence_gap(request)
+        if gap is not None:
+            # No usable evidence, or whole phases dropped to fit the budget — a compliant/
+            # non_compliant verdict would certify work the judge never saw. "Cannot assess" is
+            # UNKNOWN, and we skip the model call entirely. (A trimmed phase is still judged.)
+            return self._result(VERDICT_UNKNOWN, [f"evidence unscoreable: {gap}"],
+                                f"unscoreable: {gap}", scenario)
         try:
             reply = self._judge_fn(request)
         # A misbehaving injected judge must degrade to UNKNOWN, never sink the run.
@@ -357,6 +376,22 @@ def _majority(verdicts: List[str]) -> Tuple[str, int]:
     return best, counts.get(best, 0)
 
 
+def _scoreable_cases(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]]
+                     ) -> Tuple[List[Tuple[Scenario, RunArtifacts, Gold]], List[str]]:
+    """Split calibration cases into ``(scoreable, excluded_ids)``. A case is excluded when its run
+    is unreadable **or** the harness cannot present real evidence to the judge (empty / phases
+    omitted) — those are harness-forced UNKNOWNs, not judge results, so counting them would make
+    accuracy/consistency measure the evidence budget instead of judge quality."""
+    scoreable: List[Tuple[Scenario, RunArtifacts, Gold]] = []
+    excluded: List[str] = []
+    for scenario, run, gold in cases:
+        if run is not None and _evidence_gap(build_judge_request(run, scenario)) is None:
+            scoreable.append((scenario, run, gold))
+        else:
+            excluded.append(scenario.id)
+    return scoreable, excluded
+
+
 def _score_case(judge: AdvisoryJudge, scenario: Scenario, run: Optional[RunArtifacts],
                 gold: Gold, runs: int) -> Tuple[bool, float, Dict[str, object]]:
     """Judge one gold-backed case ``runs`` times → ``(matched, consistency, report_row)``."""
@@ -376,14 +411,14 @@ def calibrate(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]],
     ``accuracy`` is agreement of the majority verdict with the human label; ``consistency`` is
     the mean fraction of runs that landed on that majority (run-to-run stability). Both are
     ``None`` when there is nothing scoreable to measure — never a false 0. A case whose run
-    could not be loaded (``run is None``) is a *run-loading* failure, not a judge failure, so it
-    is **excluded** from accuracy/consistency (and reported in ``excluded``) — it never counts
-    as a judge mismatch. ``covered`` still lists every gold-backed scenario.
+    could not be loaded (``run is None``), or whose evidence the harness cannot present to the
+    judge (empty, or whole phases omitted), is a *harness* UNKNOWN, not a judge failure, so it is
+    **excluded** from accuracy/consistency (and reported in ``excluded``) — it never counts as a
+    judge mismatch. ``covered`` still lists every gold-backed scenario.
     """
     runs = max(1, runs)
     judge = AdvisoryJudge(judge_fn)
-    scoreable = [(scenario, run, gold) for scenario, run, gold in cases if run is not None]
-    excluded = [scenario.id for scenario, run, _ in cases if run is None]
+    scoreable, excluded = _scoreable_cases(cases)
     rows = [_score_case(judge, scenario, run, gold, runs) for scenario, run, gold in scoreable]
     total = len(scoreable)
     return Calibration(

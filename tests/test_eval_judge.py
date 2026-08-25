@@ -334,3 +334,40 @@ def test_split_ignores_a_rules_heading_inside_a_tilde_fence() -> None:
     req = build_judge_request(_run(phase_texts={"p.md": body}), _scenario())
     assert "ignored the spec here" in req.evidence          # not hidden by the tilde-fenced heading
     assert reference_stub_judge(req).verdict == "non_compliant"
+
+
+def test_empty_evidence_is_unscoreable_and_the_judge_is_not_called() -> None:
+    # A run whose only content is a Rules section has no usable evidence → UNKNOWN with no model
+    # call, so the judge can never certify compliance from nothing observable.
+    calls: list = []
+
+    def stub(_request: JudgeRequest) -> JudgeReply:
+        calls.append(1)
+        return JudgeReply("compliant", "looks fine")
+
+    result = AdvisoryJudge(stub).score(_run(phase_texts={"p.md": "## Rules\nfollow\n"}), _scenario())
+    assert result.verdict == VERDICT_UNKNOWN
+    assert calls == []
+
+
+def test_non_string_verdict_degrades_to_unknown_not_raise() -> None:
+    # A host reply whose verdict is a truthy non-string (e.g. 123) must degrade to UNKNOWN — the
+    # parse runs outside the judge_fn try/except, so a raise here would abort scoring/calibration.
+    class _IntVerdict:
+        verdict = 123
+
+    result = AdvisoryJudge(lambda _r: _IntVerdict()).score(_run(), _scenario())
+    assert result.verdict == VERDICT_UNKNOWN
+
+
+def test_calibration_excludes_unscoreable_evidence_runs() -> None:
+    # A gold-backed run whose evidence the harness cannot present (empty here) is a harness-forced
+    # UNKNOWN, not a judge result — excluded from accuracy/consistency, never counted as a mismatch.
+    good = Scenario(id="g", workflow="w", run_dir=Path("run"), expect="compliant", gold_path=None)
+    empty = Scenario(id="e", workflow="w", run_dir=Path("run"), expect="compliant", gold_path=None)
+    cases = [(good, _run(), Gold("compliant")),
+             (empty, _run(phase_texts={"p.md": "## Rules\nonly\n"}), Gold("compliant"))]
+    cal = calibrate(cases, reference_stub_judge, runs=2)
+    assert "e" in cal.excluded
+    assert set(cal.covered) == {"g", "e"}
+    assert cal.accuracy == 1.0            # measured only over the one scoreable run
