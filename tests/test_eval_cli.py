@@ -380,6 +380,54 @@ def test_human_report_prints_calibration_under_flag(capsys, tmp_path: Path) -> N
     assert rc == 0
     assert "calibrate" in out
     assert "accuracy" in out
+    assert "calibrate note:" in out                # the note explaining the stub figure is printed
+
+
+def test_human_report_renders_regression(capsys) -> None:
+    # A --baseline regression must be visible in the terminal, not only in --json — otherwise a
+    # regressed run exits 2 with no explanation of what broke.
+    from studio.commands.eval import _report_regression  # noqa: PLC0415
+    ui_module.set_json_mode(False)
+    try:
+        _report_regression({"has_regression": True,
+                            "regressed": [{"scenario": "x", "from": 1.0, "to": 0.5}],
+                            "no_longer_scoreable": [{"scenario": "y"}]})
+        _report_regression({"has_regression": False, "regressed": []})   # clean vs baseline
+        _report_regression({"error": "baseline unreadable"})             # unusable baseline
+        _report_regression({"has_regression": True,                      # more than the cap
+                            "regressed": [{"scenario": f"s{i}", "from": 1.0, "to": 0.0}
+                                          for i in range(12)]})
+    finally:
+        ui_module.set_json_mode(True)
+    out = capsys.readouterr().out
+    assert "1 scenario(s) regressed" in out
+    assert "x: 1.0 -> 0.5" in out
+    assert "no longer scoreable" in out
+    assert "regression: none vs baseline" in out
+    assert "baseline not usable" in out
+    assert "more" in out                            # "(+2 more)" — 12 regressed, cap 10
+
+
+def test_human_report_warns_on_save_error(capsys) -> None:
+    from studio.commands.eval import _human_report  # noqa: PLC0415
+    ui_module.set_json_mode(False)
+    try:
+        _human_report({"summary": {"scored": 1, "unknown": 0, "results": 1, "scenarios": 1,
+                                   "structural_compliance": 1.0, "coverage": "structural (deterministic)"},
+                       "per_scenario": [], "save_error": "could not save report to /x: disk full"})
+    finally:
+        ui_module.set_json_mode(True)
+    assert "save failed" in capsys.readouterr().out
+
+
+def test_save_error_omits_the_internal_temp_path(capsys, tmp_path: Path) -> None:
+    # A failed --save reports the user-supplied destination and reason, never the mkstemp temp name.
+    with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+        cmd_eval(["--scenarios-dir", str(FIXTURES), "--save", str(tmp_path / "nope" / "r.json")])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["saved"] is None
+    assert "could not save report to" in payload["save_error"]
+    assert ".tmp" not in payload["save_error"]      # no internal temp-file name leaked
 
 
 def test_advisory_count_only_counts_the_unwired_judge() -> None:

@@ -66,7 +66,7 @@ class Gold:
 
     verdict: str                                 # compliant | non_compliant
     rationale: str = ""
-    rules_assessed: List[int] = field(default_factory=list)
+    rules_assessed: List[int] = field(default_factory=list)  # reserved; future per-rule scoring
 
 
 @dataclass
@@ -419,15 +419,21 @@ def _scoreable_cases(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]]
 
 
 def _score_case(judge: AdvisoryJudge, scenario: Scenario, run: Optional[RunArtifacts],
-                gold: Gold, runs: int) -> Tuple[bool, float, Dict[str, object]]:
-    """Judge one gold-backed case ``runs`` times → ``(matched, consistency, report_row)``."""
-    verdicts = [judge.score(run, scenario).verdict for _ in range(runs)]
-    majority, count = _majority(verdicts)
+                gold: Gold, runs: int) -> "Tuple[bool, bool, float, Dict[str, object]]":
+    """Judge one gold-backed case ``runs`` times → ``(errored, matched, consistency, report_row)``.
+
+    ``errored`` marks a ``judge_fn`` *crash* (a transient operational failure, e.g. an LLM API
+    error) as opposed to a model disagreement — the caller excludes it rather than scoring the
+    forced UNKNOWN as a mismatch, so a flaky judge does not silently deflate accuracy.
+    """
+    results = [judge.score(run, scenario) for _ in range(runs)]
+    errored = any("judge error" in (result.coverage or "") for result in results)
+    majority, count = _majority([result.verdict for result in results])
     expected = _VERDICT_BY_LABEL.get(gold.verdict, VERDICT_UNKNOWN)
     matched = majority == expected
     row = {"scenario": scenario.id, "expected": expected, "majority": majority,
            "matched": matched, "consistency": round(count / runs, 4)}
-    return matched, count / runs, row
+    return errored, matched, count / runs, row
 
 
 def calibrate(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]],
@@ -440,16 +446,20 @@ def calibrate(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]],
     could not be loaded (``run is None``), or whose evidence the harness cannot present to the
     judge (empty, or whole phases omitted), is a *harness* UNKNOWN, not a judge failure, so it is
     **excluded** from accuracy/consistency (and reported in ``excluded``) — it never counts as a
-    judge mismatch. ``covered`` still lists every gold-backed scenario.
+    judge mismatch. A ``judge_fn`` that *crashes* is likewise excluded (operational error, not a
+    disagreement). ``covered`` still lists every gold-backed scenario.
     """
     runs = max(1, runs)
     judge = AdvisoryJudge(judge_fn)
     scoreable, excluded = _scoreable_cases(cases)
-    rows = [_score_case(judge, scenario, run, gold, runs) for scenario, run, gold in scoreable]
-    total = len(scoreable)
+    outcomes = [(scenario, _score_case(judge, scenario, run, gold, runs))
+                for scenario, run, gold in scoreable]
+    excluded = excluded + [scenario.id for scenario, out in outcomes if out[0]]   # out[0] = errored
+    scored = [out for _, out in outcomes if not out[0]]
+    total = len(scored)
     return Calibration(
-        accuracy=round(sum(1 for matched, _, _ in rows if matched) / total, 4) if total else None,
-        consistency=round(sum(c for _, c, _ in rows) / total, 4) if total else None,
+        accuracy=round(sum(1 for _, m, _, _ in scored if m) / total, 4) if total else None,
+        consistency=round(sum(c for _, _, c, _ in scored) / total, 4) if total else None,
         covered=[scenario.id for scenario, _, _ in cases],
-        runs_per_scenario=runs, per_scenario=[row for _, _, row in rows], excluded=excluded)
+        runs_per_scenario=runs, per_scenario=[row for _, _, _, row in scored], excluded=excluded)
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-calibrate-run

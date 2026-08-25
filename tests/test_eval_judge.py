@@ -404,6 +404,19 @@ def test_non_string_verdict_degrades_to_unknown_not_raise() -> None:
     assert result.verdict == VERDICT_UNKNOWN
 
 
+def test_calibration_excludes_a_crashing_judge() -> None:
+    # A judge_fn that raises is an operational failure, not a model disagreement — the case is
+    # excluded, not scored as a mismatch, so a transient crash never deflates accuracy.
+    def boom(_request: JudgeRequest) -> JudgeReply:
+        raise RuntimeError("api down")
+
+    scenario = Scenario(id="c", workflow="w", run_dir=Path("run"), expect="compliant", gold_path=None)
+    cal = calibrate([(scenario, _run(), Gold("compliant"))], boom, runs=2)
+    assert "c" in cal.excluded
+    assert cal.accuracy is None            # the only case crashed → nothing scored, not a mismatch
+    assert cal.per_scenario == []          # not recorded as a matched=False row
+
+
 def test_calibration_excludes_unscoreable_evidence_runs() -> None:
     # A gold-backed run whose evidence the harness cannot present (empty here) is a harness-forced
     # UNKNOWN, not a judge result — excluded from accuracy/consistency, never counted as a mismatch.

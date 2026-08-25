@@ -17,6 +17,7 @@
   - [Eval Report Lifecycle](#eval-report-lifecycle)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Compliance Report](#compliance-report)
+  - [Conditional JSON report fields](#conditional-json-report-fields)
 - [6. Implementation Modules](#6-implementation-modules)
 - [7. Acceptance Criteria](#7-acceptance-criteria)
 
@@ -73,6 +74,8 @@ advisory verdict can never gate a build.
 - User runs `cfs eval --scenarios-dir DIR` → scenarios discovered under `DIR`
 - User runs `cfs eval --baseline report.json` → same, plus a per-scenario regression diff; the exit code is unchanged unless `--check` is also given
 - User runs `cfs eval --check [--min N]` → exit 2 when structural compliance is below `--min`, **or** when `--baseline` shows a per-scenario compliance regression
+- User runs `cfs eval --calibrate` → the report gains a `judge_calibration` object (reference-stub accuracy/consistency over gold-backed scenarios); advisory only, the exit code is unchanged
+- User runs `cfs eval --save FILE` → the run's report JSON is written to `FILE` to serve as a later `--baseline`; the payload gains `saved` (the path, or `null` on failure) and, only on failure, `save_error`
 - The JSON report always carries a `gate` field (`pass`/`fail`) matching the exit code, so a CI step can cross-check from `--json` alone
 
 **Error Scenarios**:
@@ -80,7 +83,7 @@ advisory verdict can never gate a build.
 - With `--check`: structural compliance below `--min`, or a baseline regression (a compliance drop, or a scenario that broke while still in the suite) → exit 2. A scenario removed from the suite entirely (`no_longer_scoreable`), or a `--baseline` that cannot be loaded (surfaced via the regression `error` field), is reported but does not by itself gate.
 
 **Steps**:
-1. [x] - `p1` - User invokes `cfs eval [--scenarios-dir DIR] [--baseline FILE]` - `inst-user-eval`
+1. [x] - `p1` - User invokes `cfs eval [--scenarios-dir DIR] [--check] [--min N] [--baseline FILE] [--save FILE] [--calibrate]` - `inst-user-eval`
 2. [x] - `p1` - Load project context; if absent, emit ERROR and exit 1 - `inst-load-context`
 3. [x] - `p1` - Resolve the scenarios directory, run the suite through the deterministic structural scorer, attach an optional regression diff, emit the JSON report, and return the harness exit code - `inst-run-and-report`
 
@@ -91,7 +94,8 @@ advisory verdict can never gate a build.
 - [x] - `p1` - Save this run's report JSON to serve as a later baseline - `inst-save-report`
 - [x] - `p1` - Render a short human-readable summary when not in JSON mode - `inst-human-report`
 - [x] - `p1` - In the human summary, explain advisory-only UNKNOWNs (unwired judge, never gates) - `inst-human-advisory`
-- [x] - `p1` - In the human summary, print the calibration metrics under `--calibrate`, tolerating a malformed payload - `inst-human-calibration`
+- [x] - `p1` - In the human summary, print the calibration metrics and note under `--calibrate`, tolerating a malformed payload - `inst-human-calibration`
+- [x] - `p1` - In the human summary, render a `--baseline` regression (regressed scenarios, no-longer-scoreable count) and any save failure - `inst-human-regression`
 - [x] - `p1` - Under `--calibrate`, measure the reference judge over the gold-backed scenarios - `inst-judge-calibration`
 
 ## 3. Processes / Business Logic (CDSL)
@@ -115,6 +119,7 @@ under the gate contract (only deterministic verdicts affect the exit code).
 
 **Supporting**:
 - [x] - `p1` - Imports and module setup for the harness - `inst-harness-imports`
+- [x] - `p1` - Load every `(scenario, run)` once so the report and calibration share one disk snapshot - `inst-load-cases`
 - [x] - `p1` - Scorer kinds, verdicts, the scorer protocol, and the result/scenario/report data model - `inst-eval-datamodel`
 - [x] - `p1` - A placeholder deterministic reference scorer that checks run presence, used to exercise the seam - `inst-reference-scorer`
 
@@ -153,7 +158,7 @@ artifacts: it touches no filesystem.
 
 The advisory LLM-judge plugged into the `Scorer` seam. It opines on whether a completed run
 followed its workflow's `RULES:`, the layer the deterministic scorer cannot measure. Its
-verdict is `ADVISORY` — the runner forbids it from touching the exit code — and it is built as
+kind is `ADVISORY` — the runner forbids it from touching the exit code — and it is built as
 a *seam, not a transport*: the harness owns the deterministic prompt and reply parsing, while
 the model call is supplied by the host/agent through a pluggable `judge_fn` (Studio stays
 stdlib-only, and with no `judge_fn` the judge is `UNKNOWN`). Trustworthiness is measured, not
@@ -180,6 +185,8 @@ path = "gold.toml"
 [gold]
 verdict = "compliant"          # accepted values: compliant | non_compliant
 rationale = "every declared rule was followed"
+rules_assessed = [1, 3]        # optional, reserved: rule numbers this verdict applies to
+                               # (list of ints; schema not yet stable — future per-rule scoring)
 ```
 
 A scenario with no gold file is still scored, but reported as *unvalidated advisory*; a malformed
@@ -225,6 +232,18 @@ yields a per-scenario regression diff without changing the exit code.
 **Implements**:
 - `cpt-studio-flow-eval-harness-run`
 - `cpt-studio-algo-eval-harness-run`
+
+### Conditional JSON report fields
+
+Beyond the always-present `schema_version`, `summary`, `failing_checks`, `per_scenario`, and
+`gate`, three top-level keys appear only under specific flags — a consumer must presence-check
+them (subscripting when the flag is absent raises `KeyError`):
+
+| Key | Present when | Shape |
+|-----|--------------|-------|
+| `regression` | `--baseline` given | object: `has_regression` (bool), `regressed[] {scenario, from, to}`, `improved[]`, `newly_scoreable[]`, `no_longer_scoreable[]`, `aggregate_before`, `aggregate_after`; or `{error}` when the baseline is unusable |
+| `judge_calibration` | `--calibrate` given | object: `judge`, `gold_backed[]`, `excluded_unscoreable[]`, `broken_gold[]`, `accuracy` (float\|null), `consistency` (float\|null), `runs_per_scenario`, `note` |
+| `saved` / `save_error` | `--save FILE` given | `saved`: the path, or `null` on failure. `save_error`: present **only** on failure, a message with the destination and reason |
 
 ## 6. Implementation Modules
 

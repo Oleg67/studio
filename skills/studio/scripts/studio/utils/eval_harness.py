@@ -259,20 +259,29 @@ def load_run(run_dir: Path) -> Optional[RunArtifacts]:
             phase_texts[name] = target.read_text(encoding="utf-8")
         except OSError as exc:
             # Absent/unreadable phase → left out of phase_texts so a scorer flags it.
-            logger.debug("eval: declared phase file unreadable (%s): %s", name, exc)
+            logger.warning("eval: declared phase file unreadable (%s): %s", name, exc)
             continue
     return RunArtifacts(plan_meta=plan_meta, phases=phases, phase_texts=phase_texts)
 # @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-load-run
 
 
 # @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-run-scenario
-def run_scenario(scenario: Scenario, scorers: List[Scorer]) -> ScenarioResult:
+#: Sentinel for run_scenario's optional pre-loaded run — ``None`` is a valid "unreadable run",
+#: so it cannot double as "not supplied".
+_NO_PRELOAD = object()
+
+
+def run_scenario(scenario: Scenario, scorers: List[Scorer],
+                 run: "object" = _NO_PRELOAD) -> ScenarioResult:
     """Load one scenario's run and apply every scorer to it.
 
     A scorer that raises degrades to UNKNOWN for that scenario (with a warning) rather
     than sinking the whole suite — the seam must tolerate a misbehaving future scorer.
+    A caller may pass an already-loaded ``run`` (``_NO_PRELOAD`` means "load it here") so the
+    report and calibration can share one disk snapshot instead of reading twice.
     """
-    run = load_run(scenario.run_dir)
+    if run is _NO_PRELOAD:
+        run = load_run(scenario.run_dir)
     results: List[ScorerResult] = []
     for scorer in scorers:
         try:
@@ -289,10 +298,24 @@ def run_scenario(scenario: Scenario, scorers: List[Scorer]) -> ScenarioResult:
 # @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-run-scenario
 
 
+# @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-load-cases
+def load_cases(root: Path) -> List[Tuple[Scenario, Optional[RunArtifacts]]]:
+    """Load every ``(scenario, run)`` once — the single disk snapshot the report and calibration
+    share, so the two can never measure different versions of the same files."""
+    return [(scenario, load_run(scenario.run_dir)) for scenario in load_scenarios(root)]
+# @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-load-cases
+
+
 # @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-run-suite
+def run_suite_over(cases: List[Tuple[Scenario, Optional[RunArtifacts]]],
+                   scorers: List[Scorer]) -> EvalReport:
+    """Run pre-loaded ``(scenario, run)`` pairs through ``scorers`` — no disk read here."""
+    return EvalReport([run_scenario(scenario, scorers, run) for scenario, run in cases])
+
+
 def run_suite(root: Path, scorers: List[Scorer]) -> EvalReport:
-    """Run every scenario under ``root`` through ``scorers`` and aggregate."""
-    return EvalReport([run_scenario(scenario, scorers) for scenario in load_scenarios(root)])
+    """Run every scenario under ``root`` through ``scorers`` and aggregate (loads from disk)."""
+    return run_suite_over(load_cases(root), scorers)
 # @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-run-suite
 
 

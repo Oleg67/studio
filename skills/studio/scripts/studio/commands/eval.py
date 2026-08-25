@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 #: (vs. an unreadable run, which also yields advisory UNKNOWN but is not benign). The human note
 #: explains only the former, so it filters on this.
 _NO_JUDGE_REASON = "no judge_fn"
+#: Cap on regressed scenarios listed in the human summary (the rest are summarised as "+N more").
+_REGRESSION_CAP = 10
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-eval-imports
 
 
@@ -125,7 +127,8 @@ def _save_report(payload: Dict[str, object], path: Path) -> Optional[str]:
                 tmp.unlink(missing_ok=True)
             except OSError as cleanup_exc:  # pragma: no cover - best-effort cleanup
                 logger.debug("eval: could not remove temp save file %s: %s", tmp, cleanup_exc)
-        return str(exc)
+        # Report the user-supplied destination and the reason, not the internal mkstemp temp path.
+        return f"could not save report to {path}: {exc.strerror or 'write failed'}"
     return None
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-save-report
 
@@ -149,7 +152,11 @@ def _human_report(data: Dict[str, object]) -> None:
     compliance = summary.get("structural_compliance")
     ui.info(f"structural compliance: {compliance * 100:.0f}%" if compliance is not None
             else "structural compliance: n/a (nothing scored)")
+    _report_regression(data.get("regression"))
     _report_calibration(data.get("judge_calibration"))
+    save_error = data.get("save_error")
+    if save_error:
+        ui.warn(f"save failed: {save_error}")
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-report
 
 
@@ -205,27 +212,59 @@ def _report_calibration(calibration: object) -> None:
             f"gold-backed, {len(excluded or [])} excluded{broken_note}, "
             f"accuracy {accuracy if accuracy is not None else 'n/a'}, "
             f"consistency {consistency if consistency is not None else 'n/a'}")
+    # The metrics are meaningless without knowing what produced them — e.g. the reference stub's
+    # 1.0 is keyword self-consistency, not a real judge. Print the note so nobody misreads it.
+    note = calibration.get("note")
+    if note:
+        ui.info(f"calibrate note: {note}")
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-calibration
 
 
+# @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-regression
+def _report_regression(regression: object) -> None:
+    """Surface a ``--baseline`` regression in human mode; without this a regressed run exits 2 with
+    no terminal explanation of what broke. Tolerates a malformed/absent regression object."""
+    if not isinstance(regression, dict):
+        return
+    if regression.get("error"):
+        ui.warn(f"regression: baseline not usable ({regression['error']})")
+        return
+    regressed = regression.get("regressed")
+    regressed = regressed if isinstance(regressed, list) else []
+    if not regression.get("has_regression"):
+        ui.info(f"regression: none vs baseline ({len(regressed)} regressed)")
+        return
+    ui.warn(f"regression: {len(regressed)} scenario(s) regressed")
+    for row in regressed[:_REGRESSION_CAP]:
+        if isinstance(row, dict):
+            ui.warn(f"  - {row.get('scenario')}: {row.get('from')} -> {row.get('to')}")
+    if len(regressed) > _REGRESSION_CAP:
+        ui.warn(f"  (+{len(regressed) - _REGRESSION_CAP} more)")
+    gone = regression.get("no_longer_scoreable")
+    if isinstance(gone, list) and gone:
+        ui.info(f"regression: {len(gone)} scenario(s) no longer scoreable (not gated)")
+# @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-regression
+
+
 # @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-judge-calibration
-def _judge_calibration(scenarios_dir: Path) -> Dict[str, object]:
+def _judge_calibration(cases: list) -> Dict[str, object]:
     """Calibrate the reference stub over gold-backed scenarios (coverage derived, not hardcoded).
 
-    The bare CLI has no model, so it measures the deterministic reference stub to exercise the
-    machinery; a real ``judge_fn`` supplied out-of-tree yields a real judge measurement.
+    Takes the already-loaded ``(scenario, run)`` pairs from the report so calibration measures the
+    same disk snapshot — no second read that could diverge. The bare CLI has no model, so it
+    measures the deterministic reference stub; a real ``judge_fn`` out-of-tree yields a real one.
     """
-    cases = []
+    gold_cases = []
     broken_gold = []
-    for scenario in eval_harness.load_scenarios(scenarios_dir):
+    for scenario, run in cases:
         gold = load_gold(scenario.gold_path)
         if gold is not None:
-            cases.append((scenario, eval_harness.load_run(scenario.run_dir), gold))
+            gold_cases.append((scenario, run, gold))
         elif scenario.gold_path is not None:
             # A gold file was configured but could not be loaded (unreadable / malformed / bad
             # verdict) — distinct from a scenario that simply declares no gold at all.
             broken_gold.append(scenario.id)
-    result = calibrate(cases, reference_stub_judge)
+    result = calibrate(gold_cases, reference_stub_judge)
     return {
         "judge": "reference-stub",
         "gold_backed": result.covered,
@@ -262,10 +301,11 @@ def cmd_eval(argv: List[str]) -> int:
         return 1
     # The advisory judge rides alongside the deterministic scorer. With no model wired it is
     # UNKNOWN (never gates); a host/agent injects a real judge_fn out-of-tree.
-    report = eval_harness.run_suite(scenarios_dir, [StructuralScorer(), AdvisoryJudge()])
+    cases = eval_harness.load_cases(scenarios_dir)   # one disk snapshot for report + calibration
+    report = eval_harness.run_suite_over(cases, [StructuralScorer(), AdvisoryJudge()])
     payload = eval_harness.report_to_dict(report)
     if args.calibrate:
-        payload["judge_calibration"] = _judge_calibration(scenarios_dir)
+        payload["judge_calibration"] = _judge_calibration(cases)
     if args.baseline:
         baseline = _load_baseline(Path(args.baseline))
         # Always set a stable-shaped regression field when --baseline is given — even when
