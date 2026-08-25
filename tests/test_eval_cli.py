@@ -438,8 +438,10 @@ def test_report_calibration_flags_malformed_vs_empty(capsys) -> None:
     finally:
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
-    assert "0 gold-backed, 0 excluded" in out          # the valid-empty render
-    assert "malformed calibration payload" in out      # the malformed one, distinctly
+    # Exclusive: exactly one gold-backed line (the valid-empty call) and one malformed line — the
+    # malformed payload must NOT also be rendered as an empty calibration.
+    assert out.count("0 gold-backed, 0 excluded") == 1
+    assert out.count("malformed calibration payload") == 1
 
 
 def test_calibration_distinguishes_broken_gold_from_absent(capsys, tmp_path: Path) -> None:

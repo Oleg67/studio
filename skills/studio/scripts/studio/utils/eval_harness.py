@@ -184,6 +184,15 @@ def load_scenarios(root: Path) -> List[Scenario]:
         if not scenario_id:
             logger.warning("eval: scenario descriptor missing [scenario].id: %s", descriptor)
             continue
+        if str(scenario_id) in seen_ids:
+            # Reserve the id on the FIRST descriptor to declare it — before path validation — so a
+            # duplicate is deterministically skipped regardless of either descriptor's validity, and
+            # the id can never resolve to a different run_dir/gold pair. (A duplicate would make
+            # calibration identities — covered/excluded/rows — ambiguous and hide duplicate counting.)
+            logger.warning("eval: duplicate [scenario].id %r, skipping later descriptor: %s",
+                           scenario_id, descriptor)
+            continue
+        seen_ids.add(str(scenario_id))
         base = descriptor.parent
         run_dir = base / str(section.get("run_dir", "run"))
         if not run_dir.resolve().is_relative_to(base.resolve()):
@@ -201,13 +210,6 @@ def load_scenarios(root: Path) -> List[Scenario]:
             else:
                 logger.warning("eval: scenario %s gold path escapes its directory, ignoring: %s",
                                scenario_id, gold_rel)
-        if str(scenario_id) in seen_ids:
-            # A duplicate id would make calibration identities (covered/excluded/rows) ambiguous
-            # and hide duplicate counting — keep the first, skip the rest.
-            logger.warning("eval: duplicate [scenario].id %r, skipping later descriptor: %s",
-                           scenario_id, descriptor)
-            continue
-        seen_ids.add(str(scenario_id))
         scenarios.append(Scenario(
             id=str(scenario_id),
             workflow=str(section.get("workflow", "unknown")),

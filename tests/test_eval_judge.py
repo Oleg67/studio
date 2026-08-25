@@ -349,6 +349,37 @@ def test_rules_and_evidence_follow_manifest_not_filename_order() -> None:
     assert req.evidence.index("second-by-name") < req.evidence.index("first-by-name")
 
 
+def test_a_non_closing_fence_line_does_not_end_the_fence() -> None:
+    # A ```-prefixed line with trailing content is NOT a closer (CommonMark: only whitespace may
+    # follow a closing fence). A `## Rules` after it stays fenced example text, so later evidence
+    # is not moved out of scope and hidden.
+    body = ("## What\n\nwe did the work\n\n"
+            "```\n"
+            "```not-a-closing-fence\n"          # trailing content → not a valid closer
+            "## Rules\n"                         # still inside the fence → not a heading
+            "```\n\n"                            # the real closer (only fence chars)
+            "then we ignored the spec here\n")
+    req = build_judge_request(_run(phase_texts={"p.md": body}), _scenario())
+    assert "ignored the spec here" in req.evidence
+    assert reference_stub_judge(req).verdict == "non_compliant"
+
+
+def test_missing_declared_phase_is_incomplete_evidence() -> None:
+    # A manifest declares two phases but one's text is unreadable (absent from phase_texts). Even
+    # though the other phase carries evidence, the run is incomplete → UNKNOWN, judge not called.
+    calls: list = []
+
+    def stub(_request: JudgeRequest) -> JudgeReply:
+        calls.append(1)
+        return JudgeReply("compliant", "looks fine")
+
+    run = _run(phases=[{"number": 1, "file": "phase-1.md"}, {"number": 2, "file": "phase-2.md"}],
+               phase_texts={"phase-1.md": "## What\n\ndid the work\n"})   # phase-2 text missing
+    result = AdvisoryJudge(stub).score(run, _scenario())
+    assert result.verdict == VERDICT_UNKNOWN
+    assert calls == []
+
+
 def test_empty_evidence_is_unscoreable_and_the_judge_is_not_called() -> None:
     # A run whose only content is a Rules section has no usable evidence → UNKNOWN with no model
     # call, so the judge can never certify compliance from nothing observable.

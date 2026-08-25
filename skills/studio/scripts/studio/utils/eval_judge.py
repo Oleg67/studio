@@ -152,9 +152,9 @@ def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
         delim = _fence_delim(stripped)
         if delim is not None:
             if fence is None:
-                fence = delim                        # open a fenced block
-            elif delim[0] == fence[0] and delim[1] >= fence[1]:
-                fence = None                         # a matching closer ends it
+                fence = delim                        # open a fenced block (an info string is fine)
+            elif delim[0] == fence[0] and delim[1] >= fence[1] and delim[1] == len(stripped):
+                fence = None                         # a closer: same char, ≥ length, nothing after it
         elif fence is None and stripped.startswith("## "):
             in_rules = stripped[3:].strip().lower().startswith("rules")
             if in_rules:
@@ -228,6 +228,11 @@ def build_judge_request(run: RunArtifacts, scenario: Scenario) -> JudgeRequest:
     rules = _extract_rules(run)
     summary = _run_summary(run)
     evidence, omitted = _run_evidence(run)
+    # A manifest-declared phase whose text is missing (unreadable, dropped by load_run) is unseen
+    # evidence just like an omitted phase — the judge must not certify a run it never fully saw.
+    declared_missing = any(
+        isinstance(phase, dict) and isinstance(phase.get("file"), str) and phase["file"]
+        and phase["file"] not in run.phase_texts for phase in run.phases)
     rules_block = "\n".join(f"- {rule}" for rule in rules) or "(no rules declared)"
     prompt = (
         f"You are judging whether a completed '{scenario.workflow}' workflow run followed its "
@@ -238,7 +243,7 @@ def build_judge_request(run: RunArtifacts, scenario: Scenario) -> JudgeRequest:
         f"rules):\n{evidence or '(no evidence beyond the plan)'}\n\n"
         "Answer with a verdict of 'compliant' or 'non_compliant' and a one-line rationale.")
     return JudgeRequest(workflow=scenario.workflow, rules=rules, evidence=evidence, prompt=prompt,
-                        evidence_incomplete=omitted > 0)
+                        evidence_incomplete=omitted > 0 or declared_missing)
 
 
 def _reply_to_verdict(reply: object) -> str:
@@ -262,7 +267,7 @@ def _evidence_gap(request: JudgeRequest) -> "Optional[str]":
     if not request.evidence.strip():
         return "no usable phase evidence beyond rules"
     if request.evidence_incomplete:
-        return "phase(s) omitted to fit the evidence budget"
+        return "declared phase(s) unreadable or omitted to fit the evidence budget"
     return None
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-gap
 
