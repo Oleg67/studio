@@ -350,3 +350,80 @@ def test_human_report_shows_compliance(capsys, tmp_path: Path) -> None:
     out = capsys.readouterr().out
     assert rc == 0
     assert "compliance" in out
+
+
+def test_human_report_explains_advisory_unknown(capsys, tmp_path: Path) -> None:
+    # A no-model run: the advisory judge is UNKNOWN for every scenario. Human mode must say so —
+    # those UNKNOWNs are the unwired judge (advisory), not structurally unscoreable runs.
+    ui_module.set_json_mode(False)
+    try:
+        with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+            rc = cmd_eval(["--scenarios-dir", str(FIXTURES)])
+    finally:
+        ui_module.set_json_mode(True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "scorers:" in out and "advisory" in out
+    assert "does not affect the gate" in out
+
+
+def test_human_report_prints_calibration_under_flag(capsys, tmp_path: Path) -> None:
+    # Without this fix --calibrate was invisible outside --json; the metrics must now print.
+    ui_module.set_json_mode(False)
+    try:
+        with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+            rc = cmd_eval(["--scenarios-dir", str(FIXTURES), "--calibrate"])
+    finally:
+        ui_module.set_json_mode(True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "calibrate" in out and "accuracy" in out
+
+
+def test_advisory_count_is_a_false_positive_control() -> None:
+    # A structural UNKNOWN (a genuinely unscoreable run) must NOT be counted as an advisory one,
+    # and a wired advisory verdict (compliant) is not an unknown. Only the unwired-judge UNKNOWNs.
+    from studio.commands.eval import _count_advisory_unknown  # noqa: PLC0415
+    data = {"per_scenario": [
+        {"results": [{"kind": "deterministic", "verdict": "UNKNOWN"},   # structural, not counted
+                     {"kind": "advisory", "verdict": "UNKNOWN"}]},       # counted
+        {"results": [{"kind": "advisory", "verdict": "compliant"}]}]}    # wired judge, not unknown
+    assert _count_advisory_unknown(data) == 1
+
+
+@pytest.mark.parametrize("data", [
+    {},                                          # no per_scenario key
+    {"per_scenario": None},                      # wrong type
+    {"per_scenario": [123, "x"]},                # non-dict rows
+    {"per_scenario": [{"results": 5}]},          # non-list results
+    {"per_scenario": [{"results": ["x", 1]}]},   # non-dict results
+])
+def test_advisory_count_is_failsafe_on_malformed_payload(data: dict) -> None:
+    from studio.commands.eval import _count_advisory_unknown  # noqa: PLC0415
+    assert _count_advisory_unknown(data) == 0  # never raises, never a false count
+
+
+def test_no_note_or_calibration_line_when_absent(capsys) -> None:
+    # No advisory UNKNOWNs → no note; no judge_calibration → no calibrate line.
+    from studio.commands.eval import _human_report  # noqa: PLC0415
+    ui_module.set_json_mode(False)
+    try:
+        _human_report({"summary": {"scored": 1, "unknown": 0, "results": 1, "scenarios": 1,
+                                   "structural_compliance": 1.0, "coverage": "structural (deterministic)"},
+                       "per_scenario": [{"results": [{"kind": "deterministic", "verdict": "PASS"}]}]})
+    finally:
+        ui_module.set_json_mode(True)
+    out = capsys.readouterr().out
+    assert "advisory UNKNOWN" not in out and "calibrate" not in out
+
+
+def test_report_calibration_tolerates_malformed(capsys) -> None:
+    from studio.commands.eval import _report_calibration  # noqa: PLC0415
+    ui_module.set_json_mode(False)
+    try:
+        _report_calibration(None)                       # not a dict → prints nothing
+        _report_calibration({"gold_backed": 7, "excluded_unscoreable": None})  # non-list → 0/0
+    finally:
+        ui_module.set_json_mode(True)
+    out = capsys.readouterr().out
+    assert "0 gold-backed, 0 excluded" in out          # second call rendered without raising

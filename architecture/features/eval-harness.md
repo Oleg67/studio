@@ -90,6 +90,8 @@ advisory verdict can never gate a build.
 - [x] - `p1` - Load an optional baseline report JSON, degrading to no-diff on error - `inst-load-baseline`
 - [x] - `p1` - Save this run's report JSON to serve as a later baseline - `inst-save-report`
 - [x] - `p1` - Render a short human-readable summary when not in JSON mode - `inst-human-report`
+- [x] - `p1` - In the human summary, explain advisory-only UNKNOWNs (unwired judge, never gates) - `inst-human-advisory`
+- [x] - `p1` - In the human summary, print the calibration metrics under `--calibrate`, tolerating a malformed payload - `inst-human-calibration`
 - [x] - `p1` - Under `--calibrate`, measure the reference judge over the gold-backed scenarios - `inst-judge-calibration`
 
 ## 3. Processes / Business Logic (CDSL)
@@ -215,3 +217,4 @@ yields a per-scenario regression diff without changing the exit code.
 - [x] `p1` - A run whose phase files carry no parseable `[phase]` frontmatter scores `UNKNOWN`, never 0; the scorer touches no filesystem and is a pure function of the in-memory run artifacts
 - [x] `p1` - The advisory rule-judge is `ADVISORY` and never affects the exit code; with no injected `judge_fn` it scores `UNKNOWN`, so `cfs eval` runs and gates deterministically without a model
 - [x] `p1` - Judge calibration reports accuracy against a human gold set and run-to-run consistency, kept separate from structural compliance; judge coverage is derived from which scenarios carry a gold set
+- [x] `p1` - In default (non-JSON) mode the human summary prints the scorer coverage line, explains that advisory-only UNKNOWNs come from an unwired judge (never counted against the gate), and prints the calibration metrics under `--calibrate`; the JSON payload is unchanged

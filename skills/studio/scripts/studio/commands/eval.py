@@ -127,14 +127,73 @@ def _save_report(payload: Dict[str, object], path: Path) -> Optional[str]:
 
 # @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-report
 def _human_report(data: Dict[str, object]) -> None:
-    """Render a short human summary (JSON mode prints the full report instead)."""
+    """Render a short human summary (JSON mode prints the full report instead).
+
+    Beyond the aggregate counters it surfaces the advisory context the JSON already carries, so a
+    default (non-JSON) run is not misread: the scorer coverage line, an explicit note when the
+    only reason for UNKNOWN results is an unwired advisory judge (which never gates), and the
+    calibration metrics under ``--calibrate`` (otherwise visible only in the ``--json`` payload).
+    """
     summary = data.get("summary", {})
     ui.info(f"eval: {summary.get('scored', 0)} scored / {summary.get('unknown', 0)} unknown "
             f"({summary.get('results', 0)} result(s) across {summary.get('scenarios', 0)} scenario(s))")
+    coverage = summary.get("coverage")
+    if coverage:
+        ui.info(f"scorers: {coverage}")
+    _report_advisory_unknown(data)
     compliance = summary.get("structural_compliance")
     ui.info(f"structural compliance: {compliance * 100:.0f}%" if compliance is not None
             else "structural compliance: n/a (nothing scored)")
+    _report_calibration(data.get("judge_calibration"))
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-report
+
+
+# @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-advisory
+def _count_advisory_unknown(data: Dict[str, object]) -> int:
+    """Count scorer-results that are UNKNOWN *and* advisory — the unwired-judge UNKNOWNs a reader
+    must not mistake for structurally unscoreable runs. A structural UNKNOWN (a genuinely
+    unscoreable run) is deliberately not counted here. Reads the per-scenario results already in
+    the payload (adding no JSON field) and tolerates any malformed shape without raising."""
+    total = 0
+    rows = data.get("per_scenario")
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        results = row.get("results")
+        for result in results if isinstance(results, list) else []:
+            if (isinstance(result, dict)
+                    and result.get("kind") == eval_harness.ScorerKind.ADVISORY.value
+                    and result.get("verdict") == eval_harness.VERDICT_UNKNOWN):
+                total += 1
+    return total
+
+
+def _report_advisory_unknown(data: Dict[str, object]) -> None:
+    """Explain advisory-only UNKNOWNs so a healthy no-model run does not look half-broken."""
+    count = _count_advisory_unknown(data)
+    if count:
+        ui.info(f"note: {count} advisory UNKNOWN — no judge model wired "
+                "(advisory only; does not affect the gate)")
+# @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-advisory
+
+
+# @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-calibration
+def _report_calibration(calibration: object) -> None:
+    """Surface the calibration metrics in human mode; without this ``--calibrate`` prints nothing
+    unless the caller reads the raw ``--json`` payload. Tolerates a malformed payload."""
+    if not isinstance(calibration, dict):
+        return
+    accuracy = calibration.get("accuracy")
+    consistency = calibration.get("consistency")
+    gold = calibration.get("gold_backed")
+    excluded = calibration.get("excluded_unscoreable")
+    gold_n = len(gold) if isinstance(gold, list) else 0
+    excluded_n = len(excluded) if isinstance(excluded, list) else 0
+    ui.info(f"calibrate ({calibration.get('judge', 'reference-stub')}): {gold_n} gold-backed, "
+            f"{excluded_n} excluded, "
+            f"accuracy {accuracy if accuracy is not None else 'n/a'}, "
+            f"consistency {consistency if consistency is not None else 'n/a'}")
+# @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-calibration
 
 
 # @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-judge-calibration
