@@ -189,14 +189,20 @@ def _report_calibration(calibration: object) -> None:
     unless the caller reads the raw ``--json`` payload. Tolerates a malformed payload."""
     if not isinstance(calibration, dict):
         return
-    accuracy = calibration.get("accuracy")
-    consistency = calibration.get("consistency")
     gold = calibration.get("gold_backed")
     excluded = calibration.get("excluded_unscoreable")
-    gold_n = len(gold) if isinstance(gold, list) else 0
-    excluded_n = len(excluded) if isinstance(excluded, list) else 0
-    ui.info(f"calibrate ({calibration.get('judge', 'reference-stub')}): {gold_n} gold-backed, "
-            f"{excluded_n} excluded, "
+    # A required field present with the wrong type is a *malformed* payload — say so, rather than
+    # coercing it to zero and rendering it identically to a valid empty calibration.
+    if (gold is not None and not isinstance(gold, list)) or \
+            (excluded is not None and not isinstance(excluded, list)):
+        ui.info("calibrate: malformed calibration payload (unexpected field types)")
+        return
+    accuracy = calibration.get("accuracy")
+    consistency = calibration.get("consistency")
+    broken = calibration.get("broken_gold")
+    broken_note = f", {len(broken)} broken-gold" if isinstance(broken, list) and broken else ""
+    ui.info(f"calibrate ({calibration.get('judge', 'reference-stub')}): {len(gold or [])} "
+            f"gold-backed, {len(excluded or [])} excluded{broken_note}, "
             f"accuracy {accuracy if accuracy is not None else 'n/a'}, "
             f"consistency {consistency if consistency is not None else 'n/a'}")
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-calibration
@@ -210,15 +216,21 @@ def _judge_calibration(scenarios_dir: Path) -> Dict[str, object]:
     machinery; a real ``judge_fn`` supplied out-of-tree yields a real judge measurement.
     """
     cases = []
+    broken_gold = []
     for scenario in eval_harness.load_scenarios(scenarios_dir):
         gold = load_gold(scenario.gold_path)
         if gold is not None:
             cases.append((scenario, eval_harness.load_run(scenario.run_dir), gold))
+        elif scenario.gold_path is not None:
+            # A gold file was configured but could not be loaded (unreadable / malformed / bad
+            # verdict) — distinct from a scenario that simply declares no gold at all.
+            broken_gold.append(scenario.id)
     result = calibrate(cases, reference_stub_judge)
     return {
         "judge": "reference-stub",
         "gold_backed": result.covered,
         "excluded_unscoreable": result.excluded,
+        "broken_gold": broken_gold,
         "accuracy": result.accuracy,
         "consistency": result.consistency,
         "runs_per_scenario": result.runs_per_scenario,

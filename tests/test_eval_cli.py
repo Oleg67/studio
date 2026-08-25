@@ -426,16 +426,39 @@ def test_no_note_or_calibration_line_when_absent(capsys) -> None:
     assert "calibrate" not in out
 
 
-def test_report_calibration_tolerates_malformed(capsys) -> None:
+def test_report_calibration_flags_malformed_vs_empty(capsys) -> None:
+    # A malformed payload (wrong field types) must be reported distinctly, not coerced to the same
+    # "0 gold-backed, 0 excluded" a *valid empty* calibration shows.
     from studio.commands.eval import _report_calibration  # noqa: PLC0415
     ui_module.set_json_mode(False)
     try:
-        _report_calibration(None)                       # not a dict → prints nothing
-        _report_calibration({"gold_backed": 7, "excluded_unscoreable": None})  # non-list → 0/0
+        _report_calibration(None)                                    # not a dict → prints nothing
+        _report_calibration({"gold_backed": [], "excluded_unscoreable": []})   # valid empty
+        _report_calibration({"gold_backed": 7, "excluded_unscoreable": None})  # malformed (non-list)
     finally:
         ui_module.set_json_mode(True)
     out = capsys.readouterr().out
-    assert "0 gold-backed, 0 excluded" in out          # second call rendered without raising
+    assert "0 gold-backed, 0 excluded" in out          # the valid-empty render
+    assert "malformed calibration payload" in out      # the malformed one, distinctly
+
+
+def test_calibration_distinguishes_broken_gold_from_absent(capsys, tmp_path: Path) -> None:
+    # A configured-but-unloadable gold file (malformed here) is reported as broken_gold, distinct
+    # from a scenario that simply declares no gold at all.
+    scenarios = tmp_path / "s"
+    broke_run = scenarios / "broke" / "run"
+    broke_run.mkdir(parents=True)
+    (scenarios / "broke" / "scenario.toml").write_text(
+        '[scenario]\nid = "broke"\nworkflow = "w"\nrun_dir = "run"\n'
+        '[scenario.gold]\npath = "gold.toml"\n')
+    (scenarios / "broke" / "gold.toml").write_text("= = not valid toml")   # configured but broken
+    (broke_run / "plan.toml").write_text('[plan]\ntask = "t"\n')
+    (scenarios / "nogold").mkdir()
+    (scenarios / "nogold" / "scenario.toml").write_text('[scenario]\nid = "nogold"\nworkflow = "w"\n')
+    with patch(_GET_CONTEXT, return_value=_ctx(tmp_path)):
+        cmd_eval(["--scenarios-dir", str(scenarios), "--calibrate"])
+    cal = json.loads(capsys.readouterr().out)["judge_calibration"]
+    assert cal["broken_gold"] == ["broke"]             # the broken one only; "nogold" is absent, not broken
 
 
 def test_calibrate_never_affects_the_gate(capsys, tmp_path: Path) -> None:

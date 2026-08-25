@@ -113,6 +113,27 @@ def _fence_delim(stripped: str) -> "Optional[Tuple[str, int]]":
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-fence
 
 
+# @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-order
+def _ordered_phase_names(run: RunArtifacts) -> List[str]:
+    """Phase-text filenames in **manifest** order (``run.phases``), so RULES, EVIDENCE and the run
+    summary all present the same sequence — a filename sort could otherwise reorder them and
+    distort a phase-by-phase judgement. A phase declared in the manifest but with no text is
+    skipped; any text not named in the manifest is appended by name so nothing is silently lost."""
+    ordered: List[str] = []
+    seen = set()
+    for phase in run.phases:
+        name = phase.get("file") if isinstance(phase, dict) else None
+        if isinstance(name, str) and name in run.phase_texts and name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    for name in sorted(run.phase_texts):
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
+# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-order
+
+
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-prompt
 def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
     """Partition a phase body into ``(rules_lines, other_lines)`` by ``## Rules`` heading.
@@ -143,9 +164,9 @@ def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
 
 
 def _extract_rules(run: RunArtifacts) -> List[str]:
-    """The non-empty ``## Rules`` prose of each phase body, in filename order. Deterministic."""
+    """The non-empty ``## Rules`` prose of each phase body, in manifest order. Deterministic."""
     out: List[str] = []
-    for name in sorted(run.phase_texts):
+    for name in _ordered_phase_names(run):
         body = "\n".join(_split_sections(run.phase_texts[name])[0]).strip()
         if body:
             out.append(body)
@@ -165,7 +186,7 @@ def _run_evidence(run: RunArtifacts) -> "Tuple[str, int]":
     incomplete so a verdict is never certified from evidence with entire phases unseen.
     """
     bodies = [(name, "\n".join(_split_sections(run.phase_texts[name])[1]).strip())
-              for name in sorted(run.phase_texts)]
+              for name in _ordered_phase_names(run)]
     bodies = [(name, body) for name, body in bodies if body]
     if not bodies:
         return "", 0

@@ -336,6 +336,19 @@ def test_split_ignores_a_rules_heading_inside_a_tilde_fence() -> None:
     assert reference_stub_judge(req).verdict == "non_compliant"
 
 
+def test_rules_and_evidence_follow_manifest_not_filename_order() -> None:
+    # The manifest declares phase-2 before phase-1; rules and evidence must follow that order (the
+    # same as the run summary), not a filename sort, or the prompt shows THE RUN in a different
+    # sequence from RULES/EVIDENCE and distorts a phase-by-phase judgement.
+    run = _run(
+        phases=[{"number": 2, "file": "phase-2.md"}, {"number": 1, "file": "phase-1.md"}],
+        phase_texts={"phase-1.md": "## What\n\nfirst-by-name\n\n## Rules\n\nrule-one\n",
+                     "phase-2.md": "## What\n\nsecond-by-name\n\n## Rules\n\nrule-two\n"})
+    req = build_judge_request(run, _scenario())
+    assert req.rules == ["rule-two", "rule-one"]                       # manifest order, not sorted
+    assert req.evidence.index("second-by-name") < req.evidence.index("first-by-name")
+
+
 def test_empty_evidence_is_unscoreable_and_the_judge_is_not_called() -> None:
     # A run whose only content is a Rules section has no usable evidence → UNKNOWN with no model
     # call, so the judge can never certify compliance from nothing observable.
