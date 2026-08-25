@@ -454,7 +454,7 @@ def calibrate(cases: List[Tuple[Scenario, Optional[RunArtifacts], Gold]],
     scoreable, excluded = _scoreable_cases(cases)
     outcomes = [(scenario, _score_case(judge, scenario, run, gold, runs))
                 for scenario, run, gold in scoreable]
-    excluded = excluded + [scenario.id for scenario, out in outcomes if out[0]]   # out[0] = errored
+    excluded = excluded + [scenario.id for scenario, out in outcomes if out[0]]   # out[0]: errored?
     scored = [out for _, out in outcomes if not out[0]]
     total = len(scored)
     return Calibration(
