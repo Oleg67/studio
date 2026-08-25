@@ -161,7 +161,7 @@ asserted: calibration reports accuracy against a human gold set and run-to-run c
 judge coverage is derived from which scenarios carry a gold set.
 
 **Steps**:
-1. [x] - `p1` - Extract the rules, evidence, and run summary from a phase run, splitting rule declarations from the work - `inst-judge-prompt`
+1. [x] - `p1` - Extract the `## Rules` declarations from each phase body, tracking fenced-code state so a rule heading inside an example is not mistaken for a real section - `inst-judge-prompt`
 2. [x] - `p1` - Assemble the deterministic judge request (rules + evidence + prompt) and map replies to verdicts, with no model call - `inst-judge-request`
 3. [x] - `p1` - Score rule-compliance via the injected judge, returning an advisory result that can never gate - `inst-judge-scorer`
 4. [x] - `p1` - Calibrate the judge over gold-backed scenarios: accuracy vs the human label and run-to-run consistency - `inst-judge-calibrate-run`
@@ -169,6 +169,7 @@ judge coverage is derived from which scenarios carry a gold set.
 **Supporting**:
 - [x] - `p1` - Imports, the rules-section pattern, and the gold-label-to-verdict mapping - `inst-judge-imports`
 - [x] - `p1` - The judge data model: gold label, judge request/reply, and the `JudgeFn` seam - `inst-judge-datamodel`
+- [x] - `p1` - Assemble the bounded run evidence (total-capped share per phase, omitted phases flagged) and the run summary - `inst-judge-evidence`
 - [x] - `p1` - Load a scenario's `gold.toml` human label, degrading to unvalidated on absence - `inst-judge-gold`
 - [x] - `p1` - A deterministic reference-stub `JudgeFn` for tests and calibration wiring (not a model) - `inst-judge-stub`
 - [x] - `p1` - The `Calibration` result model (accuracy, consistency, coverage) - `inst-judge-calibrate`

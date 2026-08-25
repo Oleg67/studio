@@ -380,14 +380,20 @@ def test_human_report_prints_calibration_under_flag(capsys, tmp_path: Path) -> N
     assert "calibrate" in out and "accuracy" in out
 
 
-def test_advisory_count_is_a_false_positive_control() -> None:
-    # A structural UNKNOWN (a genuinely unscoreable run) must NOT be counted as an advisory one,
-    # and a wired advisory verdict (compliant) is not an unknown. Only the unwired-judge UNKNOWNs.
+def test_advisory_count_only_counts_the_unwired_judge() -> None:
+    # Only advisory UNKNOWNs caused by an unwired judge are counted. A structural UNKNOWN, a wired
+    # advisory verdict, and — the CodeRabbit case — an advisory UNKNOWN from an *unreadable run*
+    # (also advisory UNKNOWN, but not benign) must all be excluded, or the "no judge wired" note
+    # would misattribute a broken run.
     from studio.commands.eval import _count_advisory_unknown  # noqa: PLC0415
     data = {"per_scenario": [
-        {"results": [{"kind": "deterministic", "verdict": "UNKNOWN"},   # structural, not counted
-                     {"kind": "advisory", "verdict": "UNKNOWN"}]},       # counted
-        {"results": [{"kind": "advisory", "verdict": "compliant"}]}]}    # wired judge, not unknown
+        {"results": [{"kind": "deterministic", "verdict": "UNKNOWN"},              # structural, not counted
+                     {"kind": "advisory", "verdict": "UNKNOWN",
+                      "coverage": "no judge_fn: model supplied out-of-tree; x"}]},  # counted
+        {"results": [{"kind": "advisory", "verdict": "UNKNOWN",
+                      "coverage": "unscoreable: no readable run; x"}]},             # broken run, NOT counted
+        {"results": [{"kind": "advisory", "verdict": "compliant",
+                      "coverage": "1 rule(s) assessed; x"}]}]}                      # wired judge, not unknown
     assert _count_advisory_unknown(data) == 1
 
 

@@ -47,6 +47,10 @@ _VERDICT_BY_LABEL = {GOLD_COMPLIANT: VERDICT_PASS, GOLD_NON_COMPLIANT: VERDICT_F
 #: Cap on the run-evidence handed to the judge — bounded so the prompt stays deterministic
 #: and small; the judge assesses compliance from this, not from the rule declarations.
 _EVIDENCE_CAP = 4000
+#: Floor a single phase needs to be shown meaningfully. When the equal share of ``_EVIDENCE_CAP``
+#: falls below this (many phases), only as many phases as fit at the floor are shown and the rest
+#: are flagged omitted — so the total stays bounded and no verdict rests on silently dropped work.
+_MIN_PHASE_EVIDENCE = 200
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-imports
 
 
@@ -102,9 +106,12 @@ def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
     rules: List[str] = []
     other: List[str] = []
     in_rules = False
+    in_fence = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("## "):
+        if stripped.startswith("```"):
+            in_fence = not in_fence      # a fence toggles; ## inside it is example text, not a heading
+        elif not in_fence and stripped.startswith("## "):
             in_rules = stripped[3:].strip().lower().startswith("rules")
             if in_rules:
                 continue          # drop the heading line itself; keep other headings as context
@@ -120,28 +127,41 @@ def _extract_rules(run: RunArtifacts) -> List[str]:
         if body:
             out.append(body)
     return out
+# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-prompt
 
 
+# @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-evidence
 def _run_evidence(run: RunArtifacts) -> str:
     """Bounded, deterministic evidence of what the run actually contains — each phase body with
     its ``## Rules`` declaration removed — so compliance is judged from the work, not the rules.
 
-    The ``_EVIDENCE_CAP`` budget is split **per phase**, not applied to the concatenation, so a
-    long first phase can never swallow the whole budget and hide a later phase's violation.
-    A phase trimmed to fit is marked ``[…truncated]`` so the judge sees that evidence was cut.
+    ``_EVIDENCE_CAP`` bounds the **total**: phases share it equally, so a long first phase can
+    never swallow the budget and hide a later phase's violation. When there are too many phases to
+    show each meaningfully (equal share below ``_MIN_PHASE_EVIDENCE``), only as many as fit at the
+    floor are included and the rest are flagged omitted — the total stays bounded and the judge is
+    told the evidence is incomplete rather than ruling on a silently truncated set. A phase trimmed
+    to fit is marked ``[…truncated]``.
     """
-    names = sorted(run.phase_texts)
-    if not names:
+    bodies = [(name, "\n".join(_split_sections(run.phase_texts[name])[1]).strip())
+              for name in sorted(run.phase_texts)]
+    bodies = [(name, body) for name, body in bodies if body]
+    if not bodies:
         return ""
-    per_phase = max(400, _EVIDENCE_CAP // len(names))
+    shown = len(bodies)
+    per_phase = _EVIDENCE_CAP // shown
+    omitted = 0
+    if per_phase < _MIN_PHASE_EVIDENCE:
+        shown = max(1, _EVIDENCE_CAP // _MIN_PHASE_EVIDENCE)
+        per_phase = _MIN_PHASE_EVIDENCE
+        omitted = len(bodies) - shown
     chunks: List[str] = []
-    for name in names:
-        other = "\n".join(_split_sections(run.phase_texts[name])[1]).strip()
-        if not other:
-            continue
-        if len(other) > per_phase:
-            other = other[:per_phase].rstrip() + "\n[…truncated]"
-        chunks.append(f"### {name}\n{other}")
+    for name, body in bodies[:shown]:
+        if len(body) > per_phase:
+            body = body[:per_phase].rstrip() + "\n[…truncated]"
+        chunks.append(f"### {name}\n{body}")
+    if omitted:
+        chunks.append(f"[{omitted} further phase(s) omitted to stay within the evidence budget; "
+                      "evidence is incomplete]")
     return "\n\n".join(chunks)
 
 
@@ -153,7 +173,7 @@ def _run_summary(run: RunArtifacts) -> str:
         if isinstance(phase, dict):
             lines.append(f"  - phase {phase.get('number')}: {phase.get('file')}")
     return "\n".join(lines)
-# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-prompt
+# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-evidence
 
 
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-request

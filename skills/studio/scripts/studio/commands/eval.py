@@ -27,6 +27,11 @@ from ..utils.eval_structural import StructuralScorer
 from ..utils.ui import ui
 
 logger = logging.getLogger(__name__)
+
+#: Prefix of the advisory scorer's coverage reason when its UNKNOWN is *only* an unwired judge
+#: (vs. an unreadable run, which also yields advisory UNKNOWN but is not benign). The human note
+#: explains only the former, so it filters on this.
+_NO_JUDGE_REASON = "no judge_fn"
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-eval-imports
 
 
@@ -163,7 +168,8 @@ def _count_advisory_unknown(data: Dict[str, object]) -> int:
         for result in results if isinstance(results, list) else []:
             if (isinstance(result, dict)
                     and result.get("kind") == eval_harness.ScorerKind.ADVISORY.value
-                    and result.get("verdict") == eval_harness.VERDICT_UNKNOWN):
+                    and result.get("verdict") == eval_harness.VERDICT_UNKNOWN
+                    and str(result.get("coverage", "")).startswith(_NO_JUDGE_REASON)):
                 total += 1
     return total
 

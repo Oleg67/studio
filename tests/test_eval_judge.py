@@ -277,3 +277,25 @@ def test_evidence_handles_empty_and_contentless_phases() -> None:
     # A phase whose only content is a Rules section contributes no evidence.
     only_rules = build_judge_request(_run(phase_texts={"p.md": "## Rules\nfollow\n"}), _scenario())
     assert only_rules.evidence == ""
+
+
+def test_split_ignores_a_rules_heading_inside_a_fenced_block() -> None:
+    # A `## Rules` inside a fenced example must not be read as a real section heading — otherwise
+    # the negative evidence after it is moved out of evidence and the run can look compliant.
+    body = ("## What\n\nwe did the work\n\n"
+            "```markdown\n## Rules\nexample rule text\n```\n\n"
+            "then we ignored the spec here\n")
+    req = build_judge_request(_run(phase_texts={"p.md": body}), _scenario())
+    assert "ignored the spec here" in req.evidence          # not hidden by the fenced heading
+    assert reference_stub_judge(req).verdict == "non_compliant"
+
+
+def test_evidence_enforces_a_bounded_total_with_an_omission_signal() -> None:
+    # Many long phases must not blow the total budget: evidence stays bounded and the omitted
+    # phases are flagged, so the judge never rules on a silently truncated set.
+    from studio.utils.eval_judge import _EVIDENCE_CAP  # noqa: PLC0415
+    phases = {f"phase-{i:02d}.md": f"## What\n\n{'filler ' * 300}\n" for i in range(30)}
+    req = build_judge_request(_run(phase_texts=phases), _scenario())
+    assert len(req.evidence) < _EVIDENCE_CAP * 2           # bounded, not ~30 phases * a 400 floor
+    assert "omitted to stay within the evidence budget" in req.evidence
+    assert "evidence is incomplete" in req.evidence
