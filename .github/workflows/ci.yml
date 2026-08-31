@@ -42,10 +42,17 @@ jobs:
   gates:
     name: Enforcement Gates (seeded violations must fail)
     runs-on: ubuntu-latest
+    permissions:
+      # This job runs pull-request code (`make install`, `make test-gates`), so
+      # it gets the least privilege that still lets it check out and read.
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Keep the job token out of .git/config so the test corpus this job
+          # executes cannot read it back. The initial fetch is unaffected.
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
