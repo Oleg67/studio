@@ -17,6 +17,13 @@ from studio.utils.eval_harness import ReferencePresenceScorer, Scenario, ScorerK
 from studio.utils.eval_judge import Gold
 from studio.utils.manifest import ManifestLayerState
 from studio.utils.okf import write_concept_file
+from studio.utils.change_summary import (
+    resolve_window,
+    select_events,
+    group_by_run,
+    ChangeWindow,
+    EventSelection,
+)
 
 is_json = _UI.is_json  # staticmethod alias exposed on the ui singleton
 
@@ -131,3 +138,16 @@ SemanticCalibration.per_case  # noqa: B018
 SemanticCalibration.excluded  # noqa: B018
 SemanticCalibration.judge  # noqa: B018
 SemanticCalibration.schema_version  # noqa: B018
+
+# Change-summary core: the window and event-selection API the change-summary
+# command will consume. Landed ahead of its CLI wrapper so the pure logic is
+# reviewable on its own, so nothing in production calls it yet. Only the fields
+# no internal caller reads are listed — the rest are genuinely referenced.
+resolve_window  # noqa: B018
+select_events  # noqa: B018
+group_by_run  # noqa: B018
+ChangeWindow.base_ref  # noqa: B018
+ChangeWindow.base_sha  # noqa: B018
+EventSelection.scanned  # noqa: B018
+EventSelection.undated  # noqa: B018
+EventSelection.skipped_lines  # noqa: B018

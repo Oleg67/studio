@@ -19,6 +19,7 @@
   - [Run Self-Check](#run-self-check)
   - [Resolve Variables](#resolve-variables-1)
   - [Pylint Rollout Phase 0](#pylint-rollout-phase-0)
+  - [Change Summary Window And Events](#change-summary-window-and-events)
 - [4. States (CDSL)](#4-states-cdsl)
   - [Developer Experience State](#developer-experience-state)
 - [5. Definitions of Done](#5-definitions-of-done)
@@ -230,6 +231,28 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 3. - `p2` - Keep the remaining backlog deferred for later rollout phases, starting with `R0917`, `R0902`, `C0302`, `C0415`, `R0401`, and `C0301` - `inst-pylint-phase-0-deferred-half`
 4. - `p2` - Keep the rollout aligned with `cpt-studio-nfr-zero-harm`: stage advisory cleanup before enabling additional checks - `inst-pylint-phase-0-zero-harm`
 
+### Change Summary Window And Events
+
+- [x] `p1` - **ID**: `cpt-studio-algo-developer-experience-change-summary`
+
+**Input**: A project root, plus an optional base ref or explicit lower-bound timestamp
+
+**Output**: The span of work a change digest covers, and the decision-log events recorded inside it
+
+**Rules**:
+1. [x] - `p1` - Define the window and selection result types, and the reason vocabulary shared by producer and renderer so an unavailable dimension is always named rather than shown as empty - `inst-change-summary-datamodel`
+2. [x] - `p1` - Answer read-only git queries as one line of output or nothing, treating git absent, non-zero exit, timeout and empty output identically - `inst-change-summary-git-query`
+3. [x] - `p1` - Detect whether the project root sits inside a git work tree - `inst-change-summary-detect-repo`
+4. [x] - `p1` - Resolve the base ref, preferring the canonical remote over a fork's lagging default, and honour or refuse an explicitly requested ref rather than substituting a fallback - `inst-change-summary-default-base`
+5. [x] - `p1` - Resolve the merge-base between HEAD and the base ref, treating unrelated histories as no window - `inst-change-summary-merge-base`
+6. [x] - `p1` - Read the base commit's commit time as the window's lower bound - `inst-change-summary-base-time`
+7. [x] - `p1` - Assemble the window, short-circuiting git when the caller supplies an explicit lower bound, and returning a stated reason on every failure path instead of raising - `inst-change-summary-resolve-window`
+8. [x] - `p1` - Parse ISO-8601 timestamps to aware datetimes, normalising a trailing Z and refusing naive values rather than assuming an offset that would move events across the boundary - `inst-change-summary-parse-ts`
+9. [x] - `p1` - Report why the decision log cannot be read, distinguishing opt-out from absent from unreadable - `inst-change-summary-log-state`
+10. [x] - `p1` - Count the log's non-empty lines so the number that failed to parse can be derived and reported as a lower bound on corruption - `inst-change-summary-count-lines`
+11. [x] - `p1` - Select events at or after the window boundary, excluding and counting undated events rather than guessing them into or out of the window - `inst-change-summary-select-events`
+12. [x] - `p1` - Group selected events by run id in first-seen order, so one invocation is a subdivision of the branch's span and never the whole story - `inst-change-summary-group-runs`
+
 ## 4. States (CDSL)
 
 ### Developer Experience State
@@ -289,6 +312,7 @@ No feature-specific state machines. Self-check is stateless (run → report).
 | TOC Command | `skills/.../commands/toc.py` | CLI wrapper for TOC generation |
 | TOC Utils | `skills/.../utils/toc.py` | Unified TOC generation, anchor slugs, code block awareness |
 | Resolve Vars Command | `skills/.../commands/resolve_vars.py` | Template variable resolution to absolute paths |
+| Change Summary Core | `skills/.../utils/change_summary.py` | Window resolution from git, and decision-log event selection inside it |
 
 ## 7. Acceptance Criteria
 
