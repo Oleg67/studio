@@ -23,6 +23,7 @@ from studio.utils.change_summary import (
     group_by_run,
     ChangeWindow,
     EventSelection,
+    RUN_UNATTRIBUTED,
 )
 
 is_json = _UI.is_json  # staticmethod alias exposed on the ui singleton
@@ -151,3 +152,6 @@ ChangeWindow.base_sha  # noqa: B018
 EventSelection.scanned  # noqa: B018
 EventSelection.undated  # noqa: B018
 EventSelection.skipped_lines  # noqa: B018
+ChangeWindow.project_root  # noqa: B018
+EventSelection.runless  # noqa: B018
+RUN_UNATTRIBUTED  # noqa: B018

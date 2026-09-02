@@ -113,13 +113,18 @@ def opt_out_sentinel_path() -> Path:
     return _brand_dir() / _OPT_OUT_SENTINEL
 
 
-def default_log_path() -> Optional[Path]:
+def default_log_path(start: Optional[Path] = None) -> Optional[Path]:
     """Resolve the log location, or ``None`` when there is nowhere to write.
 
     Order:
       1. ``$CFS_DECISION_LOG`` if it names a path (an off-value there disables logging).
-      2. ``<studio-dir>/.cache/decisions.jsonl`` for the project containing the cwd.
+      2. ``<studio-dir>/.cache/decisions.jsonl`` for the project containing ``start``.
       3. ``None`` — outside a project, so the writer no-ops.
+
+    ``start`` defaults to the cwd, which is right for the writer: it logs whatever
+    project the command is running in. A *reader* working against an explicitly named
+    project must pass that root, or it can resolve a different project's log than the
+    one it is reporting on.
     """
     override = os.environ.get(_ENV_PATH, "").strip()
     if override and override.lower() not in _OFF_VALUES:
@@ -127,7 +132,7 @@ def default_log_path() -> Optional[Path]:
 
     try:
         from .files import find_studio_directory
-        studio_dir = find_studio_directory(Path.cwd())
+        studio_dir = find_studio_directory(start or Path.cwd())
     except Exception:  # pylint: disable=broad-except
         studio_dir = None
     if studio_dir is None:

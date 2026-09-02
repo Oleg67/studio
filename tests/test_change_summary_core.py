@@ -180,7 +180,7 @@ class TestTheWindowSaysWhyItCouldNotBeBuilt:
     def test_unrelated_histories_have_no_merge_base(self, tmp_path, monkeypatch):
         repo = _make_repo(tmp_path / "r")
         _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
-        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: None)
+        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: (None, False))
 
         window = cs.resolve_window(repo)
 
@@ -191,7 +191,7 @@ class TestTheWindowSaysWhyItCouldNotBeBuilt:
     def test_a_base_commit_without_a_readable_time_is_reported(self, tmp_path, monkeypatch):
         repo = _make_repo(tmp_path / "r")
         _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
-        monkeypatch.setattr(cs, "_commit_time", lambda *_a, **_k: None)
+        monkeypatch.setattr(cs, "_commit_time", lambda *_a, **_k: (None, False))
 
         window = cs.resolve_window(repo)
 
@@ -486,6 +486,151 @@ class TestDeterminism:
 
         assert len({(w.base_ref, w.base_sha, w.since) for w in windows}) == 1
         assert len({(tuple(s.runs), s.scanned, s.undated) for s in selections}) == 1
+
+
+class TestTheLogIsBoundToTheWindowsProject:
+    """A window and its events must describe the same project.
+
+    `resolve_window` takes an explicit root; `decision_log.default_log_path()` defaults
+    to the cwd. Those are independent inputs, so a window for project A resolved while
+    the process sat in project B used to select B's decisions — one project's changes
+    reported alongside another's history.
+    """
+
+    def test_the_default_log_follows_the_window_not_the_cwd(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        window = cs.resolve_window(repo)
+        monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+        seen = {}
+
+        def _record(start=None):
+            seen["start"] = start
+            return tmp_path / "log.jsonl"
+
+        monkeypatch.setattr(decision_log, "default_log_path", _record)
+        cs._default_log_for(window)
+
+        assert seen["start"] == Path(window.project_root), "the window's root, not the cwd"
+
+    def test_the_window_records_the_project_it_describes(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+
+        assert cs.resolve_window(repo).project_root == str(repo)
+
+    def test_even_an_unavailable_window_records_its_project(self, tmp_path):
+        """Provenance must not depend on success, or a failure reason loses its subject."""
+        assert cs.resolve_window(tmp_path).project_root == str(tmp_path)
+
+    def test_a_rootless_window_still_falls_back_to_the_cwd_default(self, monkeypatch):
+        monkeypatch.setattr(decision_log, "default_log_path", lambda start=None: None)
+
+        assert cs._default_log_for(cs.ChangeWindow(available=True)) is None
+
+
+class TestGitFailureIsNotAConclusionAboutHistory:
+    """After the repo probe succeeds, a later git failure must not be reported as a
+    finding about the branch. "No merge base" and "git timed out" are different facts."""
+
+    def test_a_tool_failure_during_merge_base_reports_git_not_history(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: (None, True))
+
+        window = cs.resolve_window(repo)
+
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE
+        assert window.reason != cs.REASON_NO_MERGE_BASE
+
+    def test_a_genuine_absence_of_a_merge_base_still_says_so(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: (None, False))
+
+        assert cs.resolve_window(repo).reason == cs.REASON_NO_MERGE_BASE
+
+    def test_a_tool_failure_reading_the_base_time_reports_git(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.setattr(cs, "_commit_time", lambda *_a, **_k: (None, True))
+        window = cs.resolve_window(repo)
+
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE
+        assert window.base_sha, "what was already learned is still reported"
+
+    def test_a_non_zero_exit_is_a_valid_negative_not_a_tool_failure(self, tmp_path):
+        """`merge-base` and `rev-parse --verify` exit non-zero to mean "no" — treating
+        that as breakage would mislead in the opposite direction."""
+        repo = _make_repo(tmp_path / "r")
+
+        value, failed = cs._git_query(repo, ["rev-parse", "--verify", "--quiet", "nope"])
+
+        assert value is None
+        assert failed is False
+
+    def test_git_not_launching_is_a_tool_failure(self, tmp_path, monkeypatch):
+        def _boom(*_a, **_k):
+            raise OSError("no git")
+        monkeypatch.setattr(cs.subprocess, "run", _boom)
+
+        assert cs._git_query(tmp_path, ["status"]) == (None, True)
+
+
+class TestUndecodableLogs:
+
+    def test_invalid_utf8_returns_unavailable_rather_than_raising(self, tmp_path):
+        """The probe opened the file but did not decode it, so `read_events` performed
+        the first strict read and UnicodeDecodeError escaped `select_events`."""
+        log = tmp_path / "bad.jsonl"
+        log.write_bytes(b'{"schema":1,"ts":"2026-06-01T00:00:00+00:00"}\n\xff\xfe bad\n')
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.available is False
+        assert selection.reason == cs.REASON_LOG_UNREADABLE
+
+    def test_a_log_that_breaks_mid_read_is_not_a_partial_selection(self, tmp_path, monkeypatch):
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+
+        def _explode(*_a, **_k):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "boom")
+
+        monkeypatch.setattr(decision_log, "read_events", _explode)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.available is False
+        assert selection.reason == cs.REASON_LOG_UNREADABLE
+
+
+class TestEveryEventIsGrouped:
+
+    def test_events_without_a_run_id_are_bucketed_and_counted(self, tmp_path):
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = tmp_path / "d.jsonl"
+        rows = [
+            _event("2026-06-01T00:00:00+00:00", "r1"),
+            _event("2026-06-01T00:00:01+00:00", ""),
+            {"schema": 1, "ts": "2026-06-01T00:00:02+00:00", "event": "x", "payload": {}},
+            {"schema": 1, "ts": "2026-06-01T00:00:03+00:00", "run_id": None,
+             "event": "x", "payload": {}},
+        ]
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+        selection = cs.select_events(window, path=log)
+        grouped = cs.group_by_run(selection)
+
+        assert selection.runless == 3
+        assert sum(len(v) for v in grouped.values()) == len(selection.events), \
+            "every selected event lands in exactly one bucket"
+        assert grouped[cs.RUN_UNATTRIBUTED] and len(grouped[cs.RUN_UNATTRIBUTED]) == 3
+
+    def test_the_unattributed_bucket_cannot_collide_with_a_real_run_id(self):
+        """Run ids are hex; a parenthesised label cannot be produced as one."""
+        assert not all(c in "0123456789abcdef" for c in cs.RUN_UNATTRIBUTED)
 
 
 class TestGrouping:

@@ -35,7 +35,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import decision_log
 
@@ -84,6 +84,11 @@ REASON_LOG_DISABLED = "decision log disabled"
 REASON_LOG_ABSENT = "no decision log yet"
 REASON_LOG_UNREADABLE = "decision log unreadable"
 
+#: Bucket name for selected events carrying no ``run_id``. Grouping used to build
+#: buckets only for truthy ids, so such events sat in ``events`` and in no group and a
+#: renderer under-reported them. Run ids are hex, so this cannot collide with a real one.
+RUN_UNATTRIBUTED = "(unattributed)"
+
 
 @dataclass
 class ChangeWindow:
@@ -94,6 +99,7 @@ class ChangeWindow:
     commit time, which is what makes the window "everything after the branch point".
     """
 
+    project_root: str = ""
     base_ref: str = ""
     base_sha: str = ""
     since: str = ""
@@ -115,6 +121,7 @@ class EventSelection:
     runs: List[str] = field(default_factory=list)
     scanned: int = 0
     undated: int = 0
+    runless: int = 0
     skipped_lines: int = 0
     available: bool = False
     reason: str = REASON_NOT_A_PROJECT
@@ -122,12 +129,21 @@ class EventSelection:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-query
-def _git_line(project_root: Path, args: List[str]) -> Optional[str]:
-    """Run a read-only git query and return its first output line, or ``None``.
+def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool]:
+    """Run a read-only git query, returning ``(first line or None, tool_failed)``.
 
-    ``None`` covers every failure identically — git absent, non-zero exit, timeout,
-    empty output — because a caller deciding what to report needs "no answer", not a
-    diagnosis. Never raises.
+    The two halves of "no answer" are kept apart, because conflating them lets a
+    transient tool failure be reported as a conclusion about history — "no merge base"
+    when git simply timed out.
+
+    * **Tool failure** is git not launching, or timing out. Nothing was learned.
+    * **A non-zero exit is a valid negative**, not a failure: ``merge-base`` exits 1
+      when two histories genuinely have no common ancestor, and
+      ``rev-parse --verify --quiet`` exits 1 when a ref genuinely does not exist. Those
+      are answers, and treating them as breakage would be just as misleading in the
+      other direction.
+
+    Never raises.
     """
     try:
         result = subprocess.run(
@@ -139,13 +155,23 @@ def _git_line(project_root: Path, args: List[str]) -> Optional[str]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("change-summary git query failed: %s", exc)
-        return None
+        logger.debug("change-summary git query could not run: %s", exc)
+        return None, True
     if result.returncode:
         logger.debug("change-summary git query exited %d", result.returncode)
-        return None
+        return None, False
     line = result.stdout.strip().splitlines()
-    return line[0].strip() if line else None
+    return (line[0].strip() if line else None), False
+
+
+def _git_line(project_root: Path, args: List[str]) -> Optional[str]:
+    """First output line of a read-only git query, or ``None`` for any non-answer.
+
+    For callers that only need the value; use :func:`_git_query` where a tool failure
+    must be told apart from a valid negative.
+    """
+    value, _failed = _git_query(project_root, args)
+    return value
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-query
 
 
@@ -175,20 +201,22 @@ def _resolve_base_ref(project_root: Path, requested: str = "") -> Optional[str]:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-merge-base
-def _merge_base(project_root: Path, base_ref: str) -> Optional[str]:
+def _merge_base(project_root: Path, base_ref: str) -> Tuple[Optional[str], bool]:
     """Return the merge-base sha between ``HEAD`` and ``base_ref``.
 
-    Unrelated histories and a missing ref both yield ``None``: there is no branch
-    point, so there is no window to report.
+    Returns ``(sha, tool_failed)``. Unrelated histories and a missing ref yield a
+    ``None`` sha with ``tool_failed`` false — there is genuinely no branch point. A
+    ``True`` flag means git never answered, which is a different fact and must not be
+    reported as a finding about history.
     """
-    return _git_line(project_root, ["merge-base", "HEAD", base_ref])
+    return _git_query(project_root, ["merge-base", "HEAD", base_ref])
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-merge-base
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-base-time
-def _commit_time(project_root: Path, sha: str) -> Optional[str]:
-    """Return a commit's author-independent commit time in strict ISO 8601."""
-    return _git_line(project_root, ["show", "-s", "--format=%cI", sha])
+def _commit_time(project_root: Path, sha: str) -> Tuple[Optional[str], bool]:
+    """Commit time in strict ISO 8601, plus whether git itself failed."""
+    return _git_query(project_root, ["show", "-s", "--format=%cI", sha])
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-base-time
 
 
@@ -207,35 +235,63 @@ def resolve_window(
 
     Every failure returns an unavailable window carrying its reason. Never raises.
     """
+    root = str(project_root)
     if since:
-        return ChangeWindow(since=since, available=True, reason=REASON_OK)
+        return ChangeWindow(project_root=root, since=since, available=True, reason=REASON_OK)
 
     if not _is_git_repo(project_root):
         reason = REASON_NOT_A_REPO if _git_line(project_root, ["--version"]) else REASON_GIT_UNAVAILABLE
-        return ChangeWindow(reason=reason)
+        return ChangeWindow(project_root=root, reason=reason)
 
     base_ref = _resolve_base_ref(project_root, base)
     if base_ref is None:
         # Two different failures, two different reasons: a ref the caller named and
         # git does not have, versus no discoverable default at all.
-        return ChangeWindow(reason=REASON_BASE_REF_UNKNOWN if base else REASON_NO_BASE_REF)
+        return ChangeWindow(
+            project_root=root,
+            reason=REASON_BASE_REF_UNKNOWN if base else REASON_NO_BASE_REF,
+        )
+    return _window_from_base_ref(project_root, base_ref)
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-resolve-window
 
-    base_sha = _merge_base(project_root, base_ref)
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-window-from-base
+def _window_from_base_ref(project_root: Path, base_ref: str) -> ChangeWindow:
+    """Walk a known-good base ref down to a window, or the reason it could not.
+
+    Split out of :func:`resolve_window` to keep each function's guard clauses legible;
+    the whole point of this stage is that there are several distinct ways to fail and
+    each gets its own reported reason rather than a shared shrug.
+
+    Past this point git has already answered once, so a further non-answer is
+    ambiguous: it may be a genuine negative about history, or the tool falling over.
+    Reporting "no merge base" for a timeout would be a false conclusion, so the failure
+    flag takes precedence over the historical reading. Whatever *was* learned — the ref,
+    then the sha — stays on the returned window so a reason keeps its subject.
+    """
+    root = str(project_root)
+    base_sha, failed = _merge_base(project_root, base_ref)
+    if failed:
+        return ChangeWindow(project_root=root, base_ref=base_ref, reason=REASON_GIT_UNAVAILABLE)
     if base_sha is None:
-        return ChangeWindow(base_ref=base_ref, reason=REASON_NO_MERGE_BASE)
+        return ChangeWindow(project_root=root, base_ref=base_ref, reason=REASON_NO_MERGE_BASE)
 
-    base_time = _commit_time(project_root, base_sha)
-    if base_time is None:
-        return ChangeWindow(base_ref=base_ref, base_sha=base_sha, reason=REASON_NO_BASE_TIME)
+    base_time, failed = _commit_time(project_root, base_sha)
+    if failed or base_time is None:
+        return ChangeWindow(
+            project_root=root, base_ref=base_ref, base_sha=base_sha,
+            reason=REASON_GIT_UNAVAILABLE if failed else REASON_NO_BASE_TIME,
+        )
 
     return ChangeWindow(
+        project_root=root,
         base_ref=base_ref,
         base_sha=base_sha,
         since=base_time,
         available=True,
         reason=REASON_OK,
     )
-# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-resolve-window
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-window-from-base
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-ts
@@ -280,9 +336,14 @@ def _log_unavailable(path: Path) -> str:
     if not exists:
         return REASON_LOG_ABSENT
     try:
-        with path.open("r", encoding="utf-8"):
-            pass
-    except OSError as exc:
+        # The bytes are *decoded*, not merely opened. Opening alone proved only that
+        # the descriptor could be acquired; `read_events` then performed the first
+        # strict UTF-8 read and catches only OSError, so an invalid byte sequence
+        # raised UnicodeDecodeError straight out of `select_events` and broke the
+        # never-raises contract. Decoding here answers the question the probe claims to.
+        with path.open("r", encoding="utf-8") as handle:
+            handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
         logger.debug("change-summary log is unreadable: %s", exc)
         return REASON_LOG_UNREADABLE
     return REASON_OK
@@ -305,6 +366,21 @@ def _count_log_lines(path: Path) -> int:
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-count-lines
 
 
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-default-log
+def _default_log_for(window: ChangeWindow) -> Optional[Path]:
+    """Resolve the decision log belonging to *the window's* project.
+
+    ``decision_log.default_log_path()`` defaults to the cwd, which is correct for the
+    writer — it logs whichever project the command runs in. A reader reporting on an
+    explicitly named project must not inherit that default, or the digest describes one
+    project's changes alongside another project's decisions.
+    """
+    if not window.project_root:
+        return decision_log.default_log_path()
+    return decision_log.default_log_path(Path(window.project_root))
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-default-log
+
+
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-select-events
 def select_events(
     window: ChangeWindow,
@@ -318,12 +394,17 @@ def select_events(
     say so instead of presenting a quietly incomplete list.
 
     An unavailable window yields an unavailable selection carrying the window's own
-    reason, so the caller reports one cause rather than two. Never raises.
+    reason, so the caller reports one cause rather than two.
+
+    The default log is resolved from **the window's own project**, not from the current
+    working directory. Those are independent inputs, so a window built for project A
+    while the process sits in project B used to select B's decisions — a digest about
+    one project carrying another's history. Never raises.
     """
     if not window.available:
         return EventSelection(reason=window.reason)
 
-    target = path or decision_log.default_log_path()
+    target = path or _default_log_for(window)
     if target is None:
         return EventSelection(reason=REASON_NOT_A_PROJECT)
     reason = _log_unavailable(target)
@@ -334,25 +415,36 @@ def select_events(
     if boundary is None:
         return EventSelection(reason=REASON_NO_BASE_TIME)
 
-    selected, runs, scanned, undated = [], [], 0, 0
-    for event in decision_log.read_events(target):
-        scanned += 1
-        stamp = _parse_ts(event.get("ts"))
-        if stamp is None:
-            undated += 1
-            continue
-        if stamp < boundary:
-            continue
-        selected.append(event)
-        run_id = str(event.get("run_id", ""))
-        if run_id and run_id not in runs:
-            runs.append(run_id)
+    selected, runs, scanned, undated, runless = [], [], 0, 0, 0
+    try:
+        for event in decision_log.read_events(target):
+            scanned += 1
+            stamp = _parse_ts(event.get("ts"))
+            if stamp is None:
+                undated += 1
+                continue
+            if stamp < boundary:
+                continue
+            selected.append(event)
+            run_id = str(event.get("run_id") or "")
+            if not run_id:
+                runless += 1
+                run_id = RUN_UNATTRIBUTED
+            if run_id not in runs:
+                runs.append(run_id)
+    except (OSError, UnicodeDecodeError) as exc:
+        # Belt and braces: the probe already decoded the file, but it could change
+        # between probe and read. A read that dies mid-way must not surface as a
+        # partial selection presented as complete.
+        logger.debug("change-summary log became unreadable while reading: %s", exc)
+        return EventSelection(reason=REASON_LOG_UNREADABLE)
 
     return EventSelection(
         events=selected,
         runs=runs,
         scanned=scanned,
         undated=undated,
+        runless=runless,
         skipped_lines=max(0, _count_log_lines(target) - scanned),
         available=True,
         reason=REASON_OK,
@@ -367,11 +459,15 @@ def group_by_run(selection: EventSelection) -> Dict[str, List[Dict[str, Any]]]:
     This is the role ``run_id`` keeps once the window stops being derived from it: a
     subdivision *within* the branch's span, so a digest can say "three invocations"
     without treating the last one as the whole story.
+
+    **Every selected event lands in exactly one bucket.** Events carrying a blank or
+    missing ``run_id`` go to :data:`RUN_UNATTRIBUTED`; previously buckets were built
+    only for truthy ids, so such an event sat in ``events`` and in no group at all and
+    a renderer summing the groups under-reported without saying so.
     """
     grouped: Dict[str, List[Dict[str, Any]]] = {run: [] for run in selection.runs}
     for event in selection.events:
-        run_id = str(event.get("run_id", ""))
-        if run_id in grouped:
-            grouped[run_id].append(event)
+        run_id = str(event.get("run_id") or "") or RUN_UNATTRIBUTED
+        grouped.setdefault(run_id, []).append(event)
     return grouped
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-group-runs
