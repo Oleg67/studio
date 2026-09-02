@@ -53,7 +53,12 @@ _GIT_TIMEOUT = 10
 #: would silently widen every window to include work that shipped long ago.
 #: A fresh clone of the canonical repo has no ``upstream`` remote, so it falls through
 #: to ``origin/HEAD`` and is still correct.
+#: ``upstream/HEAD`` leads because it is the canonical remote's *own* symbolic default
+#: — right even when that default is neither ``main`` nor ``master``. Guessing branch
+#: names first would skip it and fall through to a stale fork ref, which is the same
+#: failure this ordering exists to prevent, one level deeper.
 _DEFAULT_BASE_REFS = (
+    "upstream/HEAD",
     "upstream/main",
     "upstream/master",
     "origin/HEAD",
@@ -77,6 +82,7 @@ REASON_NO_BASE_TIME = "base commit has no readable timestamp"
 REASON_NOT_A_PROJECT = "not inside a Studio project"
 REASON_LOG_DISABLED = "decision log disabled"
 REASON_LOG_ABSENT = "no decision log yet"
+REASON_LOG_UNREADABLE = "decision log unreadable"
 
 
 @dataclass
@@ -254,15 +260,31 @@ def _parse_ts(value: Any) -> Optional[datetime]:
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-log-state
 def _log_unavailable(path: Path) -> str:
-    """Return the reason the decision log cannot be read, or :data:`REASON_OK`."""
+    """Return the reason the decision log cannot be read, or :data:`REASON_OK`.
+
+    Absent and unreadable are reported separately, and readability is proved by
+    opening the file rather than inferred from :meth:`Path.is_file`. ``is_file`` only
+    needs ``stat``, so a mode-000 log passes it — and
+    :func:`decision_log.read_events` swallows the subsequent open failure and yields
+    nothing. Together those turned an unreadable log into an *available, empty*
+    selection: "no decisions in this window" when in truth nothing was read. That is
+    the exact failure this module exists to prevent, so the probe is explicit.
+    """
     if not decision_log.is_enabled():
         return REASON_LOG_DISABLED
     try:
-        if not path.is_file():
-            return REASON_LOG_ABSENT
+        exists = path.is_file()
     except OSError as exc:
         logger.debug("change-summary log probe failed: %s", exc)
+        return REASON_LOG_UNREADABLE
+    if not exists:
         return REASON_LOG_ABSENT
+    try:
+        with path.open("r", encoding="utf-8"):
+            pass
+    except OSError as exc:
+        logger.debug("change-summary log is unreadable: %s", exc)
+        return REASON_LOG_UNREADABLE
     return REASON_OK
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-log-state
 

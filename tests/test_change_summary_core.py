@@ -10,6 +10,7 @@ defect this feature exists to remove.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 from pathlib import Path
@@ -130,6 +131,25 @@ class TestTheWindowComesFromGit:
 
         assert window.base_ref == "upstream/main"
         assert window.base_sha == newer
+
+    def test_the_canonical_remotes_own_default_wins_even_when_unnamed(self, tmp_path):
+        """A remote whose default is neither main nor master, e.g. trunk.
+
+        Guessing branch names first would skip the symbolic upstream/HEAD and fall
+        through to the stale fork ref — the same bug one level deeper.
+        """
+        repo = _make_repo(tmp_path / "r")
+        old = _git(repo, "rev-parse", "HEAD")
+        newer = _commit(repo, "b.txt")
+        _commit(repo, "c.txt")
+        _point_ref(repo, "refs/remotes/origin/HEAD", old)          # stale fork
+        _point_ref(repo, "refs/remotes/upstream/trunk", newer)     # unconventional name
+        _git(repo, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
+
+        window = cs.resolve_window(repo)
+
+        assert window.base_ref == "upstream/HEAD"
+        assert window.base_sha == newer, "must not fall through to the stale fork ref"
 
 
 class TestTheWindowSaysWhyItCouldNotBeBuilt:
@@ -345,14 +365,32 @@ class TestNothingRaises:
         assert window.available is False
         assert window.reason == cs.REASON_GIT_UNAVAILABLE
 
-    def test_an_unreadable_log_is_reported_not_raised(self, tmp_path, monkeypatch):
+    def test_a_failing_log_probe_is_reported_as_unreadable_not_absent(self, tmp_path, monkeypatch):
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
         monkeypatch.setattr(Path, "is_file", lambda _self: (_ for _ in ()).throw(OSError("nope")))
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.reason == cs.REASON_LOG_ABSENT
+        assert selection.reason == cs.REASON_LOG_UNREADABLE, "a failed probe is not proof of absence"
+
+    def test_an_existing_but_unreadable_log_is_never_an_available_empty_selection(self, tmp_path):
+        """The false green: is_file() passes on mode 000, and read_events swallows the
+        open failure and yields nothing — so this reported "no decisions" having read
+        none. Regression for the exact defect class this module exists to prevent."""
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses file permissions")
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        log.chmod(0o000)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        try:
+            selection = cs.select_events(window, path=log)
+        finally:
+            log.chmod(0o644)
+
+        assert selection.available is False, "unreadable must not present as an empty window"
+        assert selection.reason == cs.REASON_LOG_UNREADABLE
+        assert selection.events == []
 
     def test_the_line_count_degrades_to_zero_on_a_read_error(self, tmp_path, monkeypatch):
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
