@@ -1,10 +1,10 @@
-"""Change-summary core — resolve the window a digest covers, and select the
-decision-log events recorded inside it.
+"""Change-summary core — resolve the window a digest covers, the decision-log events
+recorded inside it, and the requirements the changed files declare.
 
-The digest answers "what changed on this branch, and why". This module owns the two
-halves that have no output format: **which span of work counts as "the run"**, and
-**which recorded decisions fall inside it**. Rendering belongs to the command
-wrapper; linking changed files to requirements is separate again.
+The digest answers "what changed on this branch, and why". This module owns the three
+halves that have no output format: **which span of work counts as "the run"**, **which
+recorded decisions fall inside it**, and **which requirement each changed file serves**.
+Rendering belongs to the command wrapper.
 
 Three deliberate choices:
 
@@ -30,6 +30,14 @@ private ``_run_git`` helpers in this package have incompatible contracts — one
 copy would duplicate both. ``_git_query`` answers only "one line of stdout, or nothing —
 and whether git itself failed to answer".
 
+Requirement linkage reads markers through :func:`codebase.load_code_file`, the parser
+``validate`` uses and the only one that yields identifiers. ``coverage.py`` measures
+marker *density* — counts and line ranges, no IDs — so it cannot answer "which
+requirement does this file serve" at all. A referenced ID is reported as-is rather than
+resolved back to its declaring artifact: ``cfs validate`` already fails when a code
+marker names an ID no artifact defines, so in a green tree every reported ID is known
+to be declared, and re-resolving it here would duplicate that gate for cosmetic gain.
+
 @cpt-algo:cpt-studio-algo-developer-experience-change-summary:p1
 """
 
@@ -44,7 +52,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import codebase
 from . import decision_log
+from . import document
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +119,10 @@ REASON_NOT_A_PROJECT = "not inside a Studio project"
 REASON_LOG_DISABLED = "decision log disabled"
 REASON_LOG_ABSENT = "no decision log yet"
 REASON_LOG_UNREADABLE = "decision log unreadable"
+REASON_NO_BASE_COMMIT = "window has no base commit to compare against"
+REASON_DIFF_UNAVAILABLE = "git could not list changed files"
+REASON_FILE_GONE = "file no longer present"
+REASON_FILE_UNREADABLE = "file could not be read"
 REASON_INVALID_SINCE = "the supplied lower bound is not an absolute timestamp"
 
 #: Bucket name for selected events whose ``run_id`` is missing or unusable. Grouping
@@ -632,3 +646,221 @@ def group_by_run(selection: EventSelection) -> Dict[str, List[Dict[str, Any]]]:
         grouped.setdefault(run_id, []).append(event)
     return grouped
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-group-runs
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-datamodel
+@dataclass
+class FileLink:
+    """One changed file and what it does with requirement IDs.
+
+    Two directions, deliberately separate. ``references`` are IDs the file *points at*
+    — code serving a requirement. ``defines`` are IDs the file *declares* — an artifact
+    that **is** a requirement. Code can only reference and artifacts normally only
+    define, so collapsing them into one list would report a changed specification as
+    "traces to nothing", which is precisely backwards.
+
+    ``reason`` separates *"checked, and it carries no markers"* (empty) from *"could
+    not check"* — deleted or unreadable. A digest that merges those implies a file
+    serves no requirement when in truth it was never read.
+    """
+
+    path: str = ""
+    status: str = ""
+    references: List[str] = field(default_factory=list)
+    defines: List[str] = field(default_factory=list)
+    reason: str = REASON_OK
+
+
+@dataclass
+class LinkReport:
+    """What every file changed inside a window does with requirement IDs.
+
+    The counters exist so a renderer can print its denominator. ``linked`` alone is a
+    number without a scope; ``linked`` of ``changed``, with ``declaring``, ``excluded``
+    and ``unreadable`` broken out, is checkable.
+    """
+
+    files: List[FileLink] = field(default_factory=list)
+    changed: int = 0
+    linked: int = 0
+    declaring: int = 0
+    excluded: int = 0
+    unreadable: int = 0
+    available: bool = False
+    reason: str = REASON_NOT_A_REPO
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-datamodel
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-lines
+def _git_lines(project_root: Path, args: List[str]) -> Optional[List[str]]:
+    """Run a read-only git query and return all non-empty output lines, or ``None``.
+
+    The multi-line sibling of :func:`_git_line`; ``None`` again means "no answer" for
+    every failure mode, so callers report rather than diagnose. Never raises.
+    """
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("change-summary git query failed: %s", exc)
+        return None
+    if result.returncode:
+        logger.debug("change-summary git query exited %d", result.returncode)
+        return None
+    return [line for line in result.stdout.splitlines() if line.strip()]
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-lines
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-name-status
+def _parse_name_status(line: str) -> Optional[Tuple[str, str]]:
+    """Parse one ``git diff --name-status`` line into ``(status, path)``.
+
+    Renames and copies emit three fields — ``R100  old  new`` — and the *new* path is
+    the one that exists to be read. Taking the first path would send every rename to
+    the unreadable branch and quietly drop its requirement links.
+    """
+    parts = line.split("\t")
+    if len(parts) < 2 or not parts[0]:
+        return None
+    status = parts[0][0]
+    return status, parts[-1]
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-name-status
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-path
+def _in_project_scope(candidate: Path, project_root: Path) -> bool:
+    """Report whether a changed path is one this project owns.
+
+    Delegates to :func:`codebase.resolve_entry_code_files`, the single shared exclusion
+    policy, rather than re-deriving containment rules that already exist in one place.
+
+    Note what that policy does *not* do for an explicitly named single file: it judges
+    resolved containment, but not conventional non-source directory names. So a tracked
+    change under a vendored path is reported rather than hidden. That is the safer
+    direction for a review digest — over-reporting costs a reader a moment, while
+    under-reporting hides work that really did change.
+    """
+    try:
+        files, _excluded = codebase.resolve_entry_code_files(
+            candidate, [candidate.suffix], project_root=project_root,
+        )
+    except OSError as exc:
+        logger.debug("change-summary scope check failed: %s", exc)
+        return False
+    return bool(files)
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-path
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-file-markers
+def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
+    """Return ``(references, defines, reason)`` for one changed file.
+
+    Both directions are asked, because a file's suffix is not a reliable guide and the
+    authoritative extension list lives in a ``commands`` module this layer must not
+    import. Asking what the file *does* with IDs is language-agnostic and needs no list:
+
+    * :func:`codebase.load_code_file` yields code markers — IDs the file **references**.
+    * :func:`document.scan_cpt_ids` yields document IDs — those tagged ``definition``
+      are IDs the file **declares**.
+
+    The two are complementary in practice: this module's own source reports 13 code
+    references and no definitions, while the feature artifact declaring its algorithm
+    reports 17 definitions and no code references.
+
+    A binary file lands in the unreadable branch, because the loader reports a decode
+    failure — returned as *could not read* rather than as "carries no markers". Those
+    are different claims and only one of them is true.
+    """
+    code_file, errors = codebase.load_code_file(path)
+    if code_file is None or errors:
+        logger.debug("change-summary could not parse code markers in a changed file")
+        return [], [], REASON_FILE_UNREADABLE
+    references = sorted({ref.id for ref in code_file.references if ref.id})
+    defines = sorted({
+        str(hit.get("id"))
+        for hit in document.scan_cpt_ids(path)
+        if hit.get("type") == "definition" and hit.get("id")
+    })
+    return references, defines, REASON_OK
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-file-markers
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-collect-changed
+def _collect_changed_entries(
+    project_root: Path,
+    base_sha: str,
+) -> Optional[List[Tuple[str, str]]]:
+    """List ``(status, path)`` for everything changed since ``base_sha``.
+
+    Compares the base commit against the **working tree**, not against ``HEAD``, so
+    uncommitted work is included — a developer asking what changed before committing is
+    the main caller.
+
+    Untracked files are collected separately and reported with status ``?``. ``git
+    diff`` cannot see them, so omitting them would let a brand-new module be absent
+    from the digest entirely: the silent omission this module exists to avoid.
+    """
+    diffed = _git_lines(project_root, ["diff", "--name-status", base_sha])
+    if diffed is None:
+        return None
+    entries = [parsed for parsed in (_parse_name_status(line) for line in diffed) if parsed]
+    untracked = _git_lines(project_root, ["ls-files", "--others", "--exclude-standard"]) or []
+    entries.extend(("?", line.strip()) for line in untracked if line.strip())
+    return entries
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-collect-changed
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-changed
+def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
+    """Resolve every file changed inside ``window`` to the requirements it declares.
+
+    An unavailable window propagates its own reason, so one cause is reported rather
+    than two. A window built from an explicit ``--since`` has no base commit, so there
+    is nothing to diff against and that is said plainly instead of silently returning
+    no files. Never raises.
+    """
+    if not window.available:
+        return LinkReport(reason=window.reason)
+    if not window.base_sha:
+        return LinkReport(reason=REASON_NO_BASE_COMMIT)
+
+    entries = _collect_changed_entries(project_root, window.base_sha)
+    if entries is None:
+        return LinkReport(reason=REASON_DIFF_UNAVAILABLE)
+
+    links: List[FileLink] = []
+    excluded = unreadable = 0
+    for status, rel_path in entries:
+        absolute = project_root / rel_path
+        if not _in_project_scope(absolute, project_root):
+            # Deleted files fail the scope check because they no longer exist, so the
+            # two cases are separated here rather than both counting as excluded.
+            if status == "D" or not absolute.exists():
+                links.append(FileLink(path=rel_path, status=status, reason=REASON_FILE_GONE))
+            else:
+                excluded += 1
+            continue
+        references, defines, reason = _file_traceability(absolute)
+        if reason:
+            unreadable += 1
+        links.append(FileLink(
+            path=rel_path, status=status, references=references, defines=defines, reason=reason,
+        ))
+
+    return LinkReport(
+        files=links,
+        changed=len(entries),
+        linked=sum(1 for link in links if link.references),
+        declaring=sum(1 for link in links if link.defines),
+        excluded=excluded,
+        unreadable=unreadable,
+        available=True,
+        reason=REASON_OK,
+    )
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-changed
