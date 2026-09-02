@@ -684,6 +684,7 @@ class LinkReport:
     changed: int = 0
     linked: int = 0
     declaring: int = 0
+    deleted: int = 0
     excluded: int = 0
     unreadable: int = 0
     available: bool = False
@@ -692,11 +693,18 @@ class LinkReport:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-lines
-def _git_lines(project_root: Path, args: List[str]) -> Optional[List[str]]:
-    """Run a read-only git query and return all non-empty output lines, or ``None``.
+def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
+    """Run a read-only git query with ``-z`` output and split it on NUL.
 
-    The multi-line sibling of :func:`_git_line`; ``None`` again means "no answer" for
+    The multi-record sibling of :func:`_git_line`. ``None`` again means "no answer" for
     every failure mode, so callers report rather than diagnose. Never raises.
+
+    Line-splitting is not usable here. Without ``-z``, git *quotes and escapes* any
+    path containing a control character, a quote or a non-ASCII byte — a file legally
+    named ``we<TAB>ird.py`` arrives as the literal 12 characters ``"we\\tird.py"``.
+    Splitting that on tab yields fragments that match nothing on disk, so the file
+    would be reported as deleted while sitting right there. NUL records are the only
+    unambiguous form, since NUL is the one byte a path cannot contain.
     """
     try:
         result = subprocess.run(
@@ -713,23 +721,44 @@ def _git_lines(project_root: Path, args: List[str]) -> Optional[List[str]]:
     if result.returncode:
         logger.debug("change-summary git query exited %d", result.returncode)
         return None
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    # A trailing NUL leaves one empty tail record; drop it without dropping
+    # legitimately empty interior records, which would desynchronise the walk.
+    records = result.stdout.split("\0")
+    if records and not records[-1]:
+        records.pop()
+    return records
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-lines
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-name-status
-def _parse_name_status(line: str) -> Optional[Tuple[str, str]]:
-    """Parse one ``git diff --name-status`` line into ``(status, path)``.
+def _walk_name_status(records: List[str]) -> List[Tuple[str, str]]:
+    """Walk ``git diff --name-status -z`` records into ``(status, path)`` pairs.
 
-    Renames and copies emit three fields — ``R100  old  new`` — and the *new* path is
-    the one that exists to be read. Taking the first path would send every rename to
-    the unreadable branch and quietly drop its requirement links.
+    Under ``-z`` the output is a flat record stream, not one record per change: a
+    status is followed by **one** path, except renames and copies which are followed by
+    **two** — the old name then the new one. So the stream has to be walked with that
+    arity in mind rather than zipped in pairs; getting it wrong desynchronises every
+    subsequent entry, not just the rename.
+
+    The *new* path is the one that exists to be read, so it is the one kept. Taking the
+    old name would send every rename to the unreadable branch and silently drop its
+    requirement links. Truncated output stops the walk instead of raising.
     """
-    parts = line.split("\t")
-    if len(parts) < 2 or not parts[0]:
-        return None
-    status = parts[0][0]
-    return status, parts[-1]
+    entries: List[Tuple[str, str]] = []
+    index = 0
+    while index < len(records):
+        status_field = records[index]
+        index += 1
+        if not status_field:
+            continue
+        status = status_field[0]
+        wanted = 2 if status in ("R", "C") else 1
+        paths = records[index:index + wanted]
+        index += wanted
+        if len(paths) < wanted or not paths[-1]:
+            continue
+        entries.append((status, paths[-1]))
+    return entries
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-name-status
 
 
@@ -806,12 +835,14 @@ def _collect_changed_entries(
     diff`` cannot see them, so omitting them would let a brand-new module be absent
     from the digest entirely: the silent omission this module exists to avoid.
     """
-    diffed = _git_lines(project_root, ["diff", "--name-status", base_sha])
+    diffed = _git_records(project_root, ["diff", "--name-status", "-z", base_sha])
     if diffed is None:
         return None
-    entries = [parsed for parsed in (_parse_name_status(line) for line in diffed) if parsed]
-    untracked = _git_lines(project_root, ["ls-files", "--others", "--exclude-standard"]) or []
-    entries.extend(("?", line.strip()) for line in untracked if line.strip())
+    entries = _walk_name_status(diffed)
+    untracked = _git_records(
+        project_root, ["ls-files", "--others", "--exclude-standard", "-z"],
+    ) or []
+    entries.extend(("?", path) for path in untracked if path)
     return entries
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-collect-changed
 
@@ -835,13 +866,14 @@ def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
         return LinkReport(reason=REASON_DIFF_UNAVAILABLE)
 
     links: List[FileLink] = []
-    excluded = unreadable = 0
+    deleted = excluded = unreadable = 0
     for status, rel_path in entries:
         absolute = project_root / rel_path
         if not _in_project_scope(absolute, project_root):
             # Deleted files fail the scope check because they no longer exist, so the
             # two cases are separated here rather than both counting as excluded.
             if status == "D" or not absolute.exists():
+                deleted += 1
                 links.append(FileLink(path=rel_path, status=status, reason=REASON_FILE_GONE))
             else:
                 excluded += 1
@@ -858,6 +890,7 @@ def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
         changed=len(entries),
         linked=sum(1 for link in links if link.references),
         declaring=sum(1 for link in links if link.defines),
+        deleted=deleted,
         excluded=excluded,
         unreadable=unreadable,
         available=True,

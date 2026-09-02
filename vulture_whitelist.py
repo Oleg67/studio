@@ -162,6 +162,7 @@ EventSelection.skipped_lines  # noqa: B018
 link_changed_files  # noqa: B018
 LinkReport.linked  # noqa: B018
 LinkReport.declaring  # noqa: B018
+LinkReport.deleted  # noqa: B018
 EventSelection.runless  # noqa: B018
 EventSelection.log_overridden  # noqa: B018
 RUN_UNATTRIBUTED  # noqa: B018

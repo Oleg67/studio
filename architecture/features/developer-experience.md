@@ -322,7 +322,7 @@ No feature-specific state machines. Self-check is stateless (run → report).
 | TOC Command | `skills/.../commands/toc.py` | CLI wrapper for TOC generation |
 | TOC Utils | `skills/.../utils/toc.py` | Unified TOC generation, anchor slugs, code block awareness |
 | Resolve Vars Command | `skills/.../commands/resolve_vars.py` | Template variable resolution to absolute paths |
-| Change Summary Core | `skills/.../utils/change_summary.py` | Window resolution from git, and decision-log event selection inside it |
+| Change Summary Core | `skills/.../utils/change_summary.py` | Window resolution from git, decision-log event selection inside it, and resolution of the changed files in that window to the requirement IDs they reference or declare |
 
 ## 7. Acceptance Criteria
 

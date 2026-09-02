@@ -51,26 +51,43 @@ def _report(repo: Path) -> cs.LinkReport:
 
 # ----------------------------------------------------------------- name-status parsing
 
-class TestNameStatusParsing:
+class TestNameStatusWalking:
 
-    @pytest.mark.parametrize("line,expected", [
-        ("M\tsrc/a.py", ("M", "src/a.py")),
-        ("A\tnew.py", ("A", "new.py")),
-        ("D\tgone.py", ("D", "gone.py")),
-        ("R100\told.py\tnew.py", ("R", "new.py")),
-        ("C075\tsrc.py\tcopy.py", ("C", "copy.py")),
-        ("T\tmode.py", ("T", "mode.py")),
+    @pytest.mark.parametrize("records,expected", [
+        (["M", "src/a.py"], [("M", "src/a.py")]),
+        (["A", "new.py"], [("A", "new.py")]),
+        (["D", "gone.py"], [("D", "gone.py")]),
+        (["R100", "old.py", "new.py"], [("R", "new.py")]),
+        (["C075", "src.py", "copy.py"], [("C", "copy.py")]),
+        (["T", "mode.py"], [("T", "mode.py")]),
     ])
-    def test_each_status_shape_parses(self, line, expected):
-        assert cs._parse_name_status(line) == expected
+    def test_each_status_shape_walks(self, records, expected):
+        assert cs._walk_name_status(records) == expected
 
     def test_a_rename_yields_the_new_path_not_the_old(self):
-        """Taking parts[1] would send every rename to the unreadable branch."""
-        assert cs._parse_name_status("R100\told.py\tnew.py") == ("R", "new.py")
+        assert cs._walk_name_status(["R100", "old.py", "new.py"]) == [("R", "new.py")]
 
-    @pytest.mark.parametrize("line", ["", "M", "\tno-status", "   "])
-    def test_malformed_lines_are_dropped_not_raised(self, line):
-        assert cs._parse_name_status(line) is None
+    def test_a_rename_does_not_desynchronise_what_follows(self):
+        """Under -z a rename consumes three records, not two. Mis-counting shifts
+        every later entry, so this is the assertion that matters most."""
+        records = ["R100", "old.py", "new.py", "M", "after.py", "A", "last.py"]
+
+        assert cs._walk_name_status(records) == [
+            ("R", "new.py"), ("M", "after.py"), ("A", "last.py"),
+        ]
+
+    def test_a_path_containing_a_tab_survives(self):
+        """Line/tab splitting cannot do this; NUL records can."""
+        assert cs._walk_name_status(["A", "we\tird.py"]) == [("A", "we\tird.py")]
+
+    def test_a_path_containing_a_quote_survives(self):
+        assert cs._walk_name_status(["M", 'qu"ote.py']) == [("M", 'qu"ote.py')]
+
+    @pytest.mark.parametrize("records", [
+        [], [""], ["M"], ["R100", "only-old.py"], ["A", ""],
+    ])
+    def test_truncated_or_empty_records_are_dropped_not_raised(self, records):
+        assert cs._walk_name_status(records) == []
 
 
 # ------------------------------------------------------------------ per-file traceability
@@ -195,7 +212,26 @@ class TestTheReport:
 
         gone = [f for f in report.files if f.reason == cs.REASON_FILE_GONE]
         assert len(gone) == 1
+        assert report.deleted == 1, "the count must be readable without reparsing files"
         assert report.excluded == 0, "a deletion is not a policy exclusion"
+
+    def test_a_path_with_a_tab_is_linked_not_reported_gone(self, tmp_path):
+        """End-to-end for the quoting bug: without -z, git emits this path as the
+        literal characters `"we\\tird.py"`, which matches nothing on disk, so the file
+        was reported as deleted while sitting right there."""
+        repo = _repo_with_base(tmp_path)
+        odd = repo / "we\tird.py"
+        odd.write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "odd name")
+
+        report = _report(repo)
+
+        assert report.changed == 1
+        assert report.deleted == 0, "the file exists; it must not be reported gone"
+        assert report.linked == 1
+        assert report.files[0].path == "we\tird.py"
+        assert report.files[0].references == [MARKER]
 
     def test_a_renamed_file_keeps_its_requirement_link(self, tmp_path):
         repo = _repo_with_base(tmp_path)
@@ -253,7 +289,7 @@ class TestTheReportSaysWhyItCouldNot:
     def test_a_failing_diff_is_reported(self, tmp_path, monkeypatch):
         repo = _repo_with_base(tmp_path)
         window = cs.resolve_window(repo)
-        monkeypatch.setattr(cs, "_git_lines", lambda *_a, **_k: None)
+        monkeypatch.setattr(cs, "_git_records", lambda *_a, **_k: None)
 
         report = cs.link_changed_files(repo, window)
 
@@ -263,17 +299,24 @@ class TestTheReportSaysWhyItCouldNot:
 
 class TestInvariants:
 
-    def test_git_lines_degrades_rather_than_raising(self, tmp_path, monkeypatch):
+    def test_git_records_degrades_rather_than_raising(self, tmp_path, monkeypatch):
         def _boom(*_a, **_k):
             raise OSError("no exec")
         monkeypatch.setattr(cs.subprocess, "run", _boom)
 
-        assert cs._git_lines(tmp_path, ["diff"]) is None
+        assert cs._git_records(tmp_path, ["diff"]) is None
 
-    def test_git_lines_returns_nothing_on_a_non_zero_exit(self, tmp_path):
+    def test_git_records_returns_nothing_on_a_non_zero_exit(self, tmp_path):
         repo = _make_repo(tmp_path / "r")
 
-        assert cs._git_lines(repo, ["rev-parse", "--verify", "refs/heads/no-such"]) is None
+        assert cs._git_records(repo, ["rev-parse", "--verify", "refs/heads/no-such"]) is None
+
+    def test_git_records_drops_only_the_trailing_empty_record(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+
+        records = cs._git_records(repo, ["ls-files", "-z"])
+
+        assert records == ["a.txt"], "a trailing NUL must not leave an empty tail record"
 
     def test_a_scope_check_that_errors_refuses_rather_than_admits(self, tmp_path, monkeypatch):
         def _boom(*_a, **_k):
@@ -320,9 +363,9 @@ class TestInvariants:
         report = _report(repo)
 
         assert report.changed == len(report.files) + report.excluded
-        assert report.linked <= report.changed
-        assert report.declaring <= report.changed
-        assert report.unreadable <= report.changed
+        for counter in (report.linked, report.declaring, report.deleted,
+                        report.excluded, report.unreadable):
+            assert counter <= report.changed
 
     def test_the_same_state_yields_identical_reports(self, tmp_path):
         repo = _repo_with_base(tmp_path)
