@@ -215,10 +215,32 @@ class TestTheReport:
         assert report.deleted == 1, "the count must be readable without reparsing files"
         assert report.excluded == 0, "a deletion is not a policy exclusion"
 
+    def test_an_undecodable_path_does_not_raise_out_of_the_report(self, tmp_path):
+        """POSIX paths are bytes and need not be UTF-8. `subprocess(text=True)` decodes
+        strictly, so a legal but undecodable filename raised UnicodeDecodeError out of
+        the git helper — past its handler and out of `link_changed_files`, breaking the
+        never-raises contract. Skipped where the filesystem refuses such a name."""
+        repo = _repo_with_base(tmp_path)
+        try:
+            (repo / os.fsdecode(b"bad\xff.py")).write_text(_code(), encoding="utf-8")
+        except (OSError, UnicodeError):
+            pytest.skip("this filesystem rejects non-UTF-8 file names")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "undecodable name")
+
+        report = _report(repo)          # must not raise
+
+        assert report.available is True
+        assert report.changed == 1
+        assert report.deleted == 0, "the file exists; surrogates must round-trip to it"
+        assert report.linked == 1, "and it must still resolve its requirement"
+
     def test_a_path_with_a_tab_is_linked_not_reported_gone(self, tmp_path):
         """End-to-end for the quoting bug: without -z, git emits this path as the
         literal characters `"we\\tird.py"`, which matches nothing on disk, so the file
         was reported as deleted while sitting right there."""
+        if os.name == "nt":
+            pytest.skip("a tab is not a legal file-name character on Windows")
         repo = _repo_with_base(tmp_path)
         odd = repo / "we\tird.py"
         odd.write_text(_code(), encoding="utf-8")

@@ -712,10 +712,16 @@ def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
             cwd=str(project_root),
             capture_output=True,
             text=True,
+            # Filesystem paths are bytes on POSIX and are not guaranteed to be UTF-8,
+            # so `text=True`'s strict default raises UnicodeDecodeError on a legal but
+            # undecodable filename -- escaping past the handler below and breaking the
+            # never-raises contract. `surrogateescape` is the handler Python itself uses
+            # for paths, so the value round-trips back to the same bytes when reopened.
+            errors="surrogateescape",
             timeout=_GIT_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         logger.debug("change-summary git query failed: %s", exc)
         return None
     if result.returncode:
