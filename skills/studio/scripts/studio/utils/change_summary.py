@@ -31,6 +31,7 @@ copy would duplicate both. ``_git_line`` answers only "one line of stdout, or no
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -43,6 +44,22 @@ logger = logging.getLogger(__name__)
 
 #: Seconds any single git query may take before it is treated as unavailable.
 _GIT_TIMEOUT = 10
+
+#: Environment variables that redirect git away from the repository it was pointed at.
+#:
+#: ``cwd=`` is *not* sufficient on its own: an ambient ``GIT_DIR`` overrides it, so a
+#: query about project A answered from project B's repository. Verified —
+#: ``GIT_DIR=b/.git git -C a log`` reports b's commit, not a's. Every one of these is
+#: cleared so the answer describes the project the caller named and nothing else.
+_GIT_REDIRECT_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+)
 
 #: Refs tried in order when the caller names no base.
 #:
@@ -136,6 +153,14 @@ class EventSelection:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-query
+def _git_env() -> Dict[str, str]:
+    """The ambient environment with git's repository-redirecting variables removed."""
+    env = dict(os.environ)
+    for name in _GIT_REDIRECT_VARS:
+        env.pop(name, None)
+    return env
+
+
 def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool]:
     """Run a read-only git query, returning ``(first line or None, tool_failed)``.
 
@@ -156,6 +181,7 @@ def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool
         result = subprocess.run(
             ["git"] + args,
             cwd=str(project_root),
+            env=_git_env(),
             capture_output=True,
             text=True,
             # Git refs and paths are bytes and need not be UTF-8, so `text=True`'s
@@ -204,12 +230,15 @@ def _resolve_base_ref(project_root: Path, requested: str = "") -> Tuple[Optional
     """
     if requested:
         resolved, failed = _git_query(
-            project_root, ["rev-parse", "--verify", "--quiet", requested],
+            project_root,
+            # `--end-of-options` so a caller-supplied ref beginning with a dash is read
+            # as a ref rather than as a git option.
+            ["rev-parse", "--verify", "--quiet", "--end-of-options", requested],
         )
         return (requested if resolved else None), failed
     for candidate in _DEFAULT_BASE_REFS:
         resolved, failed = _git_query(
-            project_root, ["rev-parse", "--verify", "--quiet", candidate],
+            project_root, ["rev-parse", "--verify", "--quiet", "--end-of-options", candidate],
         )
         if failed:
             # Stop at the first tool failure rather than walking the remaining
@@ -232,14 +261,14 @@ def _merge_base(project_root: Path, base_ref: str) -> Tuple[Optional[str], bool]
     ``True`` flag means git never answered, which is a different fact and must not be
     reported as a finding about history.
     """
-    return _git_query(project_root, ["merge-base", "HEAD", base_ref])
+    return _git_query(project_root, ["merge-base", "--end-of-options", "HEAD", base_ref])
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-merge-base
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-base-time
 def _commit_time(project_root: Path, sha: str) -> Tuple[Optional[str], bool]:
     """Commit time in strict ISO 8601, plus whether git itself failed."""
-    return _git_query(project_root, ["show", "-s", "--format=%cI", sha])
+    return _git_query(project_root, ["show", "-s", "--format=%cI", "--end-of-options", sha])
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-base-time
 
 
@@ -258,6 +287,12 @@ def resolve_window(
 
     Every failure returns an unavailable window carrying its reason. Never raises.
     """
+    # Resolved, not merely stored. A relative root left as-is puts the cwd dependence
+    # straight back: `resolve_window(Path("."))` recorded "." and a later chdir then
+    # redirected log resolution to a different project — the exact failure carrying the
+    # root on the window was added to prevent. Resolving also fixes the git cwd, since
+    # `subprocess(cwd=...)` resolves a relative path at call time, not at capture time.
+    project_root = Path(project_root).resolve()
     root = str(project_root)
     if since:
         # A caller-supplied bound is validated here rather than surfacing later as a

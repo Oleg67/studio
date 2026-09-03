@@ -55,6 +55,20 @@ def _point_ref(repo: Path, ref: str, sha: str) -> None:
     _git(repo, "update-ref", ref, sha)
 
 
+def _make_studio_project(root: Path) -> Path:
+    """A directory the real project/studio resolvers recognise.
+
+    `find_project_root` wants the `@cf:root-agents` marker in AGENTS.md, and
+    `find_studio_directory` then reads the `studio` key from its TOML block.
+    """
+    (root / ".studio" / "rules").mkdir(parents=True)
+    (root / "AGENTS.md").write_text(
+        '<!-- @cf:root-agents -->\n\n```toml\nstudio = ".studio"\n```\n', encoding="utf-8",
+    )
+    (root / ".studio" / "AGENTS.md").write_text("# studio\n", encoding="utf-8")
+    return root
+
+
 def _write_log(path: Path, rows: list, extra: str = "") -> Path:
     body = "".join(json.dumps(r) + "\n" for r in rows) + extra
     path.write_text(body, encoding="utf-8")
@@ -383,6 +397,8 @@ class TestNothingRaises:
         """The false green: is_file() passes on mode 000, and read_events swallows the
         open failure and yields nothing — so this reported "no decisions" having read
         none. Regression for the exact defect class this module exists to prevent."""
+        if os.name == "nt":
+            pytest.skip("POSIX permission bits do not apply on Windows")
         if os.geteuid() == 0:
             pytest.skip("root bypasses file permissions")
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
@@ -460,8 +476,10 @@ class TestPrivacy:
             if user:
                 assert user not in value
 
-    def test_no_network_is_used(self, tmp_path, monkeypatch):
-        """Prove it rather than assert it: make sockets impossible and still work."""
+    def test_this_process_opens_no_socket(self, tmp_path, monkeypatch):
+        """Scope stated honestly: patching `socket` covers **this** process only. It
+        says nothing about what the `git` child does, so the companion test below
+        checks the git side by a different means."""
         def _no_sockets(*_a, **_k):
             raise AssertionError("change_summary must not open a socket")
         monkeypatch.setattr(socket, "socket", _no_sockets)
@@ -473,6 +491,43 @@ class TestPrivacy:
 
         assert window.available is True
         assert cs.select_events(window, path=log).available is True
+
+    def test_no_git_subcommand_can_reach_a_remote(self, tmp_path, monkeypatch):
+        """The git side of the no-network claim, which the socket patch above cannot
+        observe: a child process has its own sockets. Rather than pretending to watch
+        them, this asserts the only thing that actually matters — every subcommand
+        issued is a local read, so none of them has a remote to reach."""
+        remote_capable = {
+            "fetch", "pull", "push", "clone", "remote", "ls-remote",
+            "submodule", "archive", "bundle", "daemon", "send-pack", "fetch-pack",
+        }
+        issued: list = []
+
+        def _capture(args, **_kwargs):
+            issued.append(list(args))
+            raise OSError("not run")
+
+        # The repo is built first: `subprocess` is shared, so patching it before the
+        # fixture would intercept the fixture's own git calls.
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        window = cs.ChangeWindow(
+            project_root=str(repo), base_sha=_git(repo, "rev-parse", "HEAD"),
+            since="2026-01-01T00:00:00+00:00", available=True,
+        )
+
+        monkeypatch.setattr(cs.subprocess, "run", _capture)
+        cs.resolve_window(repo)
+        # The linkage half lives in a later change; exercise it when present so this
+        # test covers every git call site on whichever branch it runs.
+        linker = getattr(cs, "link_changed_files", None)
+        if linker is not None:
+            linker(repo, window)
+
+        assert issued, "the helper must actually have been exercised"
+        for argv in issued:
+            subcommand = argv[1] if len(argv) > 1 else ""
+            assert subcommand not in remote_capable, f"remote-capable: {subcommand}"
 
 
 class TestDeterminism:
@@ -534,6 +589,115 @@ class TestTheLogIsBoundToTheWindowsProject:
         monkeypatch.setattr(decision_log, "default_log_path", lambda start=None: None)
 
         assert cs._default_log_for(cs.ChangeWindow(available=True)) is None
+
+    def test_the_real_resolver_finds_the_windows_project_from_another_cwd(
+        self, tmp_path, monkeypatch,
+    ):
+        """The earlier test patched `default_log_path`, so it proved the root was
+        *passed* — not that passing it works. This drives the real resolver against two
+        genuine Studio projects with the process standing in the wrong one."""
+        monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+        wanted = _make_studio_project(tmp_path / "wanted")
+        other = _make_studio_project(tmp_path / "other")
+        monkeypatch.chdir(other)
+
+        resolved = cs._default_log_for(
+            cs.ChangeWindow(project_root=str(wanted), available=True),
+        )
+
+        assert resolved is not None
+        assert wanted.resolve() in resolved.parents, "the window's project, not the cwd's"
+        assert other.resolve() not in resolved.parents
+
+    def test_a_root_that_is_not_a_studio_project_is_reported(self, tmp_path, monkeypatch):
+        """The non-empty-root branch: a root was recorded, but it is not a project."""
+        monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+        window = cs.ChangeWindow(
+            project_root=str(tmp_path), since="2026-01-01T00:00:00+00:00", available=True,
+        )
+
+        selection = cs.select_events(window)
+
+        assert selection.available is False
+        assert selection.reason == cs.REASON_NOT_A_PROJECT
+
+
+class TestTheAnswerDoesNotDependOnWhereTheProcessStands:
+    """The window carries its project so the log cannot come from the cwd. That only
+    holds if the recorded root is absolute — a relative one reintroduces the exact
+    dependence, since both `default_log_path` and `subprocess(cwd=...)` resolve at use
+    time rather than at capture time."""
+
+    def test_a_relative_root_is_stored_resolved(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.chdir(repo)
+
+        window = cs.resolve_window(Path("."))
+
+        assert Path(window.project_root).is_absolute()
+        assert Path(window.project_root) == repo.resolve()
+
+    def test_a_window_survives_a_later_chdir(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.chdir(repo)
+        window = cs.resolve_window(Path("."))
+
+        monkeypatch.chdir(tmp_path)          # the process moves after capture
+
+        assert Path(window.project_root) == repo.resolve(), "the recorded root must not move"
+
+    def test_an_ambient_git_dir_cannot_redirect_the_query(self, tmp_path, monkeypatch):
+        """`cwd=` alone is not enough: GIT_DIR overrides it, so a query about one
+        project could be answered from another's repository."""
+        here = _make_repo(tmp_path / "here")
+        elsewhere = _make_repo(tmp_path / "elsewhere")
+        _point_ref(here, "refs/remotes/upstream/main", _git(here, "rev-parse", "HEAD"))
+        monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
+
+        window = cs.resolve_window(here)
+
+        assert window.available is True
+        assert window.base_sha == _git(here, "rev-parse", "HEAD"), "answered from `here`"
+
+    def test_the_sanitised_environment_drops_every_redirect_variable(self, monkeypatch):
+        for name in cs._GIT_REDIRECT_VARS:
+            monkeypatch.setenv(name, "/somewhere/else")
+
+        env = cs._git_env()
+
+        assert not [n for n in cs._GIT_REDIRECT_VARS if n in env]
+        assert "PATH" in env, "the rest of the environment is preserved"
+
+
+class TestCallerValuesCannotBecomeGitOptions:
+
+    def test_a_ref_beginning_with_a_dash_is_treated_as_a_ref(self, tmp_path):
+        """Without `--end-of-options` git reads this as an option, so the failure is
+        an argument error rather than an honest "no such ref"."""
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+
+        window = cs.resolve_window(repo, base="--upload-pack=touch /tmp/pwned")
+
+        assert window.available is False
+        assert window.reason == cs.REASON_BASE_REF_UNKNOWN, "refused as a ref, not as an option"
+
+    def test_every_option_bearing_call_separates_its_operands(self):
+        """A structural check, so a new call site that interpolates a caller value
+        without the separator is caught here rather than in review."""
+        import inspect
+        source = inspect.getsource(cs)
+        required = ['"--verify", "--quiet", "--end-of-options"',
+                    '["merge-base", "--end-of-options"',
+                    '"--format=%cI", "--end-of-options"']
+        if "_git_records" in source:
+            # Only present once the linkage half lands.
+            required.append('"--name-status", "-z", "--end-of-options"')
+        for fragment in required:
+            assert fragment in source, f"missing separator: {fragment}"
 
 
 class TestGitFailureIsNotAConclusionAboutHistory:

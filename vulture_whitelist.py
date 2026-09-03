@@ -140,10 +140,15 @@ SemanticCalibration.excluded  # noqa: B018
 SemanticCalibration.judge  # noqa: B018
 SemanticCalibration.schema_version  # noqa: B018
 
-# Change-summary core: the window and event-selection API the change-summary
-# command will consume. Landed ahead of its CLI wrapper so the pure logic is
-# reviewable on its own, so nothing in production calls it yet. Only the fields
-# no internal caller reads are listed — the rest are genuinely referenced.
+# Change-summary core: the window, event-selection and linkage API the
+# change-summary command will consume. Landed ahead of its CLI wrapper so the
+# pure logic is reviewable on its own, so nothing in production calls it yet.
+#
+# Listed here are the module's entry points plus the result fields that only an
+# external consumer reads. Fields the module reads itself are deliberately absent:
+# an entry for one of those is a false positive that suppresses a real dead-code
+# signal, so if vulture stops flagging a name here it should be removed rather
+# than kept "just in case".
 resolve_window  # noqa: B018
 select_events  # noqa: B018
 group_by_run  # noqa: B018
@@ -152,6 +157,5 @@ ChangeWindow.base_sha  # noqa: B018
 EventSelection.scanned  # noqa: B018
 EventSelection.undated  # noqa: B018
 EventSelection.skipped_lines  # noqa: B018
-ChangeWindow.project_root  # noqa: B018
 EventSelection.runless  # noqa: B018
 RUN_UNATTRIBUTED  # noqa: B018
