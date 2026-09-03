@@ -885,7 +885,12 @@ def _collect_changed_entries(
     path instead would cost a syscall per entry *and* wrongly merge two distinct
     symlinks that happen to share a target.
     """
-    diffed = _git_records(project_root, ["diff", "--name-status", "-z", base_sha])
+    diffed = _git_records(
+        project_root,
+        # `--end-of-options` for the same reason as the ref lookups: the base sha comes
+        # from a window the caller may have built, so it must not be read as an option.
+        ["diff", "--name-status", "-z", "--end-of-options", base_sha],
+    )
     if diffed is None:
         return None
     seen: Dict[str, str] = {}
