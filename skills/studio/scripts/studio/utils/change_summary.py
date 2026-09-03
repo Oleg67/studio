@@ -662,7 +662,7 @@ def group_by_run(selection: EventSelection) -> Dict[str, List[Dict[str, Any]]]:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-datamodel
-@dataclass
+@dataclass(frozen=True)
 class FileLink:
     """One changed file and what it does with requirement IDs.
 
@@ -675,25 +675,29 @@ class FileLink:
     ``reason`` separates *"checked, and it carries no markers"* (empty) from *"could
     not check"* — deleted or unreadable. A digest that merges those implies a file
     serves no requirement when in truth it was never read.
+
+    Frozen, with tuple fields, like the window and selection records: a link is what
+    one read of one file found, and nothing may edit that after the fact.
     """
 
     path: str = ""
     status: str = ""
-    references: List[str] = field(default_factory=list)
-    defines: List[str] = field(default_factory=list)
+    references: Tuple[str, ...] = ()
+    defines: Tuple[str, ...] = ()
     reason: str = REASON_OK
 
 
-@dataclass
+@dataclass(frozen=True)
 class LinkReport:
     """What every file changed inside a window does with requirement IDs.
 
     The counters exist so a renderer can print its denominator. ``linked`` alone is a
     number without a scope; ``linked`` of ``changed``, with ``declaring``, ``excluded``
-    and ``unreadable`` broken out, is checkable.
+    and ``unreadable`` broken out, is checkable — which is only true while ``files``
+    cannot be grown or shrunk underneath them, hence frozen and a tuple.
     """
 
-    files: List[FileLink] = field(default_factory=list)
+    files: Tuple[FileLink, ...] = ()
     changed: int = 0
     linked: int = 0
     declaring: int = 0
@@ -710,7 +714,7 @@ class LinkReport:
 def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
     """Run a read-only git query with ``-z`` output and split it on NUL.
 
-    The multi-record sibling of :func:`_git_line`. ``None`` again means "no answer" for
+    The multi-record sibling of :func:`_git_query`. ``None`` here means "no answer" for
     every failure mode, so callers report rather than diagnose. Never raises.
 
     Line-splitting is not usable here. Without ``-z``, git *quotes and escapes* any
@@ -946,7 +950,8 @@ def _classify_entry(
 
     references, defines, reason = _file_traceability(absolute)
     link = FileLink(
-        path=rel_path, status=status, references=references, defines=defines, reason=reason,
+        path=rel_path, status=status,
+        references=tuple(references), defines=tuple(defines), reason=reason,
     )
     return link, ("unreadable" if reason else "")
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-entry
@@ -986,7 +991,7 @@ def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
             links.append(link)
 
     return LinkReport(
-        files=links,
+        files=tuple(links),
         changed=len(entries),
         linked=sum(1 for link in links if link.references),
         declaring=sum(1 for link in links if link.defines),

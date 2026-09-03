@@ -11,6 +11,7 @@ a reviewer would rightly flag.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 from pathlib import Path
@@ -179,7 +180,7 @@ class TestTheReport:
         assert report.available is True
         assert report.changed == 1
         assert report.linked == 1
-        assert [f.references for f in report.files] == [[MARKER]]
+        assert [f.references for f in report.files] == [(MARKER,)]
 
     def test_a_changed_artifact_counts_as_declaring_not_unlinked(self, tmp_path):
         repo = _repo_with_base(tmp_path)
@@ -254,7 +255,7 @@ class TestTheReport:
         assert report.deleted == 0, "the file exists; it must not be reported gone"
         assert report.linked == 1
         assert report.files[0].path == "we\tird.py"
-        assert report.files[0].references == [MARKER]
+        assert report.files[0].references == (MARKER,)
 
     def test_a_renamed_file_keeps_its_requirement_link(self, tmp_path):
         repo = _repo_with_base(tmp_path)
@@ -591,3 +592,25 @@ class TestGoldenShape:
         ]
         assert (report.changed, report.linked, report.declaring) == (3, 1, 1)
         assert (report.excluded, report.unreadable) == (0, 0)
+
+
+class TestLinkRecordsAreImmutable:
+    """Same discipline as the window and selection records: the counters describe
+    `files`, so `files` must not be growable or reassignable underneath them, and a
+    link is what one read of one file found."""
+
+    def test_a_report_and_its_links_refuse_reassignment(self, tmp_path):
+        repo = _repo_with_base(tmp_path)
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "m.py")
+        _git(repo, "commit", "-q", "-m", "add")
+
+        report = _report(repo)
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            report.linked = 0
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            report.files[0].reason = "edited"
+        assert isinstance(report.files, tuple)
+        assert isinstance(report.files[0].references, tuple)
+        assert isinstance(report.files[0].defines, tuple)
