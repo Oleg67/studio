@@ -124,6 +124,19 @@ REASON_DIFF_UNAVAILABLE = "git could not list changed files"
 REASON_FILE_GONE = "file no longer present"
 REASON_FILE_UNREADABLE = "file could not be read"
 REASON_INVALID_SINCE = "the supplied lower bound is not an absolute timestamp"
+REASON_FILE_TOO_LARGE = "file exceeds the shared scan size limit"
+REASON_NOT_A_FILE = "not a regular file"
+REASON_SCOPE_UNKNOWN = "scope could not be determined"
+
+#: Most changed entries examined in one report.
+#:
+#: A bound is needed because the entry list is not bounded by the diff: the untracked
+#: sweep can return an arbitrary number of paths (an unignored dependency tree), and
+#: each entry costs a stat plus two full reads. The number is chosen from the feature's
+#: own premise rather than picked arbitrarily — a change set larger than this is not
+#: summarisable in ten lines, so examining more of it buys nothing a reader can use.
+#: Entries beyond the ceiling are counted in ``truncated`` rather than dropped quietly.
+_MAX_CHANGED_ENTRIES = 1000
 
 #: Bucket name for selected events whose ``run_id`` is missing or unusable. Grouping
 #: used to build buckets only for truthy ids, so such events sat in ``events`` and in no
@@ -687,6 +700,7 @@ class LinkReport:
     deleted: int = 0
     excluded: int = 0
     unreadable: int = 0
+    truncated: int = 0
     available: bool = False
     reason: str = REASON_NOT_A_REPO
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-datamodel
@@ -769,25 +783,36 @@ def _walk_name_status(records: List[str]) -> List[Tuple[str, str]]:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-path
-def _in_project_scope(candidate: Path, project_root: Path) -> bool:
+def _in_project_scope(candidate: Path, project_root: Path) -> Optional[bool]:
     """Report whether a changed path is one this project owns.
+
+    Three answers, not two. ``None`` means the question could not be answered, which
+    used to be folded into "excluded by policy" — a policy decision reported for what
+    was actually a filesystem error, so the report claimed a judgement it never made.
 
     Delegates to :func:`codebase.resolve_entry_code_files`, the single shared exclusion
     policy, rather than re-deriving containment rules that already exist in one place.
+    Two things that delegation does *not* handle, both guarded here:
 
-    Note what that policy does *not* do for an explicitly named single file: it judges
-    resolved containment, but not conventional non-source directory names. So a tracked
-    change under a vendored path is reported rather than hidden. That is the safer
-    direction for a review digest — over-reporting costs a reader a moment, while
-    under-reporting hides work that really did change.
+    * **A directory-shaped entry.** A changed submodule appears in the diff as a
+      gitlink, which is a directory on disk, so the shared resolver takes its ``rglob``
+      branch and walks the entire nested tree purely to answer a boolean. Regular files
+      are the only linkable entries, so anything else is refused before that walk.
+    * **Conventional non-source directory names**, which the resolver applies to
+      traversal-discovered candidates but not to an explicitly named file. So a tracked
+      change under a vendored path is reported rather than hidden — the safer direction
+      for a review digest, since over-reporting costs a reader a moment while
+      under-reporting hides work that really did change.
     """
     try:
+        if not candidate.is_file():
+            return False
         files, _excluded = codebase.resolve_entry_code_files(
             candidate, [candidate.suffix], project_root=project_root,
         )
     except OSError as exc:
         logger.debug("change-summary scope check failed: %s", exc)
-        return False
+        return None
     return bool(files)
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-path
 
@@ -812,8 +837,18 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
     failure — returned as *could not read* rather than as "carries no markers". Those
     are different claims and only one of them is true.
     """
+    # The size ceiling lives in `codebase` alongside the bulk-scan path that already
+    # enforced it, so there is one limit rather than a second one invented here. It is
+    # checked before either reader runs, which is what keeps the *document* scan below
+    # from reading a huge file that the code scan just refused.
     code_file, errors = codebase.load_code_file(path)
     if code_file is None or errors:
+        try:
+            oversized = path.stat().st_size > codebase.MAX_CODE_FILE_BYTES
+        except OSError:
+            oversized = False
+        if oversized:
+            return [], [], REASON_FILE_TOO_LARGE
         logger.debug("change-summary could not parse code markers in a changed file")
         return [], [], REASON_FILE_UNREADABLE
     references = sorted({ref.id for ref in code_file.references if ref.id})
@@ -840,17 +875,76 @@ def _collect_changed_entries(
     Untracked files are collected separately and reported with status ``?``. ``git
     diff`` cannot see them, so omitting them would let a brand-new module be absent
     from the digest entirely: the silent omission this module exists to avoid.
+
+    **The two streams overlap and are deduplicated by path, diff status winning.** One
+    physical file can appear in both: `git rm --cached` on a file present in the base
+    commit leaves it deleted in the index and untracked on disk, so the diff reports
+    ``D`` and the untracked sweep reports it as new. Concatenating produced two
+    contradictory rows for one file and inflated every counter. Git emits repo-relative
+    POSIX paths from both commands, so the raw string is an exact key — resolving each
+    path instead would cost a syscall per entry *and* wrongly merge two distinct
+    symlinks that happen to share a target.
     """
     diffed = _git_records(project_root, ["diff", "--name-status", "-z", base_sha])
     if diffed is None:
         return None
-    entries = _walk_name_status(diffed)
+    seen: Dict[str, str] = {}
+    for status, rel_path in _walk_name_status(diffed):
+        seen.setdefault(rel_path, status)
     untracked = _git_records(
         project_root, ["ls-files", "--others", "--exclude-standard", "-z"],
     ) or []
-    entries.extend(("?", path) for path in untracked if path)
-    return entries
+    for rel_path in untracked:
+        if rel_path:
+            # setdefault, so a path already carrying a diff status keeps it.
+            seen.setdefault(rel_path, "?")
+    # The map is keyed by path for deduplication, but the contract is (status, path),
+    # so the pairs are flipped back rather than returned in the map's own order.
+    return [(status, rel_path) for rel_path, status in seen.items()]
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-collect-changed
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-entry
+def _classify_entry(
+    status: str,
+    rel_path: str,
+    project_root: Path,
+) -> Tuple[Optional[FileLink], str]:
+    """Classify one changed entry into ``(link, counter to bump)``.
+
+    Extracted from :func:`link_changed_files` to keep that function within the
+    project's local-variable budget, and because "what is this entry, and which tally
+    does it belong to" is one question worth answering in one place.
+
+    A ``None`` link means the entry is counted but not listed — that is only the
+    policy-excluded case, where naming the path would imply it was examined. Every
+    other outcome produces a row, because a reader needs to see that the entry existed
+    even when nothing could be read from it.
+    """
+    absolute = project_root / rel_path
+    in_scope = _in_project_scope(absolute, project_root)
+
+    if in_scope is None:
+        # The scope question could not be answered. Reporting that as "excluded by
+        # policy" would claim a judgement that was never made.
+        return FileLink(path=rel_path, status=status, reason=REASON_SCOPE_UNKNOWN), "unreadable"
+
+    if not in_scope:
+        # Three distinct ways to fail the scope check, kept apart: the file is gone, it
+        # is not a regular file at all (a changed submodule arrives as a directory), or
+        # the shared policy genuinely excluded it.
+        if status == "D" or not absolute.exists():
+            return FileLink(path=rel_path, status=status, reason=REASON_FILE_GONE), "deleted"
+        if not absolute.is_file():
+            return FileLink(path=rel_path, status=status, reason=REASON_NOT_A_FILE), ""
+        return None, "excluded"
+
+    references, defines, reason = _file_traceability(absolute)
+    link = FileLink(
+        path=rel_path, status=status, references=references, defines=defines, reason=reason,
+    )
+    return link, ("unreadable" if reason else "")
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-classify-entry
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-changed
@@ -871,34 +965,30 @@ def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
     if entries is None:
         return LinkReport(reason=REASON_DIFF_UNAVAILABLE)
 
+    # Entries beyond the ceiling are counted, not dropped quietly. The count is the
+    # whole point: a digest that examined 1,000 of 40,000 changed paths and said
+    # nothing about the other 39,000 would be the silent-omission defect at scale.
+    truncated = max(0, len(entries) - _MAX_CHANGED_ENTRIES)
+    examined = entries[:_MAX_CHANGED_ENTRIES]
+
     links: List[FileLink] = []
-    deleted = excluded = unreadable = 0
-    for status, rel_path in entries:
-        absolute = project_root / rel_path
-        if not _in_project_scope(absolute, project_root):
-            # Deleted files fail the scope check because they no longer exist, so the
-            # two cases are separated here rather than both counting as excluded.
-            if status == "D" or not absolute.exists():
-                deleted += 1
-                links.append(FileLink(path=rel_path, status=status, reason=REASON_FILE_GONE))
-            else:
-                excluded += 1
-            continue
-        references, defines, reason = _file_traceability(absolute)
-        if reason:
-            unreadable += 1
-        links.append(FileLink(
-            path=rel_path, status=status, references=references, defines=defines, reason=reason,
-        ))
+    tally: Dict[str, int] = {"deleted": 0, "excluded": 0, "unreadable": 0}
+    for status, rel_path in examined:
+        link, counter = _classify_entry(status, rel_path, project_root)
+        if counter:
+            tally[counter] += 1
+        if link is not None:
+            links.append(link)
 
     return LinkReport(
         files=links,
         changed=len(entries),
         linked=sum(1 for link in links if link.references),
         declaring=sum(1 for link in links if link.defines),
-        deleted=deleted,
-        excluded=excluded,
-        unreadable=unreadable,
+        deleted=tally["deleted"],
+        excluded=tally["excluded"],
+        unreadable=tally["unreadable"],
+        truncated=truncated,
         available=True,
         reason=REASON_OK,
     )

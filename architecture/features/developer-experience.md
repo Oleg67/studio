@@ -262,6 +262,7 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 20. [x] - `p1` - Report what one file does with requirement IDs, asking both directions because a suffix is not a reliable guide, and separating could-not-read from carries-no-markers - `inst-change-summary-file-markers`
 21. [x] - `p1` - List everything changed since the base commit against the working tree, including untracked files, so newly written work is never absent from the digest - `inst-change-summary-collect-changed`
 22. [x] - `p1` - Resolve every changed file to what it declares, counting excluded, unreadable and deleted separately so the report always carries its denominator - `inst-change-summary-link-changed`
+23. [x] - `p1` - Classify one changed entry into its report row and its tally, keeping could-not-determine apart from excluded-by-policy and listing every entry that existed even when nothing could be read from it - `inst-change-summary-classify-entry`
 
 ## 4. States (CDSL)
 

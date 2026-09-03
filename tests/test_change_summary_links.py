@@ -12,6 +12,7 @@ a reviewer would rightly flag.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -290,6 +291,156 @@ class TestTheReport:
         assert report.reason == cs.REASON_OK
 
 
+class TestOnePhysicalFileIsReportedOnce:
+    """The diff stream and the untracked sweep overlap, and concatenating them produced
+    two contradictory rows for one file plus inflated counters."""
+
+    def test_an_unstaged_but_kept_file_appears_exactly_once(self, tmp_path):
+        """`git rm --cached` on a file present in the base leaves it deleted in the
+        index and untracked on disk, so both streams report it."""
+        repo = _make_repo(tmp_path / "r")
+        (repo / "foo.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add foo")
+        base = _git(repo, "rev-parse", "HEAD")
+        _point_ref(repo, "refs/remotes/upstream/main", base)
+        _git(repo, "rm", "--cached", "-q", "foo.py")     # unstaged, still on disk
+
+        report = _report(repo)
+
+        paths = [f.path for f in report.files]
+        assert paths.count("foo.py") == 1, "one physical file, one row"
+        assert report.changed == len(set(paths)), "counters must not double-count"
+
+    def test_the_diff_status_wins_over_the_untracked_status(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+        (repo / "foo.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add foo")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        _git(repo, "rm", "--cached", "-q", "foo.py")
+
+        report = _report(repo)
+
+        assert [f.status for f in report.files] == ["D"], "not the untracked '?'"
+
+    def test_entries_beyond_the_ceiling_are_counted_not_dropped(self, tmp_path, monkeypatch):
+        repo = _repo_with_base(tmp_path)
+        for index in range(4):
+            (repo / f"m{index}.py").write_text(_code(), encoding="utf-8")
+        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+
+        report = _report(repo)
+
+        assert len(report.files) == 2
+        assert report.truncated == 2, "the unexamined remainder must be visible"
+        assert report.changed == 4, "the denominator is what was found, not what was read"
+
+
+class TestUnscannableEntries:
+
+    def test_a_file_over_the_shared_size_cap_says_so(self, tmp_path, monkeypatch):
+        """Reported as over-cap rather than as unreadable or marker-free — the file is
+        fine, the reader declined it."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "big.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add big")
+        monkeypatch.setattr(cs.codebase, "MAX_CODE_FILE_BYTES", 1)
+        monkeypatch.setattr(cs.codebase, "_MAX_CODE_FILE_BYTES", 1)
+
+        report = _report(repo)
+
+        assert [f.reason for f in report.files] == [cs.REASON_FILE_TOO_LARGE]
+        assert report.linked == 0
+
+    def test_a_directory_shaped_entry_is_refused_without_being_walked(self, tmp_path, monkeypatch):
+        """A changed submodule is a gitlink — a directory on disk. The shared resolver
+        would rglob the entire nested tree just to answer a boolean, so the directory
+        must be refused before it is reached."""
+        repo = _make_repo(tmp_path / "r")
+        (repo / "sub").mkdir()
+
+        def _must_not_walk(*_a, **_k):
+            raise AssertionError("a directory entry must not reach the shared resolver")
+
+        monkeypatch.setattr(cs.codebase, "resolve_entry_code_files", _must_not_walk)
+
+        assert cs._in_project_scope(repo / "sub", repo) is False
+
+    def test_a_changed_submodule_is_reported_as_not_a_regular_file(self, tmp_path):
+        """End-to-end for the gitlink case: a real submodule, so the entry genuinely
+        arrives from git as a directory rather than being injected."""
+        other = _make_repo(tmp_path / "other")
+        repo = _repo_with_base(tmp_path)
+        added = subprocess.run(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add",
+             "-q", str(other), "sub"],
+            cwd=str(repo), capture_output=True, text=True, check=False,
+        )
+        if added.returncode:
+            pytest.skip(f"submodule add unavailable here: {added.stderr.strip()[:80]}")
+        _git(repo, "commit", "-q", "-m", "add submodule")
+
+        report = _report(repo)
+
+        gitlink = [f for f in report.files if f.path == "sub"]
+        assert gitlink, "the gitlink entry must be reported, not dropped"
+        assert gitlink[0].reason == cs.REASON_NOT_A_FILE
+        assert report.excluded == 0, "not a policy exclusion — it is not a file at all"
+
+    def test_an_unstattable_file_is_unreadable_not_oversized(self, tmp_path, monkeypatch):
+        """If the size cannot be read, "too large" is a claim we cannot make."""
+        path = tmp_path / "blob.py"
+        path.write_bytes(b"\xff\xfebinary")
+        real_stat = Path.stat
+
+        def _stat_fails(self, *a, **k):
+            if self == path:
+                raise OSError("stat refused")
+            return real_stat(self, *a, **k)
+
+        monkeypatch.setattr(Path, "stat", _stat_fails)
+
+        assert cs._file_traceability(path)[2] == cs.REASON_FILE_UNREADABLE
+
+    def test_a_scope_check_that_errors_is_unknown_not_excluded(self, tmp_path, monkeypatch):
+        """Folding a filesystem error into `excluded` reports a policy judgement that
+        was never made."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "add")
+
+        def _boom(*_a, **_k):
+            raise OSError("stat failed")
+
+        monkeypatch.setattr(cs.codebase, "resolve_entry_code_files", _boom)
+        report = _report(repo)
+
+        assert [f.reason for f in report.files] == [cs.REASON_SCOPE_UNKNOWN]
+        assert report.excluded == 0, "not a policy exclusion"
+        assert report.unreadable == 1
+
+    def test_a_tracked_change_under_a_vendored_path_is_reported(self, tmp_path):
+        """Pins the documented judgement call: the shared policy does not apply
+        conventional non-source directory names to an explicitly named file, and this
+        module deliberately keeps that — over-reporting costs a reader a moment,
+        under-reporting hides work that changed."""
+        repo = _repo_with_base(tmp_path)
+        vendored = repo / "vendor" / "dep.py"
+        vendored.parent.mkdir()
+        vendored.write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "vendor change")
+
+        report = _report(repo)
+
+        assert [f.path for f in report.files] == ["vendor/dep.py"]
+        assert report.excluded == 0
+        assert report.linked == 1, "reported, not hidden"
+
+
 class TestTheReportSaysWhyItCouldNot:
 
     def test_an_unavailable_window_propagates_exactly_one_reason(self, tmp_path):
@@ -325,6 +476,16 @@ class TestInvariants:
         def _boom(*_a, **_k):
             raise OSError("no exec")
         monkeypatch.setattr(cs.subprocess, "run", _boom)
+
+        assert cs._git_records(tmp_path, ["diff"]) is None
+
+    def test_git_records_handles_a_decode_error_from_the_subprocess(self, tmp_path, monkeypatch):
+        """The `UnicodeDecodeError` arm of the helper's except tuple. Line coverage
+        marks the `except (A, B, C)` line covered once *any* member fires, so this arm
+        was reported as covered while never being exercised."""
+        def _raise_decode(*_a, **_k):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        monkeypatch.setattr(cs.subprocess, "run", _raise_decode)
 
         assert cs._git_records(tmp_path, ["diff"]) is None
 

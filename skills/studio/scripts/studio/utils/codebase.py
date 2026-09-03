@@ -615,8 +615,36 @@ def _build_orphan_instruction_error(
 # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate-code:p1:inst-if-inst-orphan
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-scan-code:p1:inst-code-wrappers
-def load_code_file(code_path: Path) -> Tuple[Optional[CodeFile], List[Dict[str, object]]]:
-    """Convenience wrapper returning (CodeFile|None, errors)."""
+def load_code_file(
+    code_path: Path,
+    *,
+    max_bytes: Optional[int] = None,
+) -> Tuple[Optional[CodeFile], List[Dict[str, object]]]:
+    """Convenience wrapper returning (CodeFile|None, errors).
+
+    Applies the same size ceiling the bulk-scan path enforces. Without it a caller
+    reaching this directly reads an arbitrarily large file whole into memory, while the
+    same file routed through ``_scan_code_file_references`` would be skipped — one
+    entry point honouring a limit the other ignores. ``max_bytes`` of 0 or less
+    disables the check for callers that genuinely want the whole file; ``None`` selects
+    the module default, resolved in the body rather than as a default argument because
+    the constant is defined further down this module.
+    """
+    limit = _MAX_CODE_FILE_BYTES if max_bytes is None else max_bytes
+    if limit > 0:
+        try:
+            size = code_path.stat().st_size
+        except OSError as exc:
+            return None, [error(
+                "file", f"Failed to stat `{code_path}`: {exc}",
+                code=EC.FILE_READ_ERROR, path=code_path, line=1,
+            )]
+        if size > limit:
+            return None, [error(
+                "file",
+                f"`{code_path}` exceeds the {limit}-byte scan limit",
+                code=EC.FILE_READ_ERROR, path=code_path, line=1,
+            )]
     return CodeFile.from_path(code_path)
 
 def validate_code_file(code_path: Path) -> Dict[str, List[Dict[str, object]]]:
@@ -648,6 +676,10 @@ _DEFAULT_IGNORED_DIR_NAMES = frozenset(
 
 # Files larger than this are skipped (with a warning) rather than fully read.
 _MAX_CODE_FILE_BYTES = 2_000_000
+
+#: Public alias so a consumer can report *why* a file was skipped without either
+#: reaching into a private name or inventing a second, drifting ceiling.
+MAX_CODE_FILE_BYTES = _MAX_CODE_FILE_BYTES
 
 
 def _is_in_default_ignored_dir(file_path: Path, root: Path) -> bool:
