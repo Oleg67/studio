@@ -158,4 +158,5 @@ EventSelection.scanned  # noqa: B018
 EventSelection.undated  # noqa: B018
 EventSelection.skipped_lines  # noqa: B018
 EventSelection.runless  # noqa: B018
+EventSelection.log_overridden  # noqa: B018
 RUN_UNATTRIBUTED  # noqa: B018

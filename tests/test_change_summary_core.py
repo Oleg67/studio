@@ -9,6 +9,7 @@ defect this feature exists to remove.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import socket
@@ -175,7 +176,7 @@ class TestTheWindowSaysWhyItCouldNotBeBuilt:
         assert window.reason == cs.REASON_NOT_A_REPO
 
     def test_git_unavailable_is_distinguished_from_not_a_repo(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(cs, "_git_line", lambda *_a, **_k: None)
+        monkeypatch.setattr(cs, "_git_query", lambda *_a, **_k: (None, True))
 
         window = cs.resolve_window(tmp_path)
 
@@ -287,7 +288,7 @@ class TestEventSelection:
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.events == []
+        assert selection.events == ()
         assert selection.undated == 1
 
     def test_runs_preserve_first_seen_order(self, tmp_path):
@@ -300,7 +301,7 @@ class TestEventSelection:
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.runs == ["second", "first"], "first-seen order, not sorted"
+        assert selection.runs == ("second", "first"), "first-seen order, not sorted"
 
     def test_the_scanned_count_is_reported_even_when_nothing_is_selected(self, tmp_path):
         window = cs.ChangeWindow(since="2026-12-01T00:00:00+00:00", available=True)
@@ -310,7 +311,7 @@ class TestEventSelection:
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.events == []
+        assert selection.events == ()
         assert selection.scanned == 2, "a verdict without its denominator is the defect"
 
 
@@ -372,7 +373,7 @@ class TestNothingRaises:
             raise subprocess.TimeoutExpired(cmd="git", timeout=1)
         monkeypatch.setattr(cs.subprocess, "run", _boom)
 
-        assert cs._git_line(tmp_path, ["status"]) is None
+        assert cs._git_query(tmp_path, ["status"]) == (None, True)
 
     def test_an_oserror_from_git_degrades(self, tmp_path, monkeypatch):
         def _boom(*_a, **_k):
@@ -383,15 +384,6 @@ class TestNothingRaises:
 
         assert window.available is False
         assert window.reason == cs.REASON_GIT_UNAVAILABLE
-
-    def test_a_failing_log_probe_is_reported_as_unreadable_not_absent(self, tmp_path, monkeypatch):
-        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
-        monkeypatch.setattr(Path, "is_file", lambda _self: (_ for _ in ()).throw(OSError("nope")))
-        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
-
-        selection = cs.select_events(window, path=log)
-
-        assert selection.reason == cs.REASON_LOG_UNREADABLE, "a failed probe is not proof of absence"
 
     def test_an_existing_but_unreadable_log_is_never_an_available_empty_selection(self, tmp_path):
         """The false green: is_file() passes on mode 000, and read_events swallows the
@@ -411,15 +403,7 @@ class TestNothingRaises:
 
         assert selection.available is False, "unreadable must not present as an empty window"
         assert selection.reason == cs.REASON_LOG_UNREADABLE
-        assert selection.events == []
-
-    def test_the_line_count_reports_a_read_error_rather_than_zero(self, tmp_path, monkeypatch):
-        """Returning 0 made a failed read indistinguishable from an empty log, which
-        is what let a vanished log surface as an available empty selection."""
-        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
-        monkeypatch.setattr(Path, "open", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope")))
-
-        assert cs._count_log_lines(log) is None
+        assert selection.events == ()
 
     def test_hostile_event_shapes_do_not_raise(self, tmp_path):
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
@@ -434,7 +418,7 @@ class TestNothingRaises:
         selection = cs.select_events(window, path=log)
 
         assert selection.available is True
-        assert selection.events == []
+        assert selection.events == ()
 
 
 # ---------------------------------------------------------------------- invariants
@@ -586,9 +570,10 @@ class TestTheLogIsBoundToTheWindowsProject:
         assert cs.resolve_window(tmp_path).project_root == str(tmp_path)
 
     def test_a_rootless_window_still_falls_back_to_the_cwd_default(self, monkeypatch):
+        monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
         monkeypatch.setattr(decision_log, "default_log_path", lambda start=None: None)
 
-        assert cs._default_log_for(cs.ChangeWindow(available=True)) is None
+        assert cs._default_log_for(cs.ChangeWindow(available=True)) == (None, False)
 
     def test_the_real_resolver_finds_the_windows_project_from_another_cwd(
         self, tmp_path, monkeypatch,
@@ -601,7 +586,7 @@ class TestTheLogIsBoundToTheWindowsProject:
         other = _make_studio_project(tmp_path / "other")
         monkeypatch.chdir(other)
 
-        resolved = cs._default_log_for(
+        resolved, _overridden = cs._default_log_for(
             cs.ChangeWindow(project_root=str(wanted), available=True),
         )
 
@@ -699,6 +684,17 @@ class TestCallerValuesCannotBecomeGitOptions:
 
         assert window.available is False
         assert window.reason == cs.REASON_BASE_REF_UNKNOWN, "refused as a ref, not as an option"
+
+    def test_a_ref_containing_nul_is_refused_not_raised(self, tmp_path):
+        """`subprocess` raises ValueError for an embedded NUL before git starts —
+        outside the git helper's handler, so this escaped the never-raises contract."""
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+
+        window = cs.resolve_window(repo, base="main\x00")
+
+        assert window.available is False
+        assert window.reason == cs.REASON_BASE_REF_UNKNOWN, "a ref that cannot exist"
 
     def test_every_option_bearing_call_separates_its_operands(self):
         """A structural check, so a new call site that interpolates a caller value
@@ -799,7 +795,7 @@ class TestBaseRefLookupPreservesTheGitDiagnosis:
     def test_a_tool_failure_on_an_explicit_ref_reports_git(self, tmp_path, monkeypatch):
         repo = _make_repo(tmp_path / "r")
         monkeypatch.setattr(cs, "_git_query", lambda *_a, **_k: (None, True))
-        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+        monkeypatch.setattr(cs, "_detect_repo", lambda *_a, **_k: cs.REASON_OK)
 
         window = cs.resolve_window(repo, base="release")
 
@@ -809,7 +805,7 @@ class TestBaseRefLookupPreservesTheGitDiagnosis:
     def test_a_tool_failure_on_the_default_ref_reports_git(self, tmp_path, monkeypatch):
         repo = _make_repo(tmp_path / "r")
         monkeypatch.setattr(cs, "_git_query", lambda *_a, **_k: (None, True))
-        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+        monkeypatch.setattr(cs, "_detect_repo", lambda *_a, **_k: cs.REASON_OK)
 
         window = cs.resolve_window(repo)
 
@@ -832,39 +828,131 @@ class TestBaseRefLookupPreservesTheGitDiagnosis:
             return None, True
 
         monkeypatch.setattr(cs, "_git_query", _fail)
-        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+        monkeypatch.setattr(cs, "_detect_repo", lambda *_a, **_k: cs.REASON_OK)
         cs.resolve_window(repo)
 
         assert len(calls) == 1, "one attempt, not one per candidate ref"
 
 
-class TestAPostProbeReadFailureIsNeverAnEmptySuccess:
-    """`read_events` swallows its own open failure and yields nothing, so a log that
-    disappears between the probe and the read looked like an empty window."""
+class TestTheLogIsReadExactlyOnce:
+    """Readability, the events and the line count come from one read of the file.
 
-    def test_a_log_that_vanishes_after_the_probe_is_reported(self, tmp_path, monkeypatch):
+    Separate reads let two things go wrong. A valid line appended between the event
+    read and the line count made the count exceed the events, so ordinary concurrent
+    logging was reported as corruption. A rotation between the readability probe and
+    the event read swapped the verified file for a fresh near-empty one, and the
+    selection came back clean and almost empty with no sign anything had moved.
+    """
+
+    def test_the_log_is_opened_exactly_once(self, tmp_path, monkeypatch):
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
-        real_probe = cs._log_unavailable
+        real_open = Path.open
+        opens = []
 
-        def _probe_then_remove(path):
-            reason = real_probe(path)
-            path.unlink()
-            return reason
+        def _counting(self, *args, **kwargs):
+            if self == log:
+                opens.append(args)
+            return real_open(self, *args, **kwargs)
 
-        monkeypatch.setattr(cs, "_log_unavailable", _probe_then_remove)
+        monkeypatch.setattr(Path, "open", _counting)
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.available is False, "success must not be reported having read nothing"
-        assert selection.reason == cs.REASON_LOG_UNREADABLE
+        assert selection.available is True
+        assert len(opens) == 1, "a second open is a gap for the file to change in"
 
-    def test_the_line_count_distinguishes_unreadable_from_empty(self, tmp_path):
+    def test_a_line_appended_during_selection_is_not_reported_as_corruption(
+        self, tmp_path, monkeypatch,
+    ):
+        """With separate reads the line count saw the new line and the events did not,
+        so `skipped_lines` reported normal concurrent activity as corruption."""
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        real_parse = decision_log.parse_events
+
+        def _append_then_parse(lines):
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(_event("2026-06-01T00:00:01+00:00", "late")) + "\n")
+            return real_parse(lines)
+
+        monkeypatch.setattr(decision_log, "parse_events", _append_then_parse)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.skipped_lines == 0
+        assert selection.scanned == 1, "the snapshot, not the file as it is now"
+
+    def test_a_rotation_during_selection_cannot_swap_the_file_under_the_read(
+        self, tmp_path, monkeypatch,
+    ):
+        """The writer rotates by renaming the log aside and starting a fresh one. A
+        selection that verified the old file and then read the new one reported a
+        clean, near-empty window; now what was verified is what is read."""
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        real_parse = decision_log.parse_events
+
+        def _rotate_then_parse(lines):
+            os.replace(log, log.with_name(log.name + ".1"))
+            log.write_text("", encoding="utf-8")
+            return real_parse(lines)
+
+        monkeypatch.setattr(decision_log, "parse_events", _rotate_then_parse)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert len(selection.events) == 1, "the file that was read, not its replacement"
+        assert selection.skipped_lines == 0
+
+    def test_a_read_error_is_unreadable_not_absent(self, tmp_path, monkeypatch):
+        """The plain `OSError` arm — neither a missing file nor a permission bit — so a
+        regression confined to it fails here rather than hiding behind the arms other
+        tests drive. Line coverage marks a whole `except (A, B)` covered once either
+        fires, which is how this arm went untested before."""
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+
+        def _io_error(self, *_a, **_k):
+            raise OSError(5, "Input/output error")
+
+        monkeypatch.setattr(Path, "read_text", _io_error)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.available is False
+        assert selection.reason == cs.REASON_LOG_UNREADABLE, "a failed read is not proof of absence"
+
+    def test_a_log_path_under_a_file_is_absent_not_unreadable(self, tmp_path):
+        """`NotADirectoryError`: a parent component is a regular file, so no log can
+        exist there. That is absence — the writer's own mkdir fails the same way."""
+        (tmp_path / "cache").write_text("", encoding="utf-8")
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=tmp_path / "cache" / "d.jsonl")
+
+        assert selection.reason == cs.REASON_LOG_ABSENT
+
+    def test_an_empty_log_is_a_count_not_a_failure(self, tmp_path):
         empty = tmp_path / "empty.jsonl"
         empty.write_text("", encoding="utf-8")
 
-        assert cs._count_log_lines(empty) == 0, "an empty log is a count, not a failure"
-        assert cs._count_log_lines(tmp_path / "gone.jsonl") is None
+        assert cs._read_log(empty) == ([], cs.REASON_OK)
+        assert cs._read_log(tmp_path / "gone.jsonl") == (None, cs.REASON_LOG_ABSENT)
+
+    def test_skipped_lines_is_exact_for_the_snapshot(self, tmp_path):
+        """Two non-empty lines that yield no event — one not JSON, one JSON that is not
+        an object — and a blank line, which is not a line at all for this purpose."""
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(
+            tmp_path / "d.jsonl",
+            [_event("2026-06-01T00:00:00+00:00")],
+            extra="{ this is not json\n\n[]\n",
+        )
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.skipped_lines == 2
 
 
 class TestRunIdsAreCanonicalised:
@@ -879,9 +967,23 @@ class TestRunIdsAreCanonicalised:
         (1, ""),                            # a non-string must not join its own text
         ("not-hex!", "not-hex!"),           # unrecognised, but a real identifier
         ("Custom-Run-7", "custom-run-7"),   # a future writer's shape is not rejected
+        ("STRASSE", "strasse"),
+        ("Straße", "strasse"),              # casefold, not lower: ß folds to ss
     ])
     def test_the_canonical_form(self, raw, expected):
         assert cs._canonical_run_id(raw) == expected
+
+    def test_unicode_case_variants_form_one_group(self, tmp_path):
+        """`lower()` left these as two runs while the docstring promised casefolding."""
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(tmp_path / "d.jsonl", [
+            _event("2026-06-01T00:00:00+00:00", "Straße"),
+            _event("2026-06-01T00:00:01+00:00", "STRASSE"),
+        ])
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.runs == ("strasse",), "one logical run, not two"
 
     def test_case_variants_form_one_group(self, tmp_path):
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
@@ -892,7 +994,7 @@ class TestRunIdsAreCanonicalised:
 
         selection = cs.select_events(window, path=log)
 
-        assert selection.runs == ["abcdef012345"], "one logical run, not two"
+        assert selection.runs == ("abcdef012345",), "one logical run, not two"
         assert len(cs.group_by_run(selection)["abcdef012345"]) == 2
 
     def test_a_numeric_id_does_not_merge_with_its_own_text(self, tmp_path):
@@ -917,7 +1019,7 @@ class TestRunIdsAreCanonicalised:
         selection = cs.select_events(window, path=log)
 
         assert selection.runless == 1
-        assert selection.runs == [cs.RUN_UNATTRIBUTED]
+        assert selection.runs == (cs.RUN_UNATTRIBUTED,)
 
 
 class TestUndecodableLogs:
@@ -927,20 +1029,6 @@ class TestUndecodableLogs:
         the first strict read and UnicodeDecodeError escaped `select_events`."""
         log = tmp_path / "bad.jsonl"
         log.write_bytes(b'{"schema":1,"ts":"2026-06-01T00:00:00+00:00"}\n\xff\xfe bad\n')
-        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
-
-        selection = cs.select_events(window, path=log)
-
-        assert selection.available is False
-        assert selection.reason == cs.REASON_LOG_UNREADABLE
-
-    def test_a_log_that_breaks_mid_read_is_not_a_partial_selection(self, tmp_path, monkeypatch):
-        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
-
-        def _explode(*_a, **_k):
-            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "boom")
-
-        monkeypatch.setattr(decision_log, "read_events", _explode)
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
 
         selection = cs.select_events(window, path=log)
@@ -979,8 +1067,8 @@ class TestEveryEventIsGrouped:
         one bucket, and none is dropped. Losing an event would be the real defect;
         sharing a label with an anonymous one is cosmetic."""
         selection = cs.EventSelection(
-            events=[{"run_id": cs.RUN_UNATTRIBUTED}, {"run_id": None}],
-            runs=[cs.RUN_UNATTRIBUTED],
+            events=({"run_id": cs.RUN_UNATTRIBUTED}, {"run_id": None}),
+            runs=(cs.RUN_UNATTRIBUTED,),
             available=True,
         )
 
@@ -1007,3 +1095,205 @@ class TestGrouping:
 
     def test_grouping_an_empty_selection_is_empty_not_an_error(self):
         assert cs.group_by_run(cs.EventSelection()) == {}
+
+
+class TestRepoDetectionKeepsItsAnswersApart:
+    """`rev-parse --is-inside-work-tree` has three outcomes — true, false, and a
+    non-zero exit — plus the tool not answering at all. Each is a different fact."""
+
+    def test_a_tool_failure_during_detection_is_not_a_verdict_about_the_directory(
+        self, tmp_path, monkeypatch,
+    ):
+        """Before: the flag was dropped and `git --version` was asked separately, so a
+        timeout on the real question plus a healthy second launch came back as "not a
+        git repository" — a claim nothing had established."""
+        repo = _make_repo(tmp_path / "r")
+        real_run = subprocess.run
+
+        def _flaky(cmd, *args, **kwargs):
+            if "--is-inside-work-tree" in cmd:
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(cs.subprocess, "run", _flaky)
+
+        window = cs.resolve_window(repo)
+
+        assert window.available is False
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE, "nothing learned, nothing claimed"
+
+    def test_a_bare_repository_is_a_repository_without_a_working_tree(self, tmp_path):
+        bare = tmp_path / "bare.git"
+        bare.mkdir()
+        _git(bare, "init", "-q", "--bare")
+
+        window = cs.resolve_window(bare)
+
+        assert window.available is False
+        assert window.reason == cs.REASON_NO_WORK_TREE, "a bare repository is a repository"
+
+    def test_the_git_directory_itself_is_outside_the_working_tree(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+
+        assert cs.resolve_window(repo / ".git").reason == cs.REASON_NO_WORK_TREE
+
+    def test_detection_launches_git_exactly_once(self, tmp_path, monkeypatch):
+        """The second launch was the `--version` guess. It is gone, and with it the
+        doubled cost on every non-repo path."""
+        real_run = subprocess.run
+        launches = []
+
+        def _counting(cmd, *args, **kwargs):
+            launches.append(cmd)
+            return real_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(cs.subprocess, "run", _counting)
+
+        assert cs.resolve_window(tmp_path).reason == cs.REASON_NOT_A_REPO
+        assert len(launches) == 1
+
+
+class TestResultsAreImmutableRecords:
+    """A selection's counts describe its collections. If a caller could grow, shrink or
+    reassign them, `scanned`, `undated` and `runless` would silently stop being true."""
+
+    def test_a_window_refuses_reassignment(self, tmp_path):
+        window = cs.resolve_window(tmp_path)
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            window.since = "2026-01-01T00:00:00+00:00"
+
+    def test_a_selection_refuses_reassignment_and_its_collections_cannot_grow(self, tmp_path):
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        selection = cs.select_events(window, path=log)
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            selection.scanned = 0
+        assert isinstance(selection.events, tuple)
+        assert isinstance(selection.runs, tuple)
+
+    def test_grouping_shares_the_selections_event_objects_deliberately(self, tmp_path):
+        """Not a copy: one event, one identity. A copy would let a renderer annotate a
+        group and then read a different value back from `events`."""
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00", "r1")])
+        selection = cs.select_events(window, path=log)
+
+        grouped = cs.group_by_run(selection)
+
+        assert grouped["r1"][0] is selection.events[0]
+
+
+class TestAnEnvironmentOverrideIsFollowedAndReported:
+    """`$CFS_DECISION_LOG` is process-wide: the writer honours it in every project the
+    process runs in. The reader follows it — that is where the events are — and says
+    so, because one shared log cannot be attributed to the window's project."""
+
+    def test_the_override_is_read_because_that_is_where_the_writer_wrote(
+        self, tmp_path, monkeypatch,
+    ):
+        """Reading the project-local path instead would report "no decision log yet"
+        about a log that exists and is being written to."""
+        project = _make_studio_project(tmp_path / "project")
+        shared = _write_log(tmp_path / "shared.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        monkeypatch.setenv("CFS_DECISION_LOG", str(shared))
+        window = cs.ChangeWindow(
+            project_root=str(project), since="2026-01-01T00:00:00+00:00", available=True,
+        )
+
+        selection = cs.select_events(window)
+
+        assert selection.available is True
+        assert len(selection.events) == 1
+        assert selection.log_overridden is True, "a shared log is reported as shared"
+
+    def test_the_writer_and_the_reader_agree_on_where_the_log_is(self, tmp_path, monkeypatch):
+        """End to end: the writer records from inside project B with the override set,
+        and a window for project A reads that event. Had the reader ignored the
+        override, it would have found nothing at all."""
+        project_a = _make_studio_project(tmp_path / "a")
+        project_b = _make_studio_project(tmp_path / "b")
+        shared = tmp_path / "shared.jsonl"
+        monkeypatch.setenv("CFS_DECISION_LOG", str(shared))
+        monkeypatch.setattr(decision_log, "opt_out_sentinel_path", lambda: tmp_path / "absent")
+        monkeypatch.setattr(decision_log, "_FAILURE_WARNED", False)
+        monkeypatch.chdir(project_b)
+        assert decision_log.record("validation", {"check": "x"}, command="validate") is True
+        window = cs.ChangeWindow(
+            project_root=str(project_a), since="2000-01-01T00:00:00+00:00", available=True,
+        )
+
+        selection = cs.select_events(window)
+
+        assert selection.scanned == 1
+        assert selection.log_overridden is True
+
+    def test_a_project_resolved_log_is_not_reported_as_overridden(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CFS_DECISION_LOG", raising=False)
+        project = _make_studio_project(tmp_path / "project")
+        log = decision_log.default_log_path(project)
+        assert log is not None
+        log.parent.mkdir(parents=True, exist_ok=True)
+        _write_log(log, [_event("2026-06-01T00:00:00+00:00")])
+        window = cs.ChangeWindow(
+            project_root=str(project), since="2026-01-01T00:00:00+00:00", available=True,
+        )
+
+        selection = cs.select_events(window)
+
+        assert len(selection.events) == 1
+        assert selection.log_overridden is False
+
+    def test_an_explicit_path_is_never_reported_as_overridden(self, tmp_path, monkeypatch):
+        """A caller that names the log chose it; the environment did not."""
+        monkeypatch.setenv("CFS_DECISION_LOG", str(tmp_path / "elsewhere.jsonl"))
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert len(selection.events) == 1, "the named log, not the override"
+        assert selection.log_overridden is False
+
+
+class TestTheBoundaryFollowsTheMergeBase:
+    """The lower bound is the merge-base's commit time, so it moves when the merge-base
+    does. This pins that documented behaviour — and its remedy — so a change to the
+    window's meaning is a deliberate edit here rather than a silent drift."""
+
+    def test_a_rebase_advances_the_boundary_and_an_explicit_since_restores_it(
+        self, tmp_path, monkeypatch,
+    ):
+        def _at(stamp):
+            monkeypatch.setenv("GIT_AUTHOR_DATE", stamp)
+            monkeypatch.setenv("GIT_COMMITTER_DATE", stamp)
+
+        _at("2026-01-01T00:00:00+00:00")
+        repo = _make_repo(tmp_path / "r")
+        trunk = _git(repo, "branch", "--show-current")
+        old_base = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "checkout", "-q", "-b", "feature")
+        _at("2026-01-02T00:00:00+00:00")
+        _commit(repo, "feature.txt")
+        _git(repo, "checkout", "-q", trunk)
+        _at("2026-01-05T00:00:00+00:00")
+        new_base = _commit(repo, "upstream.txt")
+        _point_ref(repo, "refs/remotes/upstream/main", new_base)
+        _git(repo, "checkout", "-q", "feature")
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-01-03T00:00:00+00:00")])
+
+        before = cs.resolve_window(repo)
+        assert before.base_sha == old_base
+        assert len(cs.select_events(before, path=log).events) == 1
+
+        _git(repo, "rebase", "-q", "upstream/main")
+
+        after = cs.resolve_window(repo)
+        assert after.base_sha == new_base, "the merge-base moved, so the boundary moved"
+        assert after.since > before.since
+        assert cs.select_events(after, path=log).events == (), \
+            "the documented loss: a decision logged before the new base commit"
+
+        pinned = cs.resolve_window(repo, since=before.since)
+        assert len(cs.select_events(pinned, path=log).events) == 1, "since= is the remedy"

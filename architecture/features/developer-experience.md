@@ -240,22 +240,21 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 **Output**: The span of work a change digest covers, and the decision-log events recorded inside it
 
 **Rules**:
-1. [x] - `p1` - Define the window and selection result types, and the reason vocabulary shared by producer and renderer so an unavailable dimension is always named rather than shown as empty - `inst-change-summary-datamodel`
-2. [x] - `p1` - Answer read-only git queries as one line of output or nothing, treating git absent, non-zero exit, timeout and empty output identically - `inst-change-summary-git-query`
-3. [x] - `p1` - Detect whether the project root sits inside a git work tree - `inst-change-summary-detect-repo`
+1. [x] - `p1` - Define the window and selection result types as immutable records, and the reason vocabulary shared by producer and renderer so an unavailable dimension is always named rather than shown as empty - `inst-change-summary-datamodel`
+2. [x] - `p1` - Answer read-only git queries as one line of output or nothing, keeping a tool failure apart from a valid negative so a timeout is never reported as a conclusion about history - `inst-change-summary-git-query`
+3. [x] - `p1` - Detect whether the project root sits inside a git work tree, telling not-a-repository apart from a repository without a working tree and from git itself failing to answer - `inst-change-summary-detect-repo`
 4. [x] - `p1` - Resolve the base ref, preferring the canonical remote over a fork's lagging default, and honour or refuse an explicitly requested ref rather than substituting a fallback - `inst-change-summary-default-base`
 5. [x] - `p1` - Resolve the merge-base between HEAD and the base ref, treating unrelated histories as no window - `inst-change-summary-merge-base`
-6. [x] - `p1` - Read the base commit's commit time as the window's lower bound - `inst-change-summary-base-time`
+6. [x] - `p1` - Read the base commit's commit time as the window's lower bound, accepting that the boundary moves with the merge-base and that an explicit lower bound is how a caller pins it - `inst-change-summary-base-time`
 7. [x] - `p1` - Assemble the window, short-circuiting git when the caller supplies an explicit lower bound, and returning a stated reason on every failure path instead of raising - `inst-change-summary-resolve-window`
 8. [x] - `p1` - Parse ISO-8601 timestamps to aware datetimes, normalising a trailing Z and refusing naive values rather than assuming an offset that would move events across the boundary - `inst-change-summary-parse-ts`
-9. [x] - `p1` - Report why the decision log cannot be read, distinguishing opt-out from absent from unreadable - `inst-change-summary-log-state`
-10. [x] - `p1` - Count the log's non-empty lines so the number that failed to parse can be derived and reported as a lower bound on corruption - `inst-change-summary-count-lines`
-11. [x] - `p1` - Select events at or after the window boundary, excluding and counting undated events rather than guessing them into or out of the window - `inst-change-summary-select-events`
-12. [x] - `p1` - Group selected events by run id in first-seen order, so one invocation is a subdivision of the branch's span and never the whole story - `inst-change-summary-group-runs`
-13. [x] - `p1` - Resolve the decision log belonging to the window's own project rather than to the current working directory, so a digest never reports one project's changes alongside another's decisions - `inst-change-summary-default-log`
-14. [x] - `p1` - Walk a known-good base ref down to a window, letting a git tool failure take precedence over a historical reading and keeping whatever was already learned on the returned window - `inst-change-summary-window-from-base`
-15. [x] - `p1` - Reduce a run id to a canonical form, casefolding and stripping so one logical run is not split and a non-string does not merge with its own text, while not rejecting an unrecognised-but-real identifier - `inst-change-summary-canonical-run`
-16. [x] - `p1` - Resolve and validate the decision log a window should be read from, returning either a usable path or the reason it is unusable - `inst-change-summary-resolve-log`
+9. [x] - `p1` - Read the decision log once and take readability, the events and the corruption count from that single snapshot, keeping absent apart from unreadable, so nothing appended or rotated between separate reads is reported as this window's state - `inst-change-summary-log-state`
+10. [x] - `p1` - Select events at or after the window boundary, excluding and counting undated events rather than guessing them into or out of the window - `inst-change-summary-select-events`
+11. [x] - `p1` - Group selected events by run id in first-seen order, so one invocation is a subdivision of the branch's span and never the whole story - `inst-change-summary-group-runs`
+12. [x] - `p1` - Resolve the decision log belonging to the window's own project rather than to the current working directory, following a process-wide override where the environment sets one but reporting that it did, so a digest never presents another project's decisions as this one's - `inst-change-summary-default-log`
+13. [x] - `p1` - Walk a known-good base ref down to a window, letting a git tool failure take precedence over a historical reading and keeping whatever was already learned on the returned window - `inst-change-summary-window-from-base`
+14. [x] - `p1` - Reduce a run id to a canonical form, casefolding and stripping so one logical run is not split and a non-string does not merge with its own text, while not rejecting an unrecognised-but-real identifier - `inst-change-summary-canonical-run`
+15. [x] - `p1` - Resolve the decision log a window should be read from, returning either a usable path and whether the environment chose it, or the reason no log is usable - `inst-change-summary-resolve-log`
 
 ## 4. States (CDSL)
 
