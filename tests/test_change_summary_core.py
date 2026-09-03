@@ -653,14 +653,29 @@ class TestTheAnswerDoesNotDependOnWhereTheProcessStands:
         project could be answered from another's repository."""
         here = _make_repo(tmp_path / "here")
         elsewhere = _make_repo(tmp_path / "elsewhere")
-        _point_ref(here, "refs/remotes/upstream/main", _git(here, "rev-parse", "HEAD"))
+        # The two repositories must be genuinely distinguishable. `_make_repo` writes
+        # identical content with a fixed identity, so two repos created in the same
+        # second produce the *same* commit sha — which made the first version of this
+        # test unfalsifiable: it compared a value against its own twin and passed
+        # whether or not the redirect had been neutralised. A distinct commit in the
+        # decoy is what gives the assertion something to fail on.
+        _commit(elsewhere, "decoy.txt", "different content\n")
+
+        # Both shas are captured *before* the redirect is installed. Reading the
+        # expected value afterwards would route the test's own helper through the very
+        # mechanism under test, comparing wrong against wrong.
+        expected = _git(here, "rev-parse", "HEAD")
+        decoy = _git(elsewhere, "rev-parse", "HEAD")
+        assert expected != decoy, "fixture precondition: the repositories must differ"
+        _point_ref(here, "refs/remotes/upstream/main", expected)
         monkeypatch.setenv("GIT_DIR", str(elsewhere / ".git"))
         monkeypatch.setenv("GIT_WORK_TREE", str(elsewhere))
 
         window = cs.resolve_window(here)
 
         assert window.available is True
-        assert window.base_sha == _git(here, "rev-parse", "HEAD"), "answered from `here`"
+        assert window.base_sha == expected, "answered from `here`"
+        assert window.base_sha != decoy, "and not from the redirect target"
 
     def test_the_sanitised_environment_drops_every_redirect_variable(self, monkeypatch):
         for name in cs._GIT_REDIRECT_VARS:
