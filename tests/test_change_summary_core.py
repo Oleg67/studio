@@ -334,7 +334,12 @@ class TestEventSelectionSaysWhyItCouldNotRead:
 
         assert selection.reason == cs.REASON_NOT_A_PROJECT
 
-    def test_a_window_whose_since_will_not_parse_is_reported(self, tmp_path):
+    def test_a_hand_built_window_with_an_unparseable_bound_still_degrades(self, tmp_path):
+        """`resolve_window` now rejects a bad `since` up front, so this can only be
+        reached by constructing a window directly. The guard stays as the floor beneath
+        that, but it is no longer the path a caller passing `since` takes — see
+        `TestAnExplicitSinceIsValidatedUpFront`, which is where that case belongs.
+        """
         window = cs.ChangeWindow(since="nonsense", available=True)
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
 
@@ -392,11 +397,13 @@ class TestNothingRaises:
         assert selection.reason == cs.REASON_LOG_UNREADABLE
         assert selection.events == []
 
-    def test_the_line_count_degrades_to_zero_on_a_read_error(self, tmp_path, monkeypatch):
+    def test_the_line_count_reports_a_read_error_rather_than_zero(self, tmp_path, monkeypatch):
+        """Returning 0 made a failed read indistinguishable from an empty log, which
+        is what let a vanished log surface as an available empty selection."""
         log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
         monkeypatch.setattr(Path, "open", lambda *_a, **_k: (_ for _ in ()).throw(OSError("nope")))
 
-        assert cs._count_log_lines(log) == 0
+        assert cs._count_log_lines(log) is None
 
     def test_hostile_event_shapes_do_not_raise(self, tmp_path):
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
@@ -577,6 +584,163 @@ class TestGitFailureIsNotAConclusionAboutHistory:
         assert cs._git_query(tmp_path, ["status"]) == (None, True)
 
 
+class TestAnExplicitSinceIsValidatedUpFront:
+    """A caller-supplied bound is the caller's input, so a complaint about it must name
+    that input. Accepting it and failing later produced a reason about a base commit
+    that was never consulted."""
+
+    @pytest.mark.parametrize("bad", [
+        "nonsense", "", "2026-13-99T00:00:00+00:00", "not-a-time",
+    ])
+    def test_an_unparseable_bound_never_yields_an_available_window(self, bad, tmp_path):
+        window = cs.resolve_window(tmp_path, since=bad)
+
+        assert window.available is False
+        if bad:
+            assert window.reason == cs.REASON_INVALID_SINCE
+
+    def test_a_naive_bound_is_refused_rather_than_assumed_utc(self, tmp_path):
+        """Guessing an offset would silently shift the window boundary."""
+        window = cs.resolve_window(tmp_path, since="2026-06-01T00:00:00")
+
+        assert window.available is False
+        assert window.reason == cs.REASON_INVALID_SINCE
+
+    def test_a_valid_bound_still_short_circuits_git(self):
+        window = cs.resolve_window(Path("/nonexistent-abc"), since="2026-01-01T00:00:00+00:00")
+
+        assert window.available is True
+        assert window.reason == cs.REASON_OK
+
+
+class TestBaseRefLookupPreservesTheGitDiagnosis:
+    """The previous round fixed this for merge-base and commit-time but left base-ref
+    lookup on the value-only helper, so two of three stages were covered."""
+
+    def test_a_tool_failure_on_an_explicit_ref_reports_git(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        monkeypatch.setattr(cs, "_git_query", lambda *_a, **_k: (None, True))
+        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+
+        window = cs.resolve_window(repo, base="release")
+
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE
+        assert window.reason != cs.REASON_BASE_REF_UNKNOWN
+
+    def test_a_tool_failure_on_the_default_ref_reports_git(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        monkeypatch.setattr(cs, "_git_query", lambda *_a, **_k: (None, True))
+        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+
+        window = cs.resolve_window(repo)
+
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE
+        assert window.reason != cs.REASON_NO_BASE_REF
+
+    def test_a_genuinely_missing_explicit_ref_still_says_so(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+
+        assert cs.resolve_window(repo, base="no-such").reason == cs.REASON_BASE_REF_UNKNOWN
+
+    def test_the_default_walk_stops_at_the_first_tool_failure(self, tmp_path, monkeypatch):
+        """Walking the remaining candidates after a launch failure would report a fact
+        about the repository that was never established."""
+        repo = _make_repo(tmp_path / "r")
+        calls = []
+
+        def _fail(_root, args):
+            calls.append(args)
+            return None, True
+
+        monkeypatch.setattr(cs, "_git_query", _fail)
+        monkeypatch.setattr(cs, "_is_git_repo", lambda *_a, **_k: True)
+        cs.resolve_window(repo)
+
+        assert len(calls) == 1, "one attempt, not one per candidate ref"
+
+
+class TestAPostProbeReadFailureIsNeverAnEmptySuccess:
+    """`read_events` swallows its own open failure and yields nothing, so a log that
+    disappears between the probe and the read looked like an empty window."""
+
+    def test_a_log_that_vanishes_after_the_probe_is_reported(self, tmp_path, monkeypatch):
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00")])
+        real_probe = cs._log_unavailable
+
+        def _probe_then_remove(path):
+            reason = real_probe(path)
+            path.unlink()
+            return reason
+
+        monkeypatch.setattr(cs, "_log_unavailable", _probe_then_remove)
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.available is False, "success must not be reported having read nothing"
+        assert selection.reason == cs.REASON_LOG_UNREADABLE
+
+    def test_the_line_count_distinguishes_unreadable_from_empty(self, tmp_path):
+        empty = tmp_path / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+
+        assert cs._count_log_lines(empty) == 0, "an empty log is a count, not a failure"
+        assert cs._count_log_lines(tmp_path / "gone.jsonl") is None
+
+
+class TestRunIdsAreCanonicalised:
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("abcdef012345", "abcdef012345"),
+        ("ABCDEF012345", "abcdef012345"),   # case variants are one run, not two
+        (" ab12 ", "ab12"),                 # surrounding whitespace is not identity
+        ("   ", ""),                        # whitespace is not a run
+        ("", ""),
+        (None, ""),
+        (1, ""),                            # a non-string must not join its own text
+        ("not-hex!", "not-hex!"),           # unrecognised, but a real identifier
+        ("Custom-Run-7", "custom-run-7"),   # a future writer's shape is not rejected
+    ])
+    def test_the_canonical_form(self, raw, expected):
+        assert cs._canonical_run_id(raw) == expected
+
+    def test_case_variants_form_one_group(self, tmp_path):
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(tmp_path / "d.jsonl", [
+            _event("2026-06-01T00:00:00+00:00", "ABCDEF012345"),
+            _event("2026-06-01T00:00:01+00:00", "abcdef012345"),
+        ])
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.runs == ["abcdef012345"], "one logical run, not two"
+        assert len(cs.group_by_run(selection)["abcdef012345"]) == 2
+
+    def test_a_numeric_id_does_not_merge_with_its_own_text(self, tmp_path):
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = tmp_path / "d.jsonl"
+        log.write_text(
+            json.dumps({"schema": 1, "ts": "2026-06-01T00:00:00+00:00", "run_id": 1}) + "\n"
+            + json.dumps({"schema": 1, "ts": "2026-06-01T00:00:01+00:00", "run_id": "1"}) + "\n",
+            encoding="utf-8",
+        )
+
+        grouped = cs.group_by_run(cs.select_events(window, path=log))
+
+        assert set(grouped) == {cs.RUN_UNATTRIBUTED, "1"}
+        assert len(grouped[cs.RUN_UNATTRIBUTED]) == 1
+        assert len(grouped["1"]) == 1
+
+    def test_a_whitespace_id_is_unattributed_not_a_named_run(self, tmp_path):
+        window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
+        log = _write_log(tmp_path / "d.jsonl", [_event("2026-06-01T00:00:00+00:00", "   ")])
+
+        selection = cs.select_events(window, path=log)
+
+        assert selection.runless == 1
+        assert selection.runs == [cs.RUN_UNATTRIBUTED]
+
+
 class TestUndecodableLogs:
 
     def test_invalid_utf8_returns_unavailable_rather_than_raising(self, tmp_path):
@@ -628,9 +792,22 @@ class TestEveryEventIsGrouped:
             "every selected event lands in exactly one bucket"
         assert grouped[cs.RUN_UNATTRIBUTED] and len(grouped[cs.RUN_UNATTRIBUTED]) == 3
 
-    def test_the_unattributed_bucket_cannot_collide_with_a_real_run_id(self):
-        """Run ids are hex; a parenthesised label cannot be produced as one."""
-        assert not all(c in "0123456789abcdef" for c in cs.RUN_UNATTRIBUTED)
+    def test_a_collision_with_the_unattributed_label_merges_rather_than_loses(self):
+        """This assertion used to rest on run ids being hexadecimal. That is no longer
+        enforced — an unrecognised id is kept rather than discarded — so a writer
+        emitting this exact parenthesised string would land in the same bucket. The
+        property worth pinning is therefore the *consequence*: such events merge into
+        one bucket, and none is dropped. Losing an event would be the real defect;
+        sharing a label with an anonymous one is cosmetic."""
+        selection = cs.EventSelection(
+            events=[{"run_id": cs.RUN_UNATTRIBUTED}, {"run_id": None}],
+            runs=[cs.RUN_UNATTRIBUTED],
+            available=True,
+        )
+
+        grouped = cs.group_by_run(selection)
+
+        assert sum(len(v) for v in grouped.values()) == 2
 
 
 class TestGrouping:

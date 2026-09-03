@@ -254,6 +254,8 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 12. [x] - `p1` - Group selected events by run id in first-seen order, so one invocation is a subdivision of the branch's span and never the whole story - `inst-change-summary-group-runs`
 13. [x] - `p1` - Resolve the decision log belonging to the window's own project rather than to the current working directory, so a digest never reports one project's changes alongside another's decisions - `inst-change-summary-default-log`
 14. [x] - `p1` - Walk a known-good base ref down to a window, letting a git tool failure take precedence over a historical reading and keeping whatever was already learned on the returned window - `inst-change-summary-window-from-base`
+15. [x] - `p1` - Reduce a run id to a canonical form, casefolding and stripping so one logical run is not split and a non-string does not merge with its own text, while not rejecting an unrecognised-but-real identifier - `inst-change-summary-canonical-run`
+16. [x] - `p1` - Resolve and validate the decision log a window should be read from, returning either a usable path or the reason it is unusable - `inst-change-summary-resolve-log`
 
 ## 4. States (CDSL)
 

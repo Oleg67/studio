@@ -83,10 +83,17 @@ REASON_NOT_A_PROJECT = "not inside a Studio project"
 REASON_LOG_DISABLED = "decision log disabled"
 REASON_LOG_ABSENT = "no decision log yet"
 REASON_LOG_UNREADABLE = "decision log unreadable"
+REASON_INVALID_SINCE = "the supplied lower bound is not an absolute timestamp"
 
-#: Bucket name for selected events carrying no ``run_id``. Grouping used to build
-#: buckets only for truthy ids, so such events sat in ``events`` and in no group and a
-#: renderer under-reported them. Run ids are hex, so this cannot collide with a real one.
+#: Bucket name for selected events whose ``run_id`` is missing or unusable. Grouping
+#: used to build buckets only for truthy ids, so such events sat in ``events`` and in no
+#: group, and a renderer summing the groups under-reported without saying so.
+#:
+#: The parentheses make it read as a label rather than an identifier, but nothing
+#: *enforces* uniqueness: a writer emitting this exact string would share the bucket.
+#: That is a deliberate trade — the alternative is rejecting unrecognised ids, which
+#: discards real information (see :func:`_canonical_run_id`). Sharing a label is
+#: cosmetic; dropping an event is not.
 RUN_UNATTRIBUTED = "(unattributed)"
 
 
@@ -151,10 +158,15 @@ def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool
             cwd=str(project_root),
             capture_output=True,
             text=True,
+            # Git refs and paths are bytes and need not be UTF-8, so `text=True`'s
+            # strict default would raise UnicodeDecodeError past the handler below and
+            # break the never-raises contract. `surrogateescape` is the handler Python
+            # uses for filesystem values, so they round-trip to the same bytes.
+            errors="surrogateescape",
             timeout=_GIT_TIMEOUT,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         logger.debug("change-summary git query could not run: %s", exc)
         return None, True
     if result.returncode:
@@ -183,7 +195,7 @@ def _is_git_repo(project_root: Path) -> bool:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-default-base
-def _resolve_base_ref(project_root: Path, requested: str = "") -> Optional[str]:
+def _resolve_base_ref(project_root: Path, requested: str = "") -> Tuple[Optional[str], bool]:
     """Pick the ref the window is measured from.
 
     An explicitly requested ref is honoured or refused — never silently swapped for a
@@ -191,12 +203,23 @@ def _resolve_base_ref(project_root: Path, requested: str = "") -> Optional[str]:
     for is worse than one that says it could not comply.
     """
     if requested:
-        resolved = _git_line(project_root, ["rev-parse", "--verify", "--quiet", requested])
-        return requested if resolved else None
+        resolved, failed = _git_query(
+            project_root, ["rev-parse", "--verify", "--quiet", requested],
+        )
+        return (requested if resolved else None), failed
     for candidate in _DEFAULT_BASE_REFS:
-        if _git_line(project_root, ["rev-parse", "--verify", "--quiet", candidate]):
-            return candidate
-    return None
+        resolved, failed = _git_query(
+            project_root, ["rev-parse", "--verify", "--quiet", candidate],
+        )
+        if failed:
+            # Stop at the first tool failure rather than walking the remaining
+            # candidates: each would fail the same way, and reporting "no default base
+            # ref" after eight failed launches states a fact about the repository that
+            # was never established.
+            return None, True
+        if resolved:
+            return candidate, False
+    return None, False
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-default-base
 
 
@@ -237,13 +260,19 @@ def resolve_window(
     """
     root = str(project_root)
     if since:
+        # A caller-supplied bound is validated here rather than surfacing later as a
+        # complaint about a base commit that was never consulted.
+        if _parse_ts(since) is None:
+            return ChangeWindow(project_root=root, reason=REASON_INVALID_SINCE)
         return ChangeWindow(project_root=root, since=since, available=True, reason=REASON_OK)
 
     if not _is_git_repo(project_root):
         reason = REASON_NOT_A_REPO if _git_line(project_root, ["--version"]) else REASON_GIT_UNAVAILABLE
         return ChangeWindow(project_root=root, reason=reason)
 
-    base_ref = _resolve_base_ref(project_root, base)
+    base_ref, failed = _resolve_base_ref(project_root, base)
+    if failed:
+        return ChangeWindow(project_root=root, reason=REASON_GIT_UNAVAILABLE)
     if base_ref is None:
         # Two different failures, two different reasons: a ref the caller named and
         # git does not have, versus no discoverable default at all.
@@ -351,18 +380,22 @@ def _log_unavailable(path: Path) -> str:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-count-lines
-def _count_log_lines(path: Path) -> int:
-    """Count non-empty lines in the log, for deriving how many failed to parse.
+def _count_log_lines(path: Path) -> Optional[int]:
+    """Count non-empty lines in the log, or ``None`` when it could not be read.
 
-    Returns 0 on any read error: an unreadable log is already reported through the
-    availability reason, and a wrong skip count must not be invented on top of it.
+    ``None`` rather than ``0`` is the whole point. This count runs *after*
+    :func:`decision_log.read_events`, which swallows its own open failure and yields
+    nothing, so a log that vanished between the readability probe and the read produced
+    an *available, empty* selection — success reported having read nothing. Returning 0
+    made that worse by yielding ``skipped_lines`` of 0 too, so the failure left no trace
+    anywhere. This read is therefore also the detector for that race.
     """
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             return sum(1 for line in handle if line.strip())
     except OSError as exc:
         logger.debug("change-summary log line count failed: %s", exc)
-        return 0
+        return None
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-count-lines
 
 
@@ -379,6 +412,24 @@ def _default_log_for(window: ChangeWindow) -> Optional[Path]:
         return decision_log.default_log_path()
     return decision_log.default_log_path(Path(window.project_root))
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-default-log
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-resolve-log
+def _resolve_log_for(window: ChangeWindow, path: Optional[Path]) -> Tuple[Optional[Path], str]:
+    """Return ``(log path, reason)`` — exactly one of which is meaningful.
+
+    Split out of :func:`select_events` so each function's guard clauses stay within the
+    project's return-count budget, and so "which log, and may it be read" is answerable
+    on its own.
+    """
+    target = path or _default_log_for(window)
+    if target is None:
+        return None, REASON_NOT_A_PROJECT
+    reason = _log_unavailable(target)
+    if reason:
+        return None, reason
+    return target, REASON_OK
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-resolve-log
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-select-events
@@ -404,11 +455,8 @@ def select_events(
     if not window.available:
         return EventSelection(reason=window.reason)
 
-    target = path or _default_log_for(window)
+    target, reason = _resolve_log_for(window, path)
     if target is None:
-        return EventSelection(reason=REASON_NOT_A_PROJECT)
-    reason = _log_unavailable(target)
-    if reason:
         return EventSelection(reason=reason)
 
     boundary = _parse_ts(window.since)
@@ -426,7 +474,7 @@ def select_events(
             if stamp < boundary:
                 continue
             selected.append(event)
-            run_id = str(event.get("run_id") or "")
+            run_id = _canonical_run_id(event.get("run_id"))
             if not run_id:
                 runless += 1
                 run_id = RUN_UNATTRIBUTED
@@ -439,17 +487,54 @@ def select_events(
         logger.debug("change-summary log became unreadable while reading: %s", exc)
         return EventSelection(reason=REASON_LOG_UNREADABLE)
 
+    # Deliberately after the read: `read_events` cannot report its own open failure,
+    # so this second read is what distinguishes "the log held nothing in the window"
+    # from "the log was never read".
+    total_lines = _count_log_lines(target)
+    if total_lines is None:
+        return EventSelection(reason=REASON_LOG_UNREADABLE)
+
     return EventSelection(
         events=selected,
         runs=runs,
         scanned=scanned,
         undated=undated,
         runless=runless,
-        skipped_lines=max(0, _count_log_lines(target) - scanned),
+        skipped_lines=max(0, total_lines - scanned),
         available=True,
         reason=REASON_OK,
     )
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-select-events
+
+
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-canonical-run
+def _canonical_run_id(value: Any) -> str:
+    """Return the canonical form of a ``run_id``, or ``""`` when it is not usable.
+
+    Raw values were used directly as grouping keys, which fragmented and merged history
+    in three ways:
+
+    * **case variants split one run** — ``"AB12"`` and ``"ab12"`` became two groups for
+      something the writer would only ever have emitted once, so casefolding merges them;
+    * **a non-string merged with its own text** — ``1`` and ``"1"`` both stringified to
+      ``"1"``, so a numeric field silently joined an unrelated run. Only ``str`` is
+      accepted, which keeps them apart;
+    * **whitespace formed an attributed group** — ``"   "`` is truthy, so it looked like
+      a real run. Stripping sends it to :data:`RUN_UNATTRIBUTED` where it belongs.
+
+    What this deliberately does **not** do is require the writer's current shape
+    (``uuid4().hex[:12]``). Rejecting anything non-hexadecimal would discard a real,
+    distinguishing identifier by folding it into the anonymous bucket, and
+    ``decision_log``'s own schema is explicit that "readers must ignore unknown event
+    names and unknown payload keys so that newer instrumentation never breaks an older
+    reader". A reader that refuses a run id it does not recognise breaks exactly that.
+    An unrecognised-but-present id is more honestly reported under its own name than
+    merged into "unattributed", which is a claim that no id was recorded at all.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().lower()
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-canonical-run
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-group-runs
@@ -467,7 +552,7 @@ def group_by_run(selection: EventSelection) -> Dict[str, List[Dict[str, Any]]]:
     """
     grouped: Dict[str, List[Dict[str, Any]]] = {run: [] for run in selection.runs}
     for event in selection.events:
-        run_id = str(event.get("run_id") or "") or RUN_UNATTRIBUTED
+        run_id = _canonical_run_id(event.get("run_id")) or RUN_UNATTRIBUTED
         grouped.setdefault(run_id, []).append(event)
     return grouped
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-group-runs
