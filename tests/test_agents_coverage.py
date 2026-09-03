@@ -11,7 +11,9 @@ Covers:
 
 import io
 import json
+import os
 import sys
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -567,6 +569,103 @@ class TestGenerateAgentsNoChangePreview(unittest.TestCase):
                 rc = cmd_generate_agents([])
 
             self.assertEqual(rc, 0)
+
+    def test_v2_layers_keep_opencode_in_pipeline(self):
+        """OpenCode must use its legacy branch without disabling v2 for the run."""
+        from studio.commands.agents import cmd_generate_agents
+
+        with TemporaryDirectory() as td:
+            root = Path(td) / "project"
+            studio_root = root / ".cf-studio"
+            studio_root.mkdir(parents=True)
+            args = SimpleNamespace(
+                dry_run=False,
+                remove_cypilot="no",
+                discover=False,
+                show_layers=False,
+                yes=True,
+            )
+            layer = SimpleNamespace(scope="kit")
+
+            with (
+                patch(
+                    "studio.commands.agents._resolve_agents_context",
+                    return_value=(args, ["opencode"], root, studio_root, {}, None, {}),
+                ),
+                patch("studio.commands.agents._discover_layers", return_value=[layer]),
+                patch("studio.commands.agents._layers_have_v2_manifests", return_value=True),
+                patch("studio.commands.agents._run_v2_generate_path", return_value=0) as run_v2,
+            ):
+                rc = cmd_generate_agents([])
+
+            self.assertEqual(rc, 0)
+            request = run_v2.call_args.args[0]
+            self.assertEqual(request.ctx.agents_to_process, ["opencode"])
+
+    def test_v2_pipeline_bypasses_opencode_manifest_translation(self):
+        """OpenCode never reaches manifest translators or a .opencode/skills path."""
+        from studio.commands.agents import (
+            _V2GenerateContext,
+            _build_v2_dry_results,
+            _preview_v2_generation,
+            _run_v2_pipeline,
+        )
+
+        with TemporaryDirectory() as td:
+            root = Path(td) / "project"
+            studio_root = root / ".cf-studio"
+            root.mkdir()
+            studio_root.mkdir()
+            ctx = _V2GenerateContext(
+                args=SimpleNamespace(dry_run=False),
+                agents_to_process=["opencode", "claude"],
+                project_root=root,
+                studio_root=studio_root,
+                cfg={},
+                cfg_path=None,
+                remove_cypilot=False,
+                variables={},
+            )
+            merged = SimpleNamespace(agents={}, skills={})
+            manifest_result = {
+                "created": [], "updated": [], "unchanged": [],
+                "deleted": [], "outputs": [],
+            }
+
+            def legacy_result(agent, *_args, **_kwargs):
+                return {
+                    "status": "PASS",
+                    "agent": agent,
+                    "workflows": {},
+                    "skills": {},
+                    "subagents": {},
+                    "rules": {},
+                    "errors": None,
+                }
+
+            with (
+                patch("studio.commands.agents.generate_manifest_agents", return_value=manifest_result) as generate_agents,
+                patch("studio.commands.agents.generate_manifest_skills", return_value=manifest_result) as generate_skills,
+                patch("studio.commands.agents._process_single_agent", side_effect=legacy_result),
+                patch("studio.commands.agents._refresh_managed_gitignore", return_value=None),
+            ):
+                preview = _preview_v2_generation(merged, ctx, None)
+                dry_results = _build_v2_dry_results(merged, ctx.agents_to_process, preview)
+                results, has_errors = _run_v2_pipeline(ctx, merged)
+
+            self.assertFalse(has_errors)
+            self.assertNotIn("opencode", preview["agents"])
+            self.assertNotIn("opencode", preview["skills"])
+            self.assertNotIn("v2_agents", dry_results["opencode"])
+            self.assertNotIn("manifest_v2", results["opencode"])
+            self.assertEqual(
+                [call.args[1] for call in generate_agents.call_args_list],
+                ["claude", "claude"],
+            )
+            self.assertEqual(
+                [call.args[1] for call in generate_skills.call_args_list],
+                ["claude", "claude"],
+            )
 
     def test_legacy_discover_writes_manifest_before_preview(self):
         from studio.commands.agents import cmd_generate_agents
@@ -5333,6 +5432,347 @@ class TestResultHasFatalErrors(unittest.TestCase):
         }
 
         self.assertTrue(_result_has_fatal_errors(result))
+
+
+class TestOpenCodeUnownedOutputsRecordRobustness(unittest.TestCase):
+    """Cover the invalid-path warning branch and the write-failure/cleanup path
+    for the OpenCode unowned-outputs record (deep-review findings F-004/F-006)."""
+
+    def test_load_rejects_and_warns_on_out_of_project_root_path(self):
+        from studio.commands.agents import (
+            _OPENCODE_UNOWNED_OUTPUTS_SCHEMA,
+            _load_opencode_unowned_outputs,
+            _opencode_unowned_outputs_path,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record_path = _opencode_unowned_outputs_path(root)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                json.dumps(
+                    {
+                        "schema": _OPENCODE_UNOWNED_OUTPUTS_SCHEMA,
+                        "paths": ["../outside.md", "cf-good.md"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertLogs("studio.commands.agents", level="WARNING") as captured:
+                result = _load_opencode_unowned_outputs(root)
+
+            self.assertNotIn("../outside.md", result)
+            self.assertIn(
+                "ignoring invalid OpenCode unowned-output path", "\n".join(captured.output)
+            )
+
+    def test_load_rejects_and_warns_on_path_outside_output_dir(self):
+        from studio.commands.agents import (
+            _OPENCODE_UNOWNED_OUTPUTS_SCHEMA,
+            _load_opencode_unowned_outputs,
+            _opencode_unowned_outputs_path,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record_path = _opencode_unowned_outputs_path(root)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(
+                json.dumps(
+                    {
+                        "schema": _OPENCODE_UNOWNED_OUTPUTS_SCHEMA,
+                        "paths": ["some/other/dir/cf-x.md"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertLogs("studio.commands.agents", level="WARNING") as captured:
+                result = _load_opencode_unowned_outputs(root)
+
+            self.assertEqual(result, set())
+            self.assertIn(
+                "ignoring invalid OpenCode unowned-output path", "\n".join(captured.output)
+            )
+
+    def test_save_cleans_up_tmp_and_warns_on_write_failure(self):
+        from studio.commands.agents import _save_opencode_unowned_outputs
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("os.replace", side_effect=OSError("disk full")),
+            ):
+                ok = _save_opencode_unowned_outputs(root, set(), add="cf-x.md")
+
+            self.assertFalse(ok)
+            self.assertIn(
+                "failed to save OpenCode unowned-output record", "\n".join(captured.output)
+            )
+            leftover_tmp = [
+                p
+                for p in (root / ".opencode").glob(".cf-studio-unowned-outputs.json*")
+                if not p.name.endswith(".lock")
+            ]
+            self.assertEqual(leftover_tmp, [], f"expected no leftover tmp file, found {leftover_tmp}")
+
+    def test_save_rollback_on_failure_leaves_caller_set_unchanged(self):
+        from studio.commands.agents import _save_opencode_unowned_outputs
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unowned_outputs = {"cf-existing.md"}
+
+            with patch("os.replace", side_effect=OSError("disk full")):
+                ok = _save_opencode_unowned_outputs(root, unowned_outputs, add="cf-new.md")
+
+            self.assertFalse(ok)
+            self.assertEqual(unowned_outputs, {"cf-existing.md"})
+
+    def test_owned_subagent_name_match_is_exact_not_substring(self):
+        """`expected_name` must match the full frontmatter name line (PR #71 review comment).
+
+        `cf-pr` must not match a file whose frontmatter reads `name: cf-pr-review`
+        merely because the shorter name is a substring of the longer one.
+        """
+        from studio.commands.agents import _GENERATED_MARKER, _is_opencode_owned_subagent
+
+        content = f"name: cf-pr-review\n{_GENERATED_MARKER}\n"
+
+        with TemporaryDirectory() as tmpdir:
+            install_marker = Path(tmpdir) / ".cf-studio-installed"
+
+            self.assertFalse(
+                _is_opencode_owned_subagent(
+                    content, install_marker, "cf-pr", sentinel_existed=True
+                ),
+                "a shorter name must not match via substring containment",
+            )
+            self.assertTrue(
+                _is_opencode_owned_subagent(
+                    content, install_marker, "cf-pr-review", sentinel_existed=True
+                ),
+                "the exact matching name must still be recognized as owned",
+            )
+
+    def test_save_falls_back_to_sentinel_lock_when_fcntl_unavailable(self):
+        """The Windows fallback path must still serialize writers, not skip locking (PR #71 review comment)."""
+        from studio.commands.agents import _save_opencode_unowned_outputs
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            with patch.dict("sys.modules", {"fcntl": None}):
+                ok = _save_opencode_unowned_outputs(root, set(), add="cf-x.md")
+
+            self.assertTrue(ok)
+            lock_path = root / ".opencode" / ".cf-studio-unowned-outputs.json.lock"
+            self.assertFalse(
+                lock_path.exists(), "sentinel lock must be cleaned up after a successful save"
+            )
+
+    def test_save_windows_fallback_refuses_to_proceed_when_lock_held(self):
+        """A held sentinel lock must block the writer rather than let it proceed unlocked."""
+        from studio.commands.agents import _save_opencode_unowned_outputs
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lock_path = root / ".opencode" / ".cf-studio-unowned-outputs.json.lock"
+            lock_path.parent.mkdir(parents=True)
+            lock_path.write_text("", encoding="utf-8")
+            # Make the held lock look fresh (not stale) for the whole 10s
+            # deadline the fallback waits before giving up.
+            os.utime(lock_path, (time.time(), time.time()))
+
+            with (
+                patch.dict("sys.modules", {"fcntl": None}),
+                patch("time.sleep", return_value=None),
+                patch(
+                    "time.monotonic",
+                    side_effect=[0.0] + [20.0] * 10,
+                ),
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+            ):
+                ok = _save_opencode_unowned_outputs(root, set(), add="cf-x.md")
+
+            self.assertFalse(ok)
+            self.assertIn(
+                "refusing to proceed unlocked", "\n".join(captured.output)
+            )
+
+    def test_load_rejects_invalid_record_schema(self):
+        from studio.commands.agents import (
+            _load_opencode_unowned_outputs,
+            _opencode_unowned_outputs_path,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record_path = _opencode_unowned_outputs_path(root)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps({"schema": "wrong-schema", "paths": []}), encoding="utf-8")
+
+            with self.assertLogs("studio.commands.agents", level="WARNING") as captured:
+                result = _load_opencode_unowned_outputs(root)
+
+            self.assertEqual(result, set())
+            self.assertIn("invalid OpenCode unowned-output record", "\n".join(captured.output))
+
+    def test_acquire_lock_warns_and_returns_none_on_oserror(self):
+        from studio.commands.agents import _acquire_opencode_unowned_outputs_lock
+
+        with TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".opencode" / "record.json.lock"
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("os.open", side_effect=OSError("boom")),
+            ):
+                lock_fd, _fcntl_module = _acquire_opencode_unowned_outputs_lock(lock_path)
+
+            self.assertIsNone(lock_fd)
+            self.assertIn("failed to lock OpenCode unowned-output record", "\n".join(captured.output))
+
+    def test_sentinel_lock_retries_then_succeeds(self):
+        from studio.commands.agents import _acquire_opencode_sentinel_lock
+
+        attempts = {"count": 0}
+        real_open = os.open
+
+        def _flaky_open(path, flags, *args, **kwargs):
+            if flags & os.O_EXCL and attempts["count"] == 0:
+                attempts["count"] += 1
+                raise FileExistsError("locked")
+            return real_open(path, flags, *args, **kwargs)
+
+        with TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "record.json.lock"
+
+            with (
+                patch("os.open", side_effect=_flaky_open),
+                patch("time.sleep", return_value=None),
+            ):
+                fd = _acquire_opencode_sentinel_lock(lock_path, timeout_seconds=10.0)
+
+            self.assertIsNotNone(fd)
+            os.close(fd)
+            self.assertEqual(attempts["count"], 1)
+
+    def test_sentinel_lock_does_not_delete_active_writers_lock_on_timeout(self):
+        """A slow-but-live writer's lock must never be stolen by age alone (PR #71 review comment)."""
+        from studio.commands.agents import _acquire_opencode_sentinel_lock
+
+        with TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "record.json.lock"
+            lock_path.write_text("", encoding="utf-8")
+            old_time = time.time() - 20.0
+            os.utime(lock_path, (old_time, old_time))
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("time.sleep", return_value=None),
+                patch("time.monotonic", side_effect=[0.0] + [20.0] * 10),
+            ):
+                fd = _acquire_opencode_sentinel_lock(lock_path, timeout_seconds=10.0)
+
+            self.assertIsNone(fd)
+            self.assertTrue(lock_path.exists(), "an active writer's sentinel must not be removed")
+            self.assertIn("refusing to proceed unlocked", "\n".join(captured.output))
+
+    def test_release_lock_warns_on_flock_unlock_failure(self):
+        from studio.commands.agents import (
+            _acquire_opencode_unowned_outputs_lock,
+            _release_opencode_unowned_outputs_lock,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".opencode" / "record.json.lock"
+            lock_fd, fcntl_module = _acquire_opencode_unowned_outputs_lock(lock_path)
+            self.assertIsNotNone(lock_fd)
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("fcntl.flock", side_effect=OSError("boom")),
+            ):
+                _release_opencode_unowned_outputs_lock(lock_fd, fcntl_module, lock_path)
+
+            self.assertIn("failed to unlock OpenCode unowned-output lock", "\n".join(captured.output))
+
+    def test_release_sentinel_lock_warns_on_unlink_failure(self):
+        from studio.commands.agents import _release_opencode_unowned_outputs_lock
+
+        with TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / "record.json.lock"
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_WRONLY)
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("pathlib.Path.unlink", side_effect=OSError("boom")),
+            ):
+                _release_opencode_unowned_outputs_lock(lock_fd, None, lock_path)
+
+            self.assertIn(
+                "failed to remove OpenCode unowned-output lock sentinel", "\n".join(captured.output)
+            )
+
+    def test_write_atomically_warns_on_cleanup_failure_too(self):
+        from studio.commands.agents import _write_opencode_unowned_outputs_atomically
+
+        with TemporaryDirectory() as tmpdir:
+            record_path = Path(tmpdir) / ".opencode" / "record.json"
+            record_path.parent.mkdir(parents=True)
+
+            with (
+                self.assertLogs("studio.commands.agents", level="WARNING") as captured,
+                patch("os.replace", side_effect=OSError("disk full")),
+                patch("pathlib.Path.unlink", side_effect=OSError("also broken")),
+            ):
+                ok = _write_opencode_unowned_outputs_atomically(record_path, {"cf-x.md"})
+
+            self.assertFalse(ok)
+            joined = "\n".join(captured.output)
+            self.assertIn("failed to clean up temp file", joined)
+            self.assertIn("failed to save OpenCode unowned-output record", joined)
+
+    def test_save_refuses_to_replace_record_with_wrong_schema(self):
+        from studio.commands.agents import (
+            _save_opencode_unowned_outputs,
+            _opencode_unowned_outputs_path,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            record_path = _opencode_unowned_outputs_path(root)
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps({"schema": "wrong-schema", "paths": []}), encoding="utf-8")
+
+            with self.assertLogs("studio.commands.agents", level="WARNING") as captured:
+                ok = _save_opencode_unowned_outputs(root, set(), add="cf-x.md")
+
+            self.assertFalse(ok)
+            self.assertIn("refusing to replace unowned OpenCode record", "\n".join(captured.output))
+
+    def test_remember_unowned_output_records_failure_through_wrapper(self):
+        from studio.commands.agents import _remember_opencode_unowned_output
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            unowned_outputs = set()
+            subagents_result = {"errors": []}
+
+            with patch("os.replace", side_effect=OSError("disk full")):
+                _remember_opencode_unowned_output(
+                    "cf-x.md", root, unowned_outputs, subagents_result, dry_run=False
+                )
+
+            self.assertTrue(subagents_result.get("ownership_recording_failed"))
+            self.assertTrue(
+                any("failed to record unowned OpenCode agent" in msg for msg in subagents_result["errors"])
+            )
+            self.assertNotIn("cf-x.md", unowned_outputs)
 
 
 if __name__ == "__main__":
