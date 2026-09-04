@@ -115,6 +115,30 @@ class TestWhatAFileDoesWithIds:
         assert defines == [MARKER], "a changed spec declares requirements"
         assert references == [], "and does not reference them as code"
 
+    def test_a_document_that_cites_an_id_it_does_not_declare_references_it(self, tmp_path):
+        """A design note pointing at a requirement is a link to it. Only definitions
+        used to be read from documents, so a changed artifact that referenced an ID
+        without declaring it came back with no references at all."""
+        path = tmp_path / "design.md"
+        path.write_text(f"# Note\n\nThis change serves `{MARKER}` and nothing else.\n", encoding="utf-8")
+
+        references, defines, reason = cs._file_traceability(path)
+
+        assert references == [MARKER]
+        assert defines == []
+        assert reason == cs.REASON_OK
+
+    def test_a_documents_mention_of_its_own_id_is_not_a_reference(self, tmp_path):
+        """Feature artifacts routinely cite the IDs they declare. That points at nothing
+        else, so it is a declaration, not also a link."""
+        path = tmp_path / "f.md"
+        path.write_text(_artifact() + f"\nSee `{MARKER}` above.\n", encoding="utf-8")
+
+        references, defines, _reason = cs._file_traceability(path)
+
+        assert defines == [MARKER]
+        assert references == []
+
     def test_a_file_with_no_markers_reports_neither_and_no_failure(self, tmp_path):
         path = tmp_path / "plain.py"
         path.write_text("x = 1\n", encoding="utf-8")

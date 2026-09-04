@@ -853,13 +853,16 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
     authoritative extension list lives in a ``commands`` module this layer must not
     import. Asking what the file *does* with IDs is language-agnostic and needs no list:
 
-    * :func:`codebase.load_code_file` yields code markers — IDs the file **references**.
-    * :func:`document.scan_cpt_ids` yields document IDs — those tagged ``definition``
-      are IDs the file **declares**.
+    * :func:`codebase.CodeFile.from_text` yields code markers — IDs the file
+      **references** from code.
+    * :func:`document.scan_cpt_id_lines` yields document IDs — those tagged
+      ``definition`` are IDs the file **declares**; those tagged ``reference`` are IDs
+      the document cites, which are references too. A document's mentions of IDs it
+      declares itself are left out: they point at nothing else.
 
-    The two are complementary in practice: this module's own source reports 13 code
+    The two are complementary in practice: this module's own source reports its code
     references and no definitions, while the feature artifact declaring its algorithm
-    reports 17 definitions and no code references.
+    reports definitions, plus references to the other requirements it cites.
 
     A binary file lands in the unreadable branch, because the loader reports a decode
     failure — returned as *could not read* rather than as "carries no markers". Those
@@ -885,13 +888,14 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
         # fixtures is the everyday case, and "could not be read" was untrue of it.
         logger.debug("change-summary could not parse code markers in a changed file")
         return [], [], REASON_MARKERS_INVALID
-    references = sorted({ref.id for ref in code_file.references if ref.id})
-    defines = sorted({
-        str(hit.get("id"))
-        for hit in document.scan_cpt_id_lines(text.splitlines())
-        if hit.get("type") == "definition" and hit.get("id")
-    })
-    return references, defines, REASON_OK
+    hits = document.scan_cpt_id_lines(text.splitlines())
+    defines = {str(h.get("id")) for h in hits if h.get("type") == "definition" and h.get("id")}
+    # A document that points at an ID references it as surely as a code marker does —
+    # a design note citing a requirement is a link to that requirement. Only its
+    # mentions of IDs it declares *itself* are left out: those point at nothing else.
+    cited = {str(h.get("id")) for h in hits if h.get("type") == "reference" and h.get("id")}
+    references = {ref.id for ref in code_file.references if ref.id} | (cited - defines)
+    return sorted(references), sorted(defines), REASON_OK
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-file-markers
 
 
