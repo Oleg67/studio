@@ -55,6 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import codebase
 from . import decision_log
 from . import document
+from . import error_codes as EC
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,11 @@ REASON_INVALID_SINCE = "the supplied lower bound is not an absolute timestamp"
 REASON_FILE_TOO_LARGE = "file exceeds the shared scan size limit"
 REASON_NOT_A_FILE = "not a regular file"
 REASON_SCOPE_UNKNOWN = "scope could not be determined"
+#: One entry's classification raised something no arm anticipated. The row says so and
+#: the rest of the report stands; the alternative was one bad file discarding everything.
+REASON_SCAN_FAILED = "marker scan failed unexpectedly"
+#: A hand-built window with a base commit but no root: there is nothing to diff *in*.
+REASON_NO_PROJECT_ROOT = "window carries no project root"
 
 #: Most changed entries examined in one report.
 #:
@@ -695,15 +701,24 @@ class LinkReport:
     number without a scope; ``linked`` of ``changed``, with ``declaring``, ``excluded``
     and ``unreadable`` broken out, is checkable — which is only true while ``files``
     cannot be grown or shrunk underneath them, hence frozen and a tuple.
+
+    ``changed`` counts every entry git reported; ``examined`` counts the ones this
+    report classified, which is fewer when the ceiling bit (``truncated`` is the
+    difference). Every tally and every row is over ``examined``, so the arithmetic a
+    renderer checks is ``examined == len(files) + excluded``, and every row that carries
+    no marker is in exactly one of ``deleted``, ``unreadable`` or ``not_a_file`` — or is
+    a regular file that was read and simply carries none.
     """
 
     files: Tuple[FileLink, ...] = ()
     changed: int = 0
+    examined: int = 0
     linked: int = 0
     declaring: int = 0
     deleted: int = 0
     excluded: int = 0
     unreadable: int = 0
+    not_a_file: int = 0
     truncated: int = 0
     available: bool = False
     reason: str = REASON_NOT_A_REPO
@@ -846,25 +861,29 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
     A binary file lands in the unreadable branch, because the loader reports a decode
     failure — returned as *could not read* rather than as "carries no markers". Those
     are different claims and only one of them is true.
+
+    **The file is read once**, and both parsers see that one snapshot. Two independent
+    reads let a file edited mid-scan — the live-editing case this module is for — report
+    ``references`` from one version and ``defines`` from another as if they described a
+    single state. The size ceiling lives in :mod:`codebase` alongside the bulk-scan path
+    that already enforced it, applied to the bytes actually read, and *too large* is told
+    from *unreadable* by the loader's own error code rather than by measuring the file
+    a second time.
     """
-    # The size ceiling lives in `codebase` alongside the bulk-scan path that already
-    # enforced it, so there is one limit rather than a second one invented here. It is
-    # checked before either reader runs, which is what keeps the *document* scan below
-    # from reading a huge file that the code scan just refused.
-    code_file, errors = codebase.load_code_file(path)
-    if code_file is None or errors:
-        try:
-            oversized = path.stat().st_size > codebase.MAX_CODE_FILE_BYTES
-        except OSError:
-            oversized = False
-        if oversized:
+    text, errors = codebase.read_code_text(path)
+    if text is None:
+        if any(err.get("code") == EC.FILE_TOO_LARGE for err in errors):
             return [], [], REASON_FILE_TOO_LARGE
+        logger.debug("change-summary could not read a changed file")
+        return [], [], REASON_FILE_UNREADABLE
+    code_file, errors = codebase.CodeFile.from_text(path, text)
+    if code_file is None or errors:
         logger.debug("change-summary could not parse code markers in a changed file")
         return [], [], REASON_FILE_UNREADABLE
     references = sorted({ref.id for ref in code_file.references if ref.id})
     defines = sorted({
         str(hit.get("id"))
-        for hit in document.scan_cpt_ids(path)
+        for hit in document.scan_cpt_id_lines(text.splitlines())
         if hit.get("type") == "definition" and hit.get("id")
     })
     return references, defines, REASON_OK
@@ -875,8 +894,22 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
 def _collect_changed_entries(
     project_root: Path,
     base_sha: str,
-) -> Optional[List[Tuple[str, str]]]:
-    """List ``(status, path)`` for everything changed since ``base_sha``.
+) -> Optional[Tuple[List[Tuple[str, str]], int]]:
+    """List ``(status, path)`` for everything changed since ``base_sha``, plus the total.
+
+    Returns ``(entries, total)``: at most :data:`_MAX_CHANGED_ENTRIES` entries
+    materialised, and the count of everything git reported. The untracked sweep is
+    the unbounded stream — an unignored dependency tree can run to hundreds of
+    thousands of paths — so past the ceiling its paths are *counted* but not stored.
+    Deduplication against the diff still holds for them: a path already seen is
+    neither stored twice nor counted twice. Git's captured output is still read whole
+    (``subprocess.run`` buffers it); what this bounds is the per-path Python objects and
+    the dictionary, which is where the cost the ceiling exists for actually accrues.
+
+    Rename detection is pinned with ``-M`` rather than left to the ambient
+    ``diff.renames`` setting, because :func:`_walk_name_status` keeps a rename's new
+    path precisely so the rename keeps its requirement link — a guarantee that would
+    otherwise hold on one machine and fail on another with the same repository state.
 
     Compares the base commit against the **working tree**, not against ``HEAD``, so
     uncommitted work is included — a developer asking what changed before committing is
@@ -904,7 +937,7 @@ def _collect_changed_entries(
         project_root,
         # `--end-of-options` for the same reason as the ref lookups: the base sha comes
         # from a window the caller may have built, so it must not be read as an option.
-        ["diff", "--name-status", "-z", "--end-of-options", base_sha],
+        ["diff", "-M", "--name-status", "-z", "--end-of-options", base_sha],
     )
     if diffed is None:
         return None
@@ -916,13 +949,18 @@ def _collect_changed_entries(
     )
     if untracked is None:
         return None
+    overflow = 0
     for rel_path in untracked:
-        if rel_path:
-            # setdefault, so a path already carrying a diff status keeps it.
-            seen.setdefault(rel_path, "?")
+        if not rel_path or rel_path in seen:
+            # Already carrying a diff status: neither stored nor counted twice.
+            continue
+        if len(seen) >= _MAX_CHANGED_ENTRIES:
+            overflow += 1
+            continue
+        seen[rel_path] = "?"
     # The map is keyed by path for deduplication, but the contract is (status, path),
     # so the pairs are flipped back rather than returned in the map's own order.
-    return [(status, rel_path) for rel_path, status in seen.items()]
+    return [(status, rel_path) for rel_path, status in seen.items()], len(seen) + overflow
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-collect-changed
 
 
@@ -958,7 +996,9 @@ def _classify_entry(
         if status == "D" or not absolute.exists():
             return FileLink(path=rel_path, status=status, reason=REASON_FILE_GONE), "deleted"
         if not absolute.is_file():
-            return FileLink(path=rel_path, status=status, reason=REASON_NOT_A_FILE), ""
+            # Its own tally: it is neither gone nor unreadable nor excluded, and a row
+            # that bumps no counter is an entry the report's arithmetic cannot see.
+            return FileLink(path=rel_path, status=status, reason=REASON_NOT_A_FILE), "not_a_file"
         return None, "excluded"
 
     references, defines, reason = _file_traceability(absolute)
@@ -971,33 +1011,51 @@ def _classify_entry(
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-link-changed
-def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
+def link_changed_files(window: ChangeWindow) -> LinkReport:
     """Resolve every file changed inside ``window`` to the requirements it declares.
+
+    The project root comes from the window — the resolved path its ``base_sha`` was
+    established against — not from a second argument. An earlier signature took one,
+    unresolved, so a relative root plus a later ``chdir`` could diff a different
+    directory from the one the window described, while every other reader of the
+    window (``select_events``) already sourced the root from it.
 
     An unavailable window propagates its own reason, so one cause is reported rather
     than two. A window built from an explicit ``--since`` has no base commit, so there
     is nothing to diff against and that is said plainly instead of silently returning
-    no files. Never raises.
+    no files. Never raises: one entry whose classification raises something no arm
+    anticipated becomes its own row with a stated reason, and every other row stands —
+    the alternative was one bad file discarding the whole report.
     """
     if not window.available:
         return LinkReport(reason=window.reason)
     if not window.base_sha:
         return LinkReport(reason=REASON_NO_BASE_COMMIT)
+    if not window.project_root:
+        return LinkReport(reason=REASON_NO_PROJECT_ROOT)
+    project_root = Path(window.project_root)
 
-    entries = _collect_changed_entries(project_root, window.base_sha)
-    if entries is None:
+    collected = _collect_changed_entries(project_root, window.base_sha)
+    if collected is None:
         return LinkReport(reason=REASON_DIFF_UNAVAILABLE)
+    entries, total = collected
 
     # Entries beyond the ceiling are counted, not dropped quietly. The count is the
     # whole point: a digest that examined 1,000 of 40,000 changed paths and said
     # nothing about the other 39,000 would be the silent-omission defect at scale.
-    truncated = max(0, len(entries) - _MAX_CHANGED_ENTRIES)
     examined = entries[:_MAX_CHANGED_ENTRIES]
 
     links: List[FileLink] = []
-    tally: Dict[str, int] = {"deleted": 0, "excluded": 0, "unreadable": 0}
+    tally: Dict[str, int] = {"deleted": 0, "excluded": 0, "unreadable": 0, "not_a_file": 0}
     for status, rel_path in examined:
-        link, counter = _classify_entry(status, rel_path, project_root)
+        try:
+            link, counter = _classify_entry(status, rel_path, project_root)
+        except Exception as exc:  # pylint: disable=broad-except
+            # The isolation boundary. Everything an entry can legitimately fail with is
+            # handled inside `_classify_entry`; this catches what was not foreseen, and
+            # confines it to the one row rather than letting it discard the report.
+            logger.warning("change-summary could not classify a changed entry: %s", type(exc).__name__)
+            link, counter = FileLink(path=rel_path, status=status, reason=REASON_SCAN_FAILED), "unreadable"
         if counter:
             tally[counter] += 1
         if link is not None:
@@ -1005,13 +1063,15 @@ def link_changed_files(project_root: Path, window: ChangeWindow) -> LinkReport:
 
     return LinkReport(
         files=tuple(links),
-        changed=len(entries),
+        changed=total,
+        examined=len(examined),
         linked=sum(1 for link in links if link.references),
         declaring=sum(1 for link in links if link.defines),
         deleted=tally["deleted"],
         excluded=tally["excluded"],
         unreadable=tally["unreadable"],
-        truncated=truncated,
+        not_a_file=tally["not_a_file"],
+        truncated=total - len(examined),
         available=True,
         reason=REASON_OK,
     )

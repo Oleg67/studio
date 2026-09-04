@@ -164,6 +164,8 @@ LinkReport.linked  # noqa: B018
 LinkReport.declaring  # noqa: B018
 LinkReport.deleted  # noqa: B018
 LinkReport.unreadable  # noqa: B018
+LinkReport.not_a_file  # noqa: B018
+LinkReport.examined  # noqa: B018
 LinkReport.truncated  # noqa: B018
 EventSelection.runless  # noqa: B018
 EventSelection.log_overridden  # noqa: B018

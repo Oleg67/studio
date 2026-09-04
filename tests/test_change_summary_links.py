@@ -48,7 +48,7 @@ def _artifact() -> str:
 
 
 def _report(repo: Path) -> cs.LinkReport:
-    return cs.link_changed_files(repo, cs.resolve_window(repo))
+    return cs.link_changed_files(cs.resolve_window(repo))
 
 
 # ----------------------------------------------------------------- name-status parsing
@@ -347,7 +347,6 @@ class TestUnscannableEntries:
         (repo / "big.py").write_text(_code(), encoding="utf-8")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-q", "-m", "add big")
-        monkeypatch.setattr(cs.codebase, "MAX_CODE_FILE_BYTES", 1)
         monkeypatch.setattr(cs.codebase, "_MAX_CODE_FILE_BYTES", 1)
 
         report = _report(repo)
@@ -389,11 +388,29 @@ class TestUnscannableEntries:
         assert gitlink, "the gitlink entry must be reported, not dropped"
         assert gitlink[0].reason == cs.REASON_NOT_A_FILE
         assert report.excluded == 0, "not a policy exclusion — it is not a file at all"
+        assert report.not_a_file == 1, "and it lands in a tally a reader can count"
 
-    def test_an_unstattable_file_is_unreadable_not_oversized(self, tmp_path, monkeypatch):
-        """If the size cannot be read, "too large" is a claim we cannot make."""
+    def test_an_unopenable_file_is_unreadable_not_oversized(self, tmp_path, monkeypatch):
+        """If the file cannot be opened, "too large" is a claim we cannot make."""
         path = tmp_path / "blob.py"
         path.write_bytes(b"\xff\xfebinary")
+        real_open = Path.open
+
+        def _open_fails(self, *a, **k):
+            if self == path:
+                raise OSError("open refused")
+            return real_open(self, *a, **k)
+
+        monkeypatch.setattr(Path, "open", _open_fails)
+
+        assert cs._file_traceability(path)[2] == cs.REASON_FILE_UNREADABLE
+
+    def test_the_size_ceiling_bounds_what_is_read_not_what_a_stat_said(self, tmp_path, monkeypatch):
+        """The first version measured the file and then read it whole, so a file growing
+        in between slipped past the limit it had just been checked against. Nothing is
+        measured now: with `stat` refusing outright, the ceiling still holds."""
+        path = tmp_path / "big.py"
+        path.write_text(_code() * 50, encoding="utf-8")
         real_stat = Path.stat
 
         def _stat_fails(self, *a, **k):
@@ -402,6 +419,36 @@ class TestUnscannableEntries:
             return real_stat(self, *a, **k)
 
         monkeypatch.setattr(Path, "stat", _stat_fails)
+        monkeypatch.setattr(cs.codebase, "_MAX_CODE_FILE_BYTES", 64)
+
+        assert cs._file_traceability(path)[2] == cs.REASON_FILE_TOO_LARGE
+
+    def test_both_marker_directions_come_from_one_read(self, tmp_path, monkeypatch):
+        """Two independent reads let a file edited mid-scan report `references` from
+        one version and `defines` from another. The document scan now parses the text
+        the code scan just read, so a rewrite after that read is invisible to both."""
+        path = tmp_path / "f.md"
+        path.write_text(_artifact(), encoding="utf-8")
+        real_read = cs.codebase.read_code_text
+
+        def _read_then_rewrite(p, **kw):
+            result = real_read(p, **kw)
+            path.write_text("# nothing here now\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(cs.codebase, "read_code_text", _read_then_rewrite)
+
+        references, defines, reason = cs._file_traceability(path)
+
+        assert reason == cs.REASON_OK
+        assert defines == [MARKER], "the snapshot, not the file as it is now"
+        assert references == []
+
+    def test_structurally_broken_markers_are_unreadable_not_marker_free(self, tmp_path):
+        """A dangling `@cpt-end` is a parse error, and a parse error is "could not
+        read", not "carries no markers" — the file may well carry some."""
+        path = tmp_path / "broken.py"
+        path.write_text(f"# @cpt-end:{MARKER}:p1:inst-never-opened\n", encoding="utf-8")
 
         assert cs._file_traceability(path)[2] == cs.REASON_FILE_UNREADABLE
 
@@ -447,7 +494,7 @@ class TestTheReportSaysWhyItCouldNot:
     def test_an_unavailable_window_propagates_exactly_one_reason(self, tmp_path):
         window = cs.resolve_window(tmp_path)   # not a repo
 
-        report = cs.link_changed_files(tmp_path, window)
+        report = cs.link_changed_files(window)
 
         assert report.available is False
         assert report.reason == window.reason
@@ -455,7 +502,7 @@ class TestTheReportSaysWhyItCouldNot:
     def test_a_since_only_window_has_no_base_commit_to_diff(self, tmp_path):
         window = cs.ChangeWindow(since="2026-01-01T00:00:00+00:00", available=True)
 
-        report = cs.link_changed_files(tmp_path, window)
+        report = cs.link_changed_files(window)
 
         assert report.available is False
         assert report.reason == cs.REASON_NO_BASE_COMMIT
@@ -465,7 +512,7 @@ class TestTheReportSaysWhyItCouldNot:
         window = cs.resolve_window(repo)
         monkeypatch.setattr(cs, "_git_records", lambda *_a, **_k: None)
 
-        report = cs.link_changed_files(repo, window)
+        report = cs.link_changed_files(window)
 
         assert report.available is False
         assert report.reason == cs.REASON_DIFF_UNAVAILABLE
@@ -522,6 +569,120 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         assert report.available is False, "a partial listing must not present as complete"
         assert report.reason == cs.REASON_DIFF_UNAVAILABLE
         assert report.files == ()
+
+
+class TestTheReportAccountsForEveryEntry:
+    """Every changed entry is in exactly one place a reader can count, over the entries
+    the report actually examined — and one entry cannot take the others down with it."""
+
+    def test_the_root_comes_from_the_window_not_from_where_the_process_stands(
+        self, tmp_path, monkeypatch,
+    ):
+        """`resolve_window` resolves its root and carries it. The linkage used to take
+        a second, unresolved root, so a later `chdir` diffed a different directory from
+        the one the window's base commit described."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "m.py")
+        _git(repo, "commit", "-q", "-m", "add")
+        monkeypatch.chdir(repo)
+        window = cs.resolve_window(Path("."))
+        elsewhere = _make_repo(tmp_path / "elsewhere")
+        (elsewhere / "theirs.py").write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.chdir(elsewhere)
+
+        report = cs.link_changed_files(window)
+
+        assert [f.path for f in report.files] == ["m.py"], "the window's project, not the cwd"
+
+    def test_a_window_without_a_root_is_refused_with_its_own_reason(self):
+        window = cs.ChangeWindow(
+            base_sha="0" * 40, since="2026-01-01T00:00:00+00:00", available=True,
+        )
+
+        report = cs.link_changed_files(window)
+
+        assert report.available is False
+        assert report.reason == cs.REASON_NO_PROJECT_ROOT
+
+    def test_rename_detection_does_not_depend_on_ambient_git_config(self, tmp_path):
+        """With `diff.renames` off, an unpinned diff reports a rename as a delete plus
+        an add — so "a rename keeps its link" held on one machine and not on another."""
+        repo = _make_repo(tmp_path / "r")
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "m.py")
+        _git(repo, "commit", "-q", "-m", "add")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        _git(repo, "config", "diff.renames", "false")
+        _git(repo, "mv", "m.py", "renamed.py")
+        _git(repo, "commit", "-q", "-m", "rename")
+
+        report = _report(repo)
+
+        assert [(f.status, f.path) for f in report.files] == [("R", "renamed.py")]
+        assert report.deleted == 0
+
+    def test_one_entry_that_raises_unexpectedly_is_its_own_row_not_the_whole_report(
+        self, tmp_path, monkeypatch,
+    ):
+        """Everything an entry can legitimately fail with is handled inside the
+        classifier; this is what was not foreseen. It used to propagate out of the
+        loop, and the command's last-resort guard then replaced the whole digest."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "good.py").write_text(_code(), encoding="utf-8")
+        (repo / "bad.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "two")
+        real = cs._file_traceability
+
+        def _boom_on_bad(path):
+            if path.name == "bad.py":
+                raise TypeError("unforeseen")
+            return real(path)
+        monkeypatch.setattr(cs, "_file_traceability", _boom_on_bad)
+
+        report = _report(repo)
+
+        assert report.available is True
+        assert {f.path: f.reason for f in report.files} == {
+            "good.py": cs.REASON_OK, "bad.py": cs.REASON_SCAN_FAILED,
+        }
+        assert (report.linked, report.unreadable) == (1, 1)
+
+    def test_a_not_a_file_entry_has_its_own_tally(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+        (repo / "sub").mkdir()
+
+        link, counter = cs._classify_entry("A", "sub", repo)
+
+        assert link is not None and link.reason == cs.REASON_NOT_A_FILE
+        assert counter == "not_a_file"
+
+    def test_the_ceiling_counts_everything_and_examines_the_cap(self, tmp_path, monkeypatch):
+        """`changed` is the whole population, the tallies are over `examined`, and the
+        difference is stated — so the arithmetic a reader checks is over one population."""
+        repo = _repo_with_base(tmp_path)
+        for name in ("a.py", "b.py", "c.py"):
+            (repo / name).write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+
+        report = _report(repo)
+
+        assert (report.changed, report.examined, report.truncated) == (3, 2, 1)
+        assert report.examined == len(report.files) + report.excluded
+
+    def test_untracked_paths_beyond_the_cap_are_counted_but_not_materialised(
+        self, tmp_path, monkeypatch,
+    ):
+        repo = _repo_with_base(tmp_path)
+        for i in range(5):
+            (repo / f"u{i}.py").write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+
+        entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert len(entries) == 2, "no more stored than will be examined"
+        assert total == 5, "but every one of them counted"
 
 
 class TestInvariants:
@@ -600,9 +761,19 @@ class TestInvariants:
         report = _report(repo)
 
         assert report.changed == len(report.files) + report.excluded
+        assert report.examined == report.changed, "nothing was truncated"
         for counter in (report.linked, report.declaring, report.deleted,
-                        report.excluded, report.unreadable):
+                        report.excluded, report.unreadable, report.not_a_file):
             assert counter <= report.changed
+        # Every row is in exactly one bucket: it carries a marker, it was read and
+        # carries none, or it is in one of the three could-not tallies.
+        marked = sum(1 for f in report.files if f.references or f.defines)
+        plain = sum(1 for f in report.files
+                    if not f.references and not f.defines and f.reason == cs.REASON_OK)
+        assert len(report.files) == (
+            marked + plain + report.deleted + report.unreadable + report.not_a_file
+        )
+        assert (marked, plain, report.unreadable) == (2, 0, 1)
 
     def test_the_same_state_yields_identical_reports(self, tmp_path):
         repo = _repo_with_base(tmp_path)
