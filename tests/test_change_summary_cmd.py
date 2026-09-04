@@ -139,7 +139,8 @@ class TestTheDigestReadsTheBranch:
         assert data["status"] == "OK"
         assert data["lines"] == human
         assert data["omitted"] == 0
-        assert (data["changes"]["changed"], data["changes"]["marked"]) == (2, 1)
+        assert (data["changes"]["changed"], data["changes"]["examined"], data["changes"]["marked"]) == (2, 2, 1)
+        assert data["changes"]["not_a_file"] == 0
         assert data["requirements"] == [MARKER]
         assert data["decisions"]["decisions"] == 3
         assert data["decisions"]["events"] == 4, "telemetry is in the payload, just not in 'why'"
@@ -153,7 +154,7 @@ class TestTheDigestReadsTheBranch:
         report = core.LinkReport(
             files=(core.FileLink(path="a", references=("x",), defines=("y",)),
                    core.FileLink(path="b")),
-            changed=2, linked=1, declaring=1, available=True, reason=core.REASON_OK,
+            changed=2, examined=2, linked=1, declaring=1, available=True, reason=core.REASON_OK,
         )
 
         assert cmd._marked(report) == 1
@@ -393,16 +394,42 @@ class TestEveryDegradedLineCarriesItsDenominator:
 
     def test_every_non_zero_tally_is_named_and_every_zero_one_is_not(self):
         report = core.LinkReport(
-            files=(), changed=9, linked=2, declaring=1, excluded=3, deleted=1, unreadable=2,
-            truncated=4, available=True, reason=core.REASON_OK,
+            files=(), changed=9, examined=9, linked=2, declaring=1, excluded=3, deleted=1,
+            unreadable=1, not_a_file=1, available=True, reason=core.REASON_OK,
         )
 
         assert cmd._changes_lines(report) == [
             "changes: 9 file(s): 2 reference requirements; 1 declare requirements; "
-            "3 excluded by the project's scope policy; 1 deleted; 2 could not be read",
+            "3 excluded by the project's scope policy; 1 deleted; 1 could not be read or parsed; "
+            "1 not regular files",
             "markers: 0 of 9 changed files carry requirement markers",
+        ]
+
+    def test_a_capped_scan_names_the_population_its_tallies_describe(self):
+        """`changed` is every file git reported; the tallies were computed over the
+        `examined` subset. "300 of 1,500" must not read as a breakdown of 1,500."""
+        report = core.LinkReport(
+            files=(), changed=13, examined=9, linked=2, truncated=4,
+            available=True, reason=core.REASON_OK,
+        )
+
+        assert cmd._changes_lines(report) == [
+            "changes: 13 file(s); 9 examined: 2 reference requirements",
+            "markers: 0 of 9 examined files carry requirement markers",
             "changes: scan capped; 4 more file(s) were not examined",
         ]
+
+    def test_the_cap_is_rendered_honestly_on_the_real_path(self, tmp_path, monkeypatch):
+        repo = _project_repo(tmp_path, monkeypatch)
+        monkeypatch.setattr(core, "MAX_CHANGED_ENTRIES", 1)
+
+        rc, data = _payload(repo)
+
+        assert rc == 0
+        assert (data["changes"]["changed"], data["changes"]["examined"], data["changes"]["truncated"]) == (2, 1, 1)
+        assert data["lines"][1].startswith("changes: 2 file(s); 1 examined")
+        assert data["lines"][2].endswith("of 1 examined files carry requirement markers")
+        assert "changes: scan capped; 1 more file(s) were not examined" in data["lines"]
 
     def test_undated_and_shared_log_conditions_each_get_a_line(self):
         selection = core.EventSelection(
@@ -479,12 +506,35 @@ class TestFailSafe:
         assert _lines(out) == ["digest unavailable (RuntimeError); nothing to summarise"]
         assert str(tmp_path) not in out
 
-    def test_a_project_resolver_that_errors_is_not_a_project(self, tmp_path, monkeypatch):
+    def test_a_project_check_that_fails_is_not_reported_as_not_a_project(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """A permission error on the check is a fact about the machine; "not a Studio
+        project" is a fact about the directory. Folding one into the other sent a
+        developer on a flaky mount looking for a missing project — and the only trace
+        was a debug line nobody sees."""
+        def _boom(*_a, **_k):
+            raise OSError("permission denied on /secret/mount")
+        monkeypatch.setattr(cmd, "find_studio_directory", _boom)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            reason = cmd._project_gate(tmp_path)
+
+        assert reason == f"{cmd.REASON_PROJECT_UNCHECKED} (OSError)"
+        assert reason != core.REASON_NOT_A_PROJECT
+        assert any(r.levelname == "WARNING" and "could not check" in r.getMessage()
+                   for r in caplog.records), "surfaced, not buried at debug"
+        assert "/secret/mount" not in reason, "the type, not the message — it can carry a path"
+
+    def test_a_failed_project_check_still_exits_zero_with_its_reason(self, tmp_path, monkeypatch):
         def _boom(*_a, **_k):
             raise OSError("unreadable")
         monkeypatch.setattr(cmd, "find_studio_directory", _boom)
 
-        assert cmd._project_gate(tmp_path) == core.REASON_NOT_A_PROJECT
+        rc, lines = _digest(tmp_path)
+
+        assert rc == 0
+        assert lines == [f"{cmd.REASON_PROJECT_UNCHECKED} (OSError): nothing to summarise"]
 
 
 # ------------------------------------------------------------------- registration
@@ -500,11 +550,30 @@ class TestRegistrationAndTheAdvisoryContract:
 
     def test_the_command_is_wired_into_no_gate(self):
         """An advisory found inside a gate is the exact failure this command promised
-        not to ship, so the promise is checked structurally rather than recorded."""
+        not to ship, so the promise is checked structurally rather than recorded: the
+        Makefile, every workflow file, and any pre-commit configuration."""
         root = Path(__file__).resolve().parents[1]
-        gate_files = [root / "Makefile", *sorted((root / ".github" / "workflows").glob("*.yml"))]
+        workflows = root / ".github" / "workflows"
+        gate_files = [
+            root / "Makefile",
+            *sorted(workflows.glob("*.yml")), *sorted(workflows.glob("*.yaml")),
+            *(p for p in (root / ".pre-commit-config.yaml", root / ".pre-commit-config.yml") if p.exists()),
+        ]
+        assert len(gate_files) >= 2, "the Makefile and at least one workflow must be scanned"
         for path in gate_files:
             assert "change-summary" not in path.read_text(encoding="utf-8"), path
+
+    def test_help_names_the_heuristics_that_shape_the_output(self, capsys):
+        """A user who only reads --help would otherwise take an excluded file or a
+        capped change set for a bug."""
+        with pytest.raises(SystemExit) as exit_info:
+            cmd.cmd_change_summary(["--help"])
+
+        assert exit_info.value.code == 0
+        text = " ".join(capsys.readouterr().out.split())   # argparse re-wraps the epilog
+        for phrase in ("scope policy", "untracked files included", "examined",
+                       "references or declares", "decision log", f"{cmd.LINE_CEILING} lines"):
+            assert phrase in text, phrase
 
     @pytest.mark.parametrize("argv", [[], ["--base", "upstream/main"], ["--since", "2026-01-01T00:00:00+00:00"]])
     def test_every_accepted_invocation_exits_zero(self, argv, tmp_path, monkeypatch):
