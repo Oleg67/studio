@@ -444,13 +444,14 @@ class TestUnscannableEntries:
         assert defines == [MARKER], "the snapshot, not the file as it is now"
         assert references == []
 
-    def test_structurally_broken_markers_are_unreadable_not_marker_free(self, tmp_path):
-        """A dangling `@cpt-end` is a parse error, and a parse error is "could not
-        read", not "carries no markers" — the file may well carry some."""
+    def test_structurally_broken_markers_have_their_own_reason(self, tmp_path):
+        """A dangling `@cpt-end` is a parse error: not "carries no markers" (the file
+        may well carry some) and not "could not be read" (it was read fine — a test
+        file full of deliberately malformed fixtures is the everyday case)."""
         path = tmp_path / "broken.py"
         path.write_text(f"# @cpt-end:{MARKER}:p1:inst-never-opened\n", encoding="utf-8")
 
-        assert cs._file_traceability(path)[2] == cs.REASON_FILE_UNREADABLE
+        assert cs._file_traceability(path)[2] == cs.REASON_MARKERS_INVALID
 
     def test_a_scope_check_that_errors_is_unknown_not_excluded(self, tmp_path, monkeypatch):
         """Folding a filesystem error into `excluded` reports a policy judgement that

@@ -131,6 +131,9 @@ REASON_SCOPE_UNKNOWN = "scope could not be determined"
 #: One entry's classification raised something no arm anticipated. The row says so and
 #: the rest of the report stands; the alternative was one bad file discarding everything.
 REASON_SCAN_FAILED = "marker scan failed unexpectedly"
+#: The file was read fine; its markers do not parse — a dangling ``@cpt-end``, a
+#: mismatched id. Reporting that as "could not be read" named the wrong failure.
+REASON_MARKERS_INVALID = "requirement markers could not be parsed"
 #: A hand-built window with a base commit but no root: there is nothing to diff *in*.
 REASON_NO_PROJECT_ROOT = "window carries no project root"
 
@@ -878,8 +881,10 @@ def _file_traceability(path: Path) -> Tuple[List[str], List[str], str]:
         return [], [], REASON_FILE_UNREADABLE
     code_file, errors = codebase.CodeFile.from_text(path, text)
     if code_file is None or errors:
+        # Read fine, parsed badly. A test file full of deliberately malformed marker
+        # fixtures is the everyday case, and "could not be read" was untrue of it.
         logger.debug("change-summary could not parse code markers in a changed file")
-        return [], [], REASON_FILE_UNREADABLE
+        return [], [], REASON_MARKERS_INVALID
     references = sorted({ref.id for ref in code_file.references if ref.id})
     defines = sorted({
         str(hit.get("id"))
