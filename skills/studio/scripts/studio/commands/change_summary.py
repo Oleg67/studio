@@ -64,6 +64,10 @@ _SELF_COMMAND = "change-summary"
 #: Status is always OK: the digest is advisory, and a dimension it could not build is a
 #: stated line, not a failed command.
 _STATUS = "OK"
+
+#: The project check itself failed — a permission error, an unreadable mount — which is
+#: a different fact from "this is not a Studio project", and is said as one.
+REASON_PROJECT_UNCHECKED = "the project root could not be checked"
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-datamodel
 
 
@@ -74,12 +78,18 @@ def _project_gate(root: Path) -> Optional[str]:
     One stated reason rather than three "unavailable" dimensions: outside a project there
     is no decision log to read and no exclusion policy to apply, so the git half alone
     would be a digest of the wrong thing.
+
+    Two reasons, not one. "Not a Studio project" is a fact about the directory; the
+    check *failing* — a permission error, an unreadable mount — is a fact about the
+    machine, and folding it into the first sent a developer on a flaky mount to look for
+    a missing project. The failure is also logged at warning level, the same level the
+    last-resort guard uses, because a debug line nobody sees is a silence with a label.
     """
     try:
         studio_dir = find_studio_directory(root)
     except (OSError, ValueError, RuntimeError) as exc:
-        logger.debug("change-summary could not resolve the project: %s", exc)
-        studio_dir = None
+        logger.warning("change-summary could not check the project root: %s", type(exc).__name__)
+        return f"{REASON_PROJECT_UNCHECKED} ({type(exc).__name__})"
     return None if studio_dir is not None else core.REASON_NOT_A_PROJECT
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-project-gate
 
@@ -111,6 +121,10 @@ def _changes_lines(report: core.LinkReport) -> List[str]:
     ``linked`` and ``declaring`` are not summed — a file can do both — so the marker
     line counts files carrying any marker against the files that changed. Every tally
     that is non-zero is named; a tally that is zero is not a line.
+
+    The tallies are computed over the entries the report *examined*. When the scan was
+    capped that is fewer than the files that changed, so the lines name that population
+    explicitly rather than let "300 of 1,500" read as a breakdown of 1,500.
     """
     if not report.available:
         return [f"changes: unavailable ({report.reason})"]
@@ -119,11 +133,18 @@ def _changes_lines(report: core.LinkReport) -> List[str]:
         (report.declaring, "declare requirements"),
         (report.excluded, "excluded by the project's scope policy"),
         (report.deleted, "deleted"),
-        (report.unreadable, "could not be read"),
+        (report.unreadable, "could not be read or parsed"),
+        (report.not_a_file, "not regular files"),
     ]
     detail = "; ".join(f"{count} {label}" for count, label in tallies if count)
-    lines = [f"changes: {report.changed} file(s)" + (f": {detail}" if detail else "")]
-    lines.append(f"markers: {_marked(report)} of {report.changed} changed files carry requirement markers")
+    if report.truncated:
+        head = f"changes: {report.changed} file(s); {report.examined} examined"
+        population = f"{report.examined} examined files"
+    else:
+        head = f"changes: {report.changed} file(s)"
+        population = f"{report.changed} changed files"
+    lines = [head + (f": {detail}" if detail else "")]
+    lines.append(f"markers: {_marked(report)} of {population} carry requirement markers")
     if report.truncated:
         lines.append(f"changes: scan capped; {report.truncated} more file(s) were not examined")
     return lines
@@ -216,10 +237,11 @@ def _window_payload(window: core.ChangeWindow) -> Dict[str, Any]:
 def _changes_payload(report: core.LinkReport) -> Dict[str, Any]:
     return {
         "available": report.available, "reason": report.reason,
-        "changed": report.changed, "marked": _marked(report),
+        "changed": report.changed, "examined": report.examined, "marked": _marked(report),
         "linked": report.linked, "declaring": report.declaring,
         "excluded": report.excluded, "deleted": report.deleted,
-        "unreadable": report.unreadable, "truncated": report.truncated,
+        "unreadable": report.unreadable, "not_a_file": report.not_a_file,
+        "truncated": report.truncated,
         "files": [
             {"path": f.path, "status": f.status, "references": list(f.references),
              "defines": list(f.defines), "reason": f.reason}
@@ -276,7 +298,7 @@ def compose_digest(root: Path, *, base: str = "", since: str = "") -> Dict[str, 
                 "lines": [f"{reason}: nothing to summarise"], "omitted": 0}
     window = core.resolve_window(root, base=base, since=since)
     selection = core.select_events(window)
-    report = core.link_changed_files(root, window)
+    report = core.link_changed_files(window)
     lines, omitted = _apply_ceiling(_digest_lines(window, selection, report))
     return {
         "status": _STATUS,
@@ -317,6 +339,22 @@ def cmd_change_summary(argv: List[str]) -> int:
         description=(
             "Advisory digest of what changed on this branch, why, and which requirements "
             "the changes serve. At most ten lines; exits 0 on every path except a usage error."
+        ),
+        # The rules that shape the output live in source comments a user of --help never
+        # reads, so a file that is excluded or a change set that is capped would look
+        # like a bug. Said here, once, where the user actually looks.
+        epilog=(
+            "How the digest is built: the window runs from the merge-base with the canonical "
+            "remote's default branch (--base or --since override it). Changed files are "
+            "listed from git against the working tree, untracked files included; a file "
+            "is included or excluded by the project's own scope policy (the same one "
+            f"`cfs validate` uses), and at most {core.MAX_CHANGED_ENTRIES:,} entries are "
+            "examined, the rest counted and stated. Requirement links are the @cpt markers "
+            "a file references or declares, read in both directions rather than guessed "
+            "from its suffix. \"Why\" is the decisions recorded in the project's local "
+            f"decision log inside the window. The digest never exceeds {LINE_CEILING} "
+            "lines; when it would, the last line says how many were cut and --json carries "
+            "everything. Nothing is written, posted, or sent anywhere."
         ),
     )
     p.add_argument("--root", default=".", help="Project root (default: current directory)")

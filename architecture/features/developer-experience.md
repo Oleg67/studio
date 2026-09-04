@@ -295,9 +295,9 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 
 **Rules**:
 1. [x] - `p1` - Define the line ceiling, the caps on names listed inline, and the telemetry event kinds that are recorded cost rather than decisions, so every later rule shares one vocabulary - `inst-digest-datamodel`
-2. [x] - `p1` - Refuse to summarise outside a Studio project with one stated reason, rather than three dimensions each reporting unavailable - `inst-digest-project-gate`
+2. [x] - `p1` - Refuse to summarise outside a Studio project with one stated reason, rather than three dimensions each reporting unavailable, and say when the check itself failed rather than report a machine fault as a fact about the directory - `inst-digest-project-gate`
 3. [x] - `p1` - State the window as the base ref and commit it was measured from, or the reason no window exists together with the flag that scopes decisions by time without git - `inst-digest-window-line`
-4. [x] - `p1` - State what changed with its denominator on every line: how many files, how many carry markers, and every excluded, deleted, unreadable or unexamined file, naming a tally only when it is non-zero - `inst-digest-changes-lines`
+4. [x] - `p1` - State what changed with its denominator on every line: how many files, how many carry markers, and every excluded, deleted, unreadable, not-a-file or unexamined file, naming a tally only when it is non-zero and naming the examined population when the scan was capped so a breakdown never reads as one of the whole - `inst-digest-changes-lines`
 5. [x] - `p1` - Name the requirements the changed files reference or declare, capped and counted rather than truncated silently, and emit no line at all when there are none - `inst-digest-requirements-line`
 6. [x] - `p1` - State the decisions recorded in the window by kind and by run, excluding telemetry events and this command's own invocations so a digest never counts itself, and give every skipped line, undated event and shared-log condition a line of its own - `inst-digest-decision-lines`
 7. [x] - `p1` - Enforce the ceiling by omitting lines and saying how many were omitted, never by padding to fill it - `inst-digest-ceiling`
