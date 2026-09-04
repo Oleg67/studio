@@ -471,6 +471,59 @@ class TestTheReportSaysWhyItCouldNot:
         assert report.reason == cs.REASON_DIFF_UNAVAILABLE
 
 
+class TestTheListingIsAboutTheProjectNamedAndNothingElse:
+    """Two ways the changed-file listing could describe something other than the
+    project it was asked about: an ambient redirect pointing git elsewhere, and a
+    failed untracked sweep presented as an empty one."""
+
+    def test_an_ambient_git_dir_cannot_redirect_the_record_query(self, tmp_path, monkeypatch):
+        """The window is resolved with git's redirect variables cleared; the record
+        query used to run without that clearing, so `GIT_DIR` pointing at a second
+        repository listed that repository's files under the first one's window."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "mine.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "mine.py")
+        _git(repo, "commit", "-q", "-m", "mine")
+        decoy = _make_repo(tmp_path / "decoy")
+        (decoy / "theirs.py").write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+
+        report = _report(repo)
+
+        assert report.available is True, report.reason
+        assert [f.path for f in report.files] == ["mine.py"], "this project's files, not the decoy's"
+
+    def test_every_git_call_site_runs_with_the_sanitised_environment(self):
+        """Structural: a new call site that forgets `env=_git_env()` fails here rather
+        than in review — which is how the record query slipped through the first time."""
+        import inspect
+        source = inspect.getsource(cs)
+        launches = source.count("subprocess.run(")
+
+        assert launches >= 2
+        assert source.count("env=_git_env()") == launches, "every launch, not most of them"
+
+    def test_a_failed_untracked_sweep_makes_the_listing_unavailable(self, tmp_path, monkeypatch):
+        """`or []` turned a failed `ls-files` into an empty one, so the report came back
+        available while silently missing every new file."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "m.py")
+        _git(repo, "commit", "-q", "-m", "add")
+        real_records = cs._git_records
+
+        def _diff_only(root, args):
+            return None if args[0] == "ls-files" else real_records(root, args)
+        monkeypatch.setattr(cs, "_git_records", _diff_only)
+
+        report = _report(repo)
+
+        assert report.available is False, "a partial listing must not present as complete"
+        assert report.reason == cs.REASON_DIFF_UNAVAILABLE
+        assert report.files == ()
+
+
 class TestInvariants:
 
     def test_git_records_degrades_rather_than_raising(self, tmp_path, monkeypatch):

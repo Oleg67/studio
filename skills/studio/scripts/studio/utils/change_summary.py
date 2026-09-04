@@ -723,11 +723,17 @@ def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
     Splitting that on tab yields fragments that match nothing on disk, so the file
     would be reported as deleted while sitting right there. NUL records are the only
     unambiguous form, since NUL is the one byte a path cannot contain.
+
+    Runs with the same sanitised environment as :func:`_git_query`. This helper was
+    written before that sanitising existed and did not pick it up, so an ambient
+    ``GIT_DIR`` could resolve the window against one repository and then list the
+    changed files of another — half a digest about the wrong project.
     """
     try:
         result = subprocess.run(
             ["git"] + args,
             cwd=str(project_root),
+            env=_git_env(),
             capture_output=True,
             text=True,
             # Filesystem paths are bytes on POSIX and are not guaranteed to be UTF-8,
@@ -888,6 +894,11 @@ def _collect_changed_entries(
     POSIX paths from both commands, so the raw string is an exact key — resolving each
     path instead would cost a syscall per entry *and* wrongly merge two distinct
     symlinks that happen to share a target.
+
+    **Either query failing makes the whole listing unavailable.** An earlier version
+    turned a failed untracked sweep into an empty one, so a report could come back
+    available while silently missing every new file — the exact partial-presented-as-
+    complete result this module exists to prevent.
     """
     diffed = _git_records(
         project_root,
@@ -902,7 +913,9 @@ def _collect_changed_entries(
         seen.setdefault(rel_path, status)
     untracked = _git_records(
         project_root, ["ls-files", "--others", "--exclude-standard", "-z"],
-    ) or []
+    )
+    if untracked is None:
+        return None
     for rel_path in untracked:
         if rel_path:
             # setdefault, so a path already carrying a diff status keeps it.
