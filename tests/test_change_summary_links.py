@@ -329,7 +329,7 @@ class TestOnePhysicalFileIsReportedOnce:
         repo = _repo_with_base(tmp_path)
         for index in range(4):
             (repo / f"m{index}.py").write_text(_code(), encoding="utf-8")
-        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 2)
 
         report = _report(repo)
 
@@ -664,7 +664,7 @@ class TestTheReportAccountsForEveryEntry:
         repo = _repo_with_base(tmp_path)
         for name in ("a.py", "b.py", "c.py"):
             (repo / name).write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 2)
 
         report = _report(repo)
 
@@ -677,7 +677,7 @@ class TestTheReportAccountsForEveryEntry:
         repo = _repo_with_base(tmp_path)
         for i in range(5):
             (repo / f"u{i}.py").write_text("x = 1\n", encoding="utf-8")
-        monkeypatch.setattr(cs, "_MAX_CHANGED_ENTRIES", 2)
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 2)
 
         entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
 

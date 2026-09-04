@@ -142,7 +142,7 @@ REASON_NO_PROJECT_ROOT = "window carries no project root"
 #: own premise rather than picked arbitrarily — a change set larger than this is not
 #: summarisable in ten lines, so examining more of it buys nothing a reader can use.
 #: Entries beyond the ceiling are counted in ``truncated`` rather than dropped quietly.
-_MAX_CHANGED_ENTRIES = 1000
+MAX_CHANGED_ENTRIES = 1000
 
 #: Bucket name for selected events whose ``run_id`` is missing or unusable. Grouping
 #: used to build buckets only for truthy ids, so such events sat in ``events`` and in no
@@ -897,7 +897,7 @@ def _collect_changed_entries(
 ) -> Optional[Tuple[List[Tuple[str, str]], int]]:
     """List ``(status, path)`` for everything changed since ``base_sha``, plus the total.
 
-    Returns ``(entries, total)``: at most :data:`_MAX_CHANGED_ENTRIES` entries
+    Returns ``(entries, total)``: at most :data:`MAX_CHANGED_ENTRIES` entries
     materialised, and the count of everything git reported. The untracked sweep is
     the unbounded stream — an unignored dependency tree can run to hundreds of
     thousands of paths — so past the ceiling its paths are *counted* but not stored.
@@ -954,7 +954,7 @@ def _collect_changed_entries(
         if not rel_path or rel_path in seen:
             # Already carrying a diff status: neither stored nor counted twice.
             continue
-        if len(seen) >= _MAX_CHANGED_ENTRIES:
+        if len(seen) >= MAX_CHANGED_ENTRIES:
             overflow += 1
             continue
         seen[rel_path] = "?"
@@ -1043,7 +1043,7 @@ def link_changed_files(window: ChangeWindow) -> LinkReport:
     # Entries beyond the ceiling are counted, not dropped quietly. The count is the
     # whole point: a digest that examined 1,000 of 40,000 changed paths and said
     # nothing about the other 39,000 would be the silent-omission defect at scale.
-    examined = entries[:_MAX_CHANGED_ENTRIES]
+    examined = entries[:MAX_CHANGED_ENTRIES]
 
     links: List[FileLink] = []
     tally: Dict[str, int] = {"deleted": 0, "excluded": 0, "unreadable": 0, "not_a_file": 0}
