@@ -705,6 +705,13 @@ def read_code_text(
             "file", f"`{code_path}` exceeds the {limit}-byte scan limit",
             code=EC.FILE_TOO_LARGE, path=code_path, line=1,
         )]
+    if b"\x00" in data:
+        # Binary, by the same rule `document.read_text_safe` applies, so the two
+        # readers agree on what is text: a NUL byte is never one.
+        return None, [error(
+            "file", f"`{code_path}` is binary (contains NUL bytes)",
+            code=EC.FILE_READ_ERROR, path=code_path, line=1,
+        )]
     try:
         return data.decode("utf-8"), []
     except UnicodeDecodeError as exc:

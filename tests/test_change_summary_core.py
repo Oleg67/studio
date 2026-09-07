@@ -83,6 +83,81 @@ def _event(ts: str, run_id: str = "r1", event: str = "validation") -> dict:
 
 # --------------------------------------------------------------------------- window
 
+class TestAShallowCloneIsNotUnrelatedHistory:
+    """A merge-base miss in a shallow clone says nothing about history — the branch
+    point may lie beyond the fetched depth. CI checkouts default to depth 1, so this is
+    the common way to reach a miss, and "no merge base" sent people looking for
+    unrelated branches that are related."""
+
+    def test_a_shallow_clone_reports_the_fetch_depth_not_unrelated_history(self, tmp_path):
+        origin = _make_repo(tmp_path / "origin")
+        trunk = _git(origin, "branch", "--show-current")
+        _commit(origin, "b.txt")
+        _git(origin, "checkout", "-q", "-b", "feat")
+        _commit(origin, "d.txt")
+        _git(origin, "checkout", "-q", trunk)
+        _commit(origin, "c.txt")
+        clone = tmp_path / "clone"
+        cloned = subprocess.run(
+            ["git", "clone", "-q", "--depth", "1", "--branch", "feat", f"file://{origin}", str(clone)],
+            capture_output=True, text=True, check=False,
+        )
+        if cloned.returncode:
+            pytest.skip(f"shallow file:// clone unavailable here: {cloned.stderr.strip()[:80]}")
+        _git(clone, "fetch", "-q", "--depth", "1", "origin", f"{trunk}:refs/remotes/upstream/main")
+
+        window = cs.resolve_window(clone)
+
+        assert window.available is False
+        assert window.reason == cs.REASON_SHALLOW_HISTORY
+        assert window.base_ref == "upstream/main", "what was learned is still reported"
+
+    def test_a_genuine_miss_in_a_full_clone_still_says_no_merge_base(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: (None, False))
+
+        assert cs.resolve_window(repo).reason == cs.REASON_NO_MERGE_BASE
+
+
+class TestANamedBaseIsNeverSilentlyIgnored:
+    """`since` alone needs no git. Given `base` too, the base still anchors the
+    changed-file diff and `since` replaces only the decision boundary — a caller who
+    named a base used to get no file changes and no hint why."""
+
+    def test_a_named_base_still_anchors_the_diff_when_since_is_given(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+        base = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "branch", "release")
+        _commit(repo, "b.txt")
+
+        window = cs.resolve_window(repo, base="release", since="2026-01-01T00:00:00+00:00")
+
+        assert window.available is True
+        assert (window.base_ref, window.base_sha) == ("release", base)
+        assert window.since == "2026-01-01T00:00:00+00:00", "the bound pins the decisions"
+
+    def test_a_bad_base_is_refused_even_when_since_would_have_sufficed(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+
+        window = cs.resolve_window(repo, base="no-such-ref", since="2026-01-01T00:00:00+00:00")
+
+        assert window.available is False
+        assert window.reason == cs.REASON_BASE_REF_UNKNOWN
+
+    def test_git_failing_to_launch_is_a_warning_with_the_type_only(self, tmp_path, monkeypatch, caplog):
+        def _no_git(*_a, **_k):
+            raise OSError("no exec at /secret/bin/git")
+        monkeypatch.setattr(cs.subprocess, "run", _no_git)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            assert cs._git_query(tmp_path, ["status"]) == (None, True)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings and "OSError" in warnings[0]
+        assert "/secret/bin/git" not in warnings[0]
+
+
 class TestTheWindowComesFromGit:
 
     def test_a_repo_with_a_base_ref_yields_a_window(self, tmp_path):

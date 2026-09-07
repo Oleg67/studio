@@ -11,6 +11,7 @@ from studio.utils.codebase import (
     BlockMarker,
     CodeReference,
     load_code_file,
+    read_code_text,
     validate_code_file,
     cross_validate_code,
     scan_registered_codebase_references,
@@ -514,6 +515,83 @@ class TestLoadCodeFile:
 
         assert cf is not None and not errs
         assert len(cf.scope_markers) == 1
+
+
+class TestReadCodeText:
+    """The shared bounded reader: the ceiling applies to the bytes read, too-large has
+    its own code, and everything else that stops a read is a read error."""
+
+    def test_a_file_exactly_at_the_limit_is_read_whole(self, tmp_path: Path):
+        path = tmp_path / "f.py"
+        path.write_bytes(b"x" * 16)
+
+        assert read_code_text(path, max_bytes=16) == ("x" * 16, [])
+
+    def test_one_byte_over_the_limit_is_too_large(self, tmp_path: Path):
+        path = tmp_path / "f.py"
+        path.write_bytes(b"x" * 17)
+
+        text, errs = read_code_text(path, max_bytes=16)
+
+        assert text is None
+        assert [e["code"] for e in errs] == [EC.FILE_TOO_LARGE]
+
+    def test_a_non_positive_limit_disables_the_ceiling(self, tmp_path: Path):
+        path = tmp_path / "f.py"
+        path.write_bytes(b"x" * 5000)
+
+        assert read_code_text(path, max_bytes=0)[0] == "x" * 5000
+        assert read_code_text(path, max_bytes=-1)[0] == "x" * 5000
+
+    def test_a_missing_file_is_a_read_error(self, tmp_path: Path):
+        text, errs = read_code_text(tmp_path / "missing.py")
+
+        assert text is None
+        assert [e["code"] for e in errs] == [EC.FILE_READ_ERROR]
+
+    def test_invalid_utf8_is_a_read_error_not_too_large(self, tmp_path: Path):
+        path = tmp_path / "f.py"
+        path.write_bytes(b"\xff\xfe not text")
+
+        text, errs = read_code_text(path, max_bytes=100)
+
+        assert text is None
+        assert [e["code"] for e in errs] == [EC.FILE_READ_ERROR]
+
+    def test_nul_bytes_are_binary_by_the_same_rule_the_document_reader_uses(self, tmp_path: Path):
+        path = tmp_path / "f.py"
+        path.write_bytes(b"# @cpt-flow:cpt-myapp-flow-test:p1\n\x00rest")
+
+        text, errs = read_code_text(path)
+
+        assert text is None
+        assert [e["code"] for e in errs] == [EC.FILE_READ_ERROR]
+
+
+class TestFromTextParity:
+    """`from_text` must parse exactly as `from_path` does, or a pre-read caller and a
+    path-based one would disagree about the same file."""
+
+    @pytest.mark.parametrize("text", [
+        "# @cpt-flow:cpt-myapp-flow-test:p1\n# @cpt-begin:cpt-myapp-flow-test:p1:inst-a\nx = 1\n"
+        "# @cpt-end:cpt-myapp-flow-test:p1:inst-a\n",
+        "# @cpt-end:cpt-myapp-flow-test:p1:inst-never-opened\n",
+        "# @cpt-begin:cpt-myapp-flow-test:p1:inst-a\nx = 1\n# @cpt-end:cpt-myapp-flow-other:p1:inst-a\n",
+        "# @cpt-begin:cpt-myapp-flow-test:p1:inst-a\nx = 1\n",
+    ], ids=["valid", "dangling-end", "mismatched-id", "unclosed"])
+    def test_from_text_and_from_path_agree(self, tmp_path: Path, text: str):
+        path = tmp_path / "f.py"
+        path.write_text(text, encoding="utf-8")
+
+        via_path = CodeFile.from_path(path)
+        via_text = CodeFile.from_text(path, text)
+
+        assert (via_path[0] is None) == (via_text[0] is None)
+        assert via_path[1] == via_text[1], "same errors, same order"
+        if via_path[0] is not None and via_text[0] is not None:
+            assert via_path[0].scope_markers == via_text[0].scope_markers
+            assert via_path[0].block_markers == via_text[0].block_markers
+            assert via_path[0].references == via_text[0].references
 
 
 class TestValidateCodeFile:

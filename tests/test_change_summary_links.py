@@ -12,6 +12,7 @@ a reviewer would rightly flag.
 from __future__ import annotations
 
 import dataclasses
+import io
 import os
 import subprocess
 from pathlib import Path
@@ -571,9 +572,9 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         than in review — which is how the record query slipped through the first time."""
         import inspect
         source = inspect.getsource(cs)
-        launches = source.count("subprocess.run(")
+        launches = source.count("subprocess.run(") + source.count("subprocess.Popen(")
 
-        assert launches >= 2
+        assert launches >= 3
         assert source.count("env=_git_env()") == launches, "every launch, not most of them"
 
     def test_a_failed_untracked_sweep_makes_the_listing_unavailable(self, tmp_path, monkeypatch):
@@ -583,11 +584,7 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         (repo / "m.py").write_text(_code(), encoding="utf-8")
         _git(repo, "add", "m.py")
         _git(repo, "commit", "-q", "-m", "add")
-        real_records = cs._git_records
-
-        def _diff_only(root, args):
-            return None if args[0] == "ls-files" else real_records(root, args)
-        monkeypatch.setattr(cs, "_git_records", _diff_only)
+        monkeypatch.setattr(cs, "_git_records_bounded", lambda *_a, **_k: None)
 
         report = _report(repo)
 
@@ -708,6 +705,148 @@ class TestTheReportAccountsForEveryEntry:
 
         assert len(entries) == 2, "no more stored than will be examined"
         assert total == 5, "but every one of them counted"
+
+
+class TestTheCeilingIsSharedAndTheSweepIsStreamed:
+    """The untracked sweep is the one unbounded query. It is read as a stream — kept up
+    to the ceiling, counted past it — and the ceiling is shared with the diff rather
+    than filled from the diff first, so brand-new files are never the first dropped."""
+
+    def test_the_ceiling_is_shared_so_new_files_are_not_the_first_dropped(self, tmp_path, monkeypatch):
+        """Filling in order dropped exactly the untracked files whenever the diff alone
+        reached the ceiling — the one omission the sweep exists to prevent."""
+        repo = _repo_with_base(tmp_path)
+        for name in ("t1.py", "t2.py", "t3.py"):
+            (repo / name).write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "tracked")
+        for name in ("u1.py", "u2.py", "u3.py"):
+            (repo / name).write_text("y = 2\n", encoding="utf-8")
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 4)
+
+        entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert (len(entries), total) == (4, 6)
+        assert sum(1 for status, _ in entries if status == "?") == 2, "shared, not diff-first"
+
+    def test_under_the_ceiling_the_order_is_diff_then_untracked(self, tmp_path):
+        repo = _repo_with_base(tmp_path)
+        (repo / "t.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "tracked")
+        (repo / "u.py").write_text("y = 2\n", encoding="utf-8")
+
+        entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert entries == [("A", "t.py"), ("?", "u.py")]
+        assert total == 2
+
+    def test_the_bounded_reader_keeps_the_cap_and_counts_the_rest(self, tmp_path):
+        repo = _repo_with_base(tmp_path)
+        for i in range(5):
+            (repo / f"u{i}.py").write_text("x = 1\n", encoding="utf-8")
+
+        kept, total = cs._git_records_bounded(
+            repo, ["ls-files", "--others", "--exclude-standard", "-z"], 2,
+        )
+
+        assert kept == ["u0.py", "u1.py"]
+        assert total == 5
+
+    def test_the_bounded_reader_returns_nothing_on_a_non_zero_exit(self, tmp_path):
+        repo = _make_repo(tmp_path / "r")
+
+        assert cs._git_records_bounded(repo, ["rev-parse", "--verify", "refs/heads/no-such"], 5) is None
+
+    def test_the_bounded_reader_degrades_when_git_cannot_launch(self, tmp_path, monkeypatch, caplog):
+        def _no_git(*_a, **_k):
+            raise OSError("git: not found")
+        monkeypatch.setattr(cs.subprocess, "Popen", _no_git)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None
+        assert any(r.levelname == "WARNING" and "could not run" in r.getMessage() for r in caplog.records)
+
+    def test_a_hung_sweep_is_killed_and_reported_as_a_tool_failure(self, tmp_path, monkeypatch, caplog):
+        """The stream reader waits with the module's timeout; a git that never exits is
+        killed rather than left running, and reported like any other tool failure."""
+        class _Hung:
+            killed = False
+
+            def __init__(self, *_a, **_k):
+                self.stdout = io.BytesIO(b"a.py\0")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
+
+            def kill(self):
+                _Hung.killed = True
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Hung)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None
+        assert _Hung.killed, "a hung git is not left running"
+        assert any("TimeoutExpired" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_a_launch_failure_is_a_warning_and_a_miss_is_not(self, tmp_path, monkeypatch, caplog):
+        """The tool failing and git answering "no" must not look alike in a log."""
+        repo = _make_repo(tmp_path / "r")
+        with caplog.at_level("DEBUG", logger="studio"):
+            cs._git_records(repo, ["rev-parse", "--verify", "refs/heads/no-such"])
+        assert not [r for r in caplog.records if r.levelname == "WARNING"], "a miss is routine"
+
+        def _no_git(*_a, **_k):
+            raise OSError("git: not found at /secret/path")
+        monkeypatch.setattr(cs.subprocess, "run", _no_git)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="studio"):
+            assert cs._git_records(repo, ["diff"]) is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warnings and "OSError" in warnings[0]
+        assert "/secret/path" not in warnings[0], "the type, not the message"
+
+
+class TestNoExtensionFilterApplies:
+    """Pinned as a design decision: the digest reads both directions, and a changed
+    feature artifact declares requirements without carrying a code extension, so the
+    registry's extension list would report a changed specification as tracing to
+    nothing. What a file does with IDs is decided by reading it, not by its suffix."""
+
+    def test_a_non_source_extension_is_read_not_excluded(self, tmp_path):
+        repo = _repo_with_base(tmp_path)
+        (repo / "deps.lock").write_text("nothing to see\n", encoding="utf-8")
+        _git(repo, "add", "deps.lock")
+        _git(repo, "commit", "-q", "-m", "lock")
+
+        report = _report(repo)
+
+        assert report.excluded == 0
+        assert [(f.path, f.reason) for f in report.files] == [("deps.lock", cs.REASON_OK)]
+
+    def test_the_resolver_is_asked_about_containment_with_no_fabricated_filter(self, tmp_path, monkeypatch):
+        repo = _make_repo(tmp_path / "r")
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        asked = {}
+        real = cs.codebase.resolve_entry_code_files
+
+        def _spy(candidate, extensions, **kwargs):
+            asked["extensions"] = extensions
+            return real(candidate, extensions, **kwargs)
+        monkeypatch.setattr(cs.codebase, "resolve_entry_code_files", _spy)
+
+        assert cs._in_project_scope(repo / "m.py", repo) is True
+        assert asked["extensions"] == [], "no filter is in force, so none is pretended"
 
 
 class TestInvariants:
