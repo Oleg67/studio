@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from textwrap import dedent
 
+from studio.utils import document
 from studio.utils import error_codes as EC
 from studio.utils.codebase import (
     CodeFile,
@@ -540,8 +541,8 @@ class TestReadCodeText:
         path = tmp_path / "f.py"
         path.write_bytes(b"x" * 5000)
 
-        assert read_code_text(path, max_bytes=0)[0] == "x" * 5000
-        assert read_code_text(path, max_bytes=-1)[0] == "x" * 5000
+        assert read_code_text(path, max_bytes=0) == ("x" * 5000, [])
+        assert read_code_text(path, max_bytes=-1) == ("x" * 5000, [])
 
     def test_a_missing_file_is_a_read_error(self, tmp_path: Path):
         text, errs = read_code_text(tmp_path / "missing.py")
@@ -566,6 +567,20 @@ class TestReadCodeText:
 
         assert text is None
         assert [e["code"] for e in errs] == [EC.FILE_READ_ERROR]
+
+    def test_the_binary_rule_is_one_predicate_shared_with_the_document_reader(self, tmp_path: Path, monkeypatch):
+        """Both readers call `document.is_binary`, so the rule cannot drift between them.
+        Swapping the predicate turns a plain text file binary for both at once — which
+        two hand-kept literal checks, agreeing only by convention, could not do."""
+        path = tmp_path / "f.py"
+        path.write_bytes(b"x = 1\n")
+        monkeypatch.setattr(document, "is_binary", lambda raw: True)
+
+        text, errs = read_code_text(path)
+
+        assert text is None
+        assert [e["code"] for e in errs] == [EC.FILE_READ_ERROR]
+        assert document.read_text_safe(path) is None
 
 
 class TestFromTextParity:

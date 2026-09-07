@@ -71,8 +71,11 @@ class TestBothReadersYieldTheSameHits:
     """`read_text_safe` (used by `scan_cpt_ids`) and `codebase.read_code_text` (used by
     the change-summary linkage) must present identical lines to the scan."""
 
-    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
     def test_identical_hits_for_identical_content(self, tmp_path: Path, newline: str):
+        """Every terminator `str.splitlines` recognises, the bare CR of classic Mac files
+        included — the one on which a reader translating newlines and one reading bytes
+        could most plausibly part ways."""
         path = tmp_path / "f.md"
         path.write_bytes(FIXTURE.replace("\n", newline).encode("utf-8"))
 

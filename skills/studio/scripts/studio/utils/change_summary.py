@@ -47,12 +47,13 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Container, Dict, List, Optional, Tuple
 
 from . import codebase
 from . import decision_log
@@ -63,6 +64,22 @@ logger = logging.getLogger(__name__)
 
 #: Seconds any single git query may take before it is treated as unavailable.
 _GIT_TIMEOUT = 10
+
+#: The codec every git reader here decodes with — the one Python uses for filesystem
+#: paths, so a path read from git is the string ``open`` encodes back to the same bytes.
+#: Git emits paths as raw bytes. ``text=True`` without an ``encoding`` decodes them with
+#: the locale's codec instead, and the two readers of the changed-file listing — the
+#: captured diff and the streamed sweep — then disagreed about one file's name under a
+#: non-UTF-8 locale, so the sweep's deduplication against the diff missed it and one
+#: file was reported twice.
+_PATH_ENCODING = sys.getfilesystemencoding()
+_PATH_ERRORS = sys.getfilesystemencodeerrors()
+
+#: Longest single record the streamed reader buffers before calling the stream
+#: malformed. The ceiling on records bounds how many are kept, not how long one may
+#: grow: a child that never writes a NUL was otherwise buffered without limit. Far above
+#: any path a repository holds, and far below the point where it would matter.
+_MAX_RECORD_BYTES = 1 << 20
 
 #: Environment variables that redirect git away from the repository it was pointed at.
 #:
@@ -249,9 +266,11 @@ def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool
             text=True,
             # Git refs and paths are bytes and need not be UTF-8, so `text=True`'s
             # strict default would raise UnicodeDecodeError past the handler below and
-            # break the never-raises contract. `surrogateescape` is the handler Python
-            # uses for filesystem values, so they round-trip to the same bytes.
-            errors="surrogateescape",
+            # break the never-raises contract. The filesystem codec is the one Python
+            # uses for paths, so a value round-trips to the same bytes -- and every
+            # reader in this module decodes with it, so one path is one string.
+            encoding=_PATH_ENCODING,
+            errors=_PATH_ERRORS,
             timeout=_GIT_TIMEOUT,
             check=False,
         )
@@ -347,15 +366,18 @@ def _merge_base(project_root: Path, base_ref: str) -> Tuple[Optional[str], bool]
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-shallow-check
-def _is_shallow(project_root: Path) -> bool:
+def _is_shallow(project_root: Path) -> Tuple[bool, bool]:
     """Whether the repository's history is truncated — a shallow clone.
 
-    Asked only after a merge-base miss, so it costs nothing on the common path, and only
-    to choose between two reasons: a miss in full history is a fact about the branches,
-    a miss in a shallow one is a fact about the fetch.
+    Returns ``(shallow, tool_failed)``, like every other probe here. Asked only after a
+    merge-base miss, so it costs nothing on the common path, and only to choose between
+    two reasons: a miss in full history is a fact about the branches, a miss in a shallow
+    one is a fact about the fetch. The failure flag is kept rather than dropped: a probe
+    that never ran answered neither way, and an earlier version read that as "not
+    shallow" and reported unrelated history on the strength of a timeout.
     """
-    answer, _failed = _git_query(project_root, ["rev-parse", "--is-shallow-repository"])
-    return answer == "true"
+    answer, failed = _git_query(project_root, ["rev-parse", "--is-shallow-repository"])
+    return answer == "true", failed
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-shallow-check
 
 
@@ -459,7 +481,10 @@ def _window_from_base_ref(project_root: Path, base_ref: str) -> ChangeWindow:
         # A miss in a shallow clone is not a fact about history: the branch point may lie
         # beyond the fetched depth. "No merge base" would send someone looking for
         # unrelated branches that are related, and CI checkouts default to depth 1.
-        reason = REASON_SHALLOW_HISTORY if _is_shallow(project_root) else REASON_NO_MERGE_BASE
+        shallow, failed = _is_shallow(project_root)
+        if failed:
+            return ChangeWindow(project_root=root, base_ref=base_ref, reason=REASON_GIT_UNAVAILABLE)
+        reason = REASON_SHALLOW_HISTORY if shallow else REASON_NO_MERGE_BASE
         return ChangeWindow(project_root=root, base_ref=base_ref, reason=reason)
 
     base_time, failed = _commit_time(project_root, base_sha)
@@ -795,9 +820,11 @@ def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
             # Filesystem paths are bytes on POSIX and are not guaranteed to be UTF-8,
             # so `text=True`'s strict default raises UnicodeDecodeError on a legal but
             # undecodable filename -- escaping past the handler below and breaking the
-            # never-raises contract. `surrogateescape` is the handler Python itself uses
-            # for paths, so the value round-trips back to the same bytes when reopened.
-            errors="surrogateescape",
+            # never-raises contract. The filesystem codec is what Python itself uses for
+            # paths, so the value round-trips to the same bytes when reopened, and the
+            # streamed sweep decodes with the same one, so both name one file alike.
+            encoding=_PATH_ENCODING,
+            errors=_PATH_ERRORS,
             timeout=_GIT_TIMEOUT,
             check=False,
         )
@@ -820,7 +847,7 @@ def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-stream
 def _git_records_bounded(
-    project_root: Path, args: List[str], keep: int,
+    project_root: Path, args: List[str], keep: int, skip: Container[str] = frozenset(),
 ) -> Optional[Tuple[List[str], int]]:
     """Stream a ``-z`` query, storing at most ``keep`` records and counting them all.
 
@@ -829,11 +856,16 @@ def _git_records_bounded(
     paths. :func:`_git_records` captures the whole output and splits it into one Python
     string per record before any ceiling applies; this reads git's pipe in chunks, keeps
     the first ``keep`` records, and counts the rest as they stream past, so the cost
-    bounded is the cost that was actually accruing. Returns ``(kept, total)``, or
-    ``None`` for any non-answer, like its sibling.
+    bounded is the cost that was actually accruing. Records in ``skip`` are neither kept
+    nor counted, and are judged before the ceiling: a caller deduplicating this stream
+    against another listing cannot do so afterwards for records that were only counted,
+    and a duplicate that took a kept slot displaced a record that was genuinely new.
+    Returns ``(kept, total)``, or ``None`` for any non-answer, like its sibling — a
+    stream that failed part-way is a non-answer too, not a shorter listing.
     """
     kept: List[str] = []
     counts = [0]
+    failure: List[BaseException] = []
     deadline = time.monotonic() + _GIT_TIMEOUT
     try:
         with subprocess.Popen(
@@ -851,7 +883,9 @@ def _git_records_bounded(
             # itself does this portably (`communicate`), and pipes are not selectable
             # everywhere this runs.
             pump = threading.Thread(
-                target=_pump_records, args=(proc.stdout, keep, kept, counts), daemon=True,
+                target=_pump_records,
+                args=(proc.stdout, keep, skip, kept, counts, failure),
+                daemon=True,
             )
             pump.start()
             pump.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -859,6 +893,13 @@ def _git_records_bounded(
                 proc.kill()
                 pump.join(timeout=1.0)
                 raise subprocess.TimeoutExpired(cmd="git", timeout=_GIT_TIMEOUT)
+            if failure:
+                # The pump stopped early. What it kept is a prefix of the truth, and a
+                # prefix presented as the listing is the silent omission this module
+                # exists to prevent — so nothing is returned rather than part of it.
+                proc.kill()
+                logger.warning("change-summary git query stream failed: %s", type(failure[0]).__name__)
+                return None
             try:
                 returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
@@ -871,27 +912,46 @@ def _git_records_bounded(
         logger.debug("change-summary git query exited %d", returncode)
         return None
     return kept, counts[0]
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-stream
 
 
-def _pump_records(stream: Any, keep: int, kept: List[str], counts: List[int]) -> None:
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-pump-records
+def _pump_records(
+    stream: Any, keep: int, skip: Container[str],
+    kept: List[str], counts: List[int], failure: List[BaseException],
+) -> None:
     """Split a NUL-delimited byte stream as it arrives: keep up to ``keep``, count all.
 
-    ``counts`` is a one-element list so the total crosses the thread boundary without a
-    lock — the caller reads it only after joining. An unterminated final record is a
-    record too, as :func:`_git_records` treats it.
+    ``counts`` and ``failure`` are lists so the total and any exception cross the thread
+    boundary without a lock — the caller reads them only after joining. An unterminated
+    final record is a record too, as :func:`_git_records` treats it; an empty record is
+    not, since this reader lists paths and there is no empty path. Whatever is raised in
+    here is recorded rather than lost: an exception ends a thread and is printed nowhere,
+    and the caller would have read a stopped pump as a finished one — a partial listing
+    as the whole. A record longer than :data:`_MAX_RECORD_BYTES` is such a failure.
     """
-    tail = b""
-    for chunk in iter(lambda: stream.read(65536), b""):
-        parts = (tail + chunk).split(b"\0")
-        tail = parts.pop()
-        counts[0] += len(parts)
-        for raw in parts[: max(0, keep - len(kept))]:
-            kept.append(raw.decode("utf-8", "surrogateescape"))
-    if tail:
+    def take(raw: bytes) -> None:
+        record = raw.decode(_PATH_ENCODING, _PATH_ERRORS)
+        if not record or record in skip:
+            return
         counts[0] += 1
         if len(kept) < keep:
-            kept.append(tail.decode("utf-8", "surrogateescape"))
-# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-stream
+            kept.append(record)
+
+    try:
+        tail = b""
+        for chunk in iter(lambda: stream.read(65536), b""):
+            parts = (tail + chunk).split(b"\0")
+            tail = parts.pop()
+            if len(tail) > _MAX_RECORD_BYTES:
+                raise ValueError("record exceeds the streamed reader's size bound")
+            for raw in parts:
+                take(raw)
+        if tail:
+            take(tail)
+    except Exception as exc:  # pylint: disable=broad-except
+        failure.append(exc)
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-pump-records
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-parse-name-status
@@ -1032,13 +1092,14 @@ def _collect_changed_entries(
     """List ``(status, path)`` for everything changed since ``base_sha``, plus the total.
 
     Returns ``(entries, total)``: at most :data:`MAX_CHANGED_ENTRIES` entries
-    materialised, and the count of everything git reported. The untracked sweep is
-    the unbounded stream — an unignored dependency tree can run to hundreds of
-    thousands of paths — so past the ceiling its paths are *counted* but not stored.
-    Deduplication against the diff still holds for them: a path already seen is
-    neither stored twice nor counted twice. Git's captured output is still read whole
-    (``subprocess.run`` buffers it); what this bounds is the per-path Python objects and
-    the dictionary, which is where the cost the ceiling exists for actually accrues.
+    materialised, and the count of every distinct path git reported. The tracked diff
+    is captured whole: its size is bounded by the repository's tracked-file count, which
+    git holds in memory to produce it, so streaming it would bound nothing the
+    repository does not already. The untracked sweep is the unbounded one — an
+    unignored dependency tree can run to hundreds of thousands of paths — so it is
+    streamed: past the ceiling its paths are *counted* but not stored, and it is
+    deduplicated against the diff as it streams, so a path already seen is neither
+    stored nor counted, and takes no slot from a path that is genuinely new.
 
     Rename detection is pinned with ``-M`` rather than left to the ambient
     ``diff.renames`` setting, because :func:`_walk_name_status` keeps a rename's new
@@ -1080,16 +1141,16 @@ def _collect_changed_entries(
         seen.setdefault(rel_path, status)
     swept = _git_records_bounded(
         project_root, ["ls-files", "--others", "--exclude-standard", "-z"], MAX_CHANGED_ENTRIES,
+        # Deduplicated inside the stream, before the ceiling. Checked afterwards, a
+        # `git rm --cached` file — in the diff already — was counted a second time once
+        # past the ceiling, and below it had taken a kept slot from a genuinely new file.
+        skip=seen,
     )
     if swept is None:
         return None
     untracked, untracked_total = swept
-    # Dedup against the diff: a path already carrying a diff status is neither stored
-    # nor counted twice. Records the sweep did not store cannot be checked, so a
-    # `git rm --cached` file beyond the ceiling counts once as untracked — an over-count
-    # that needs more than the ceiling's worth of new files to occur at all.
-    new = [(path, "?") for path in untracked if path and path not in seen]
-    total = len(seen) + len(new) + (untracked_total - len(untracked))
+    new = [(path, "?") for path in untracked]
+    total = len(seen) + untracked_total
     tracked = list(seen.items())
     if len(tracked) + len(new) <= MAX_CHANGED_ENTRIES:
         picked = tracked + new

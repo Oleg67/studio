@@ -15,6 +15,7 @@ import dataclasses
 import io
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -578,6 +579,10 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
 
         assert launches >= 3
         assert source.count("env=_git_env()") == launches, "every launch, not most of them"
+        # And every captured launch decodes with the codec the streamed reader uses, so
+        # the two readers of one path cannot disagree about its name.
+        assert source.count("encoding=_PATH_ENCODING,") == source.count("subprocess.run(")
+        assert "raw.decode(_PATH_ENCODING, _PATH_ERRORS)" in source
 
     def test_a_failed_untracked_sweep_makes_the_listing_unavailable(self, tmp_path, monkeypatch):
         """`or []` turned a failed `ls-files` into an empty one, so the report came back
@@ -743,6 +748,151 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert entries == [("A", "t.py"), ("?", "u.py")]
         assert total == 2
 
+    @pytest.mark.parametrize("first,second,expected", [
+        ([("t1", "A")], [(f"u{i}", "?") for i in range(10)], [("t1", "A"), ("u0", "?"), ("u1", "?")]),
+        ([(f"t{i}", "A") for i in range(10)], [("u1", "?")], [("t0", "A"), ("u1", "?"), ("t1", "A")]),
+    ], ids=["one-tracked-many-new", "many-tracked-one-new"])
+    def test_the_lopsided_case_still_seats_the_minority(self, first, second, expected):
+        """One tracked change beside a large new tree, or the reverse — the common shape,
+        not the balanced one. The single entry from the smaller side is seated and the
+        rest of the cap goes to the other; a fill-in-order implementation seats none
+        of the minority when the majority alone reaches the cap."""
+        assert cs._interleave(first, second, 3) == expected
+
+    def test_a_skipped_record_takes_no_kept_slot_and_is_not_counted(self, tmp_path):
+        """Deduplication happens inside the stream. A record the caller already holds —
+        here `a.txt`, in the diff as deleted and first in the sweep — neither occupies one
+        of the `keep` slots, which displaced a genuinely new path behind it, nor adds to
+        the total."""
+        repo = _repo_with_base(tmp_path)
+        _git(repo, "rm", "-q", "--cached", "a.txt")
+        for name in ("u1.py", "u2.py", "u3.py"):
+            (repo / name).write_text("y = 2\n", encoding="utf-8")
+
+        kept, total = cs._git_records_bounded(
+            repo, ["ls-files", "--others", "--exclude-standard", "-z"], 2, skip={"a.txt"},
+        )
+
+        assert kept == ["u1.py", "u2.py"], "the duplicate sorted first and took no slot"
+        assert total == 3
+
+    def test_a_duplicate_past_the_ceiling_is_counted_once(self, tmp_path, monkeypatch):
+        """A `git rm --cached` file is in the diff as deleted and in the sweep as new.
+        Beyond the kept prefix it could not be checked against the diff afterwards, so
+        the total carried it twice; judged as it streams, each distinct path counts once."""
+        repo = _make_repo(tmp_path / "r")
+        _commit(repo, "zz.txt")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        _git(repo, "rm", "-q", "--cached", "zz.txt")
+        for name in ("u1.py", "u2.py", "u3.py"):
+            (repo / name).write_text("y = 2\n", encoding="utf-8")
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 2)
+
+        entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert total == 4, "zz.txt once, three new files: four distinct paths"
+        assert ("D", "zz.txt") in entries
+        assert len(entries) == 2
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="byte filenames are a POSIX matter")
+    def test_both_readers_decode_one_path_to_one_string(self, tmp_path, monkeypatch):
+        """The diff is captured by `subprocess.run`, the sweep streamed from a pipe; both
+        must decode the same bytes with the same codec, or the sweep's dedup against the
+        diff misses a file under a non-UTF-8 locale and reports it twice. The codec is
+        swapped for one that reads the byte differently, so a reader left on a default
+        of its own would disagree here."""
+        repo = _repo_with_base(tmp_path)
+        with open(os.path.join(os.fsencode(repo), b"caf\xe9.py"), "wb") as handle:
+            handle.write(b"x = 1\n")
+        monkeypatch.setattr(cs, "_PATH_ENCODING", "latin-1")
+        monkeypatch.setattr(cs, "_PATH_ERRORS", "strict")
+        args = ["ls-files", "--others", "--exclude-standard", "-z"]
+
+        captured = cs._git_records(repo, args)
+        streamed, total = cs._git_records_bounded(repo, args, 5)
+
+        assert captured == streamed == ["café.py"]
+        assert total == 1
+
+    def test_a_stream_that_fails_part_way_is_a_tool_failure_not_a_shorter_listing(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        """An exception on the pump thread used to end the thread and be printed nowhere;
+        the caller read a stopped pump as a finished one and returned the prefix it had
+        as the listing — new files absent, and nothing said."""
+        class _Breaking:
+            def __init__(self):
+                self.calls = 0
+
+            def read(self, _size):
+                self.calls += 1
+                if self.calls == 1:
+                    return b"a.py\0"
+                raise OSError("pipe went away")
+
+        class _Proc:
+            killed = False
+
+            def __init__(self, *_a, **_k):
+                self.stdout = _Breaking()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                _Proc.killed = True
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Proc)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None, "a prefix is not the listing"
+        assert _Proc.killed
+        assert any("OSError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_a_record_that_never_ends_is_bounded_not_buffered_forever(self, tmp_path, monkeypatch, caplog):
+        """`keep` bounds how many records are stored, not how long one may grow; a child
+        that never writes a NUL was buffered chunk after chunk until the deadline."""
+        class _Endless:
+            reads = 0
+
+            def read(self, _size):
+                _Endless.reads += 1
+                return b"x" * 64
+
+        class _Proc:
+            def __init__(self, *_a, **_k):
+                self.stdout = _Endless()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Proc)
+        monkeypatch.setattr(cs, "_MAX_RECORD_BYTES", 200)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None
+        assert _Endless.reads == 4, "stopped the read after the bound was crossed, not at the deadline"
+        assert any("ValueError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
     def test_the_bounded_reader_keeps_the_cap_and_counts_the_rest(self, tmp_path):
         repo = _repo_with_base(tmp_path)
         for i in range(5):
@@ -771,9 +921,10 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert result is None
         assert any(r.levelname == "WARNING" and "could not run" in r.getMessage() for r in caplog.records)
 
-    def test_a_hung_sweep_is_killed_and_reported_as_a_tool_failure(self, tmp_path, monkeypatch, caplog):
-        """The stream reader waits with the module's timeout; a git that never exits is
-        killed rather than left running, and reported like any other tool failure."""
+    def test_a_git_that_closes_its_pipe_but_never_exits_is_killed(self, tmp_path, monkeypatch, caplog):
+        """The stream reaches EOF but git never exits: the wait carries the module's
+        timeout, so the process is killed rather than left running, and reported like
+        any other tool failure. The pipe held open in silence is the next test."""
         class _Hung:
             killed = False
 

@@ -119,6 +119,43 @@ class TestAShallowCloneIsNotUnrelatedHistory:
 
         assert cs.resolve_window(repo).reason == cs.REASON_NO_MERGE_BASE
 
+    def test_a_shallow_repository_is_detected_without_a_network_clone(self, tmp_path):
+        """The `file://` clone above can be refused by a hardened git, and a skip there
+        left the headline reason unverified. This fabricates the same state directly:
+        `.git/shallow` naming HEAD as a graft is exactly what a depth-1 fetch writes, so
+        the branch point is cut off and the reason is exercised wherever the suite runs."""
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        head = _commit(repo, "b.txt")
+        assert cs._merge_base(repo, "upstream/main")[0], "related until the graft is written"
+        (repo / ".git" / "shallow").write_text(head + "\n", encoding="utf-8")
+
+        window = cs.resolve_window(repo)
+
+        assert window.available is False
+        assert window.reason == cs.REASON_SHALLOW_HISTORY
+
+    def test_a_shallow_probe_that_fails_is_reported_as_git_not_as_history(self, tmp_path, monkeypatch):
+        """After a merge-base miss, the depth probe itself failing answers nothing about
+        depth. An earlier version read that failure as "not shallow" and reported
+        unrelated history on the strength of a timeout."""
+        repo = _make_repo(tmp_path / "r")
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        monkeypatch.setattr(cs, "_merge_base", lambda *_a, **_k: (None, False))
+        real_query = cs._git_query
+
+        def _probe_fails(root, args):
+            if "--is-shallow-repository" in args:
+                return None, True
+            return real_query(root, args)
+        monkeypatch.setattr(cs, "_git_query", _probe_fails)
+
+        window = cs.resolve_window(repo)
+
+        assert window.reason == cs.REASON_GIT_UNAVAILABLE
+        assert window.reason != cs.REASON_NO_MERGE_BASE
+        assert cs._is_shallow(repo) == (False, True), "the failure flag is returned, not dropped"
+
 
 class TestANamedBaseIsNeverSilentlyIgnored:
     """`since` alone needs no git. Given `base` too, the base still anchors the

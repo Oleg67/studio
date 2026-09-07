@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+from . import document
 from . import error_codes as EC
 
 logger = logging.getLogger(__name__)
@@ -705,9 +706,9 @@ def read_code_text(
             "file", f"`{code_path}` exceeds the {limit}-byte scan limit",
             code=EC.FILE_TOO_LARGE, path=code_path, line=1,
         )]
-    if b"\x00" in data:
-        # Binary, by the same rule `document.read_text_safe` applies, so the two
-        # readers agree on what is text: a NUL byte is never one.
+    if document.is_binary(data):
+        # Binary, by the one predicate `document.read_text_safe` applies too, so the
+        # two readers cannot drift apart on what is text.
         return None, [error(
             "file", f"`{code_path}` is binary (contains NUL bytes)",
             code=EC.FILE_READ_ERROR, path=code_path, line=1,
