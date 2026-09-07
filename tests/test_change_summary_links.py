@@ -15,6 +15,8 @@ import dataclasses
 import io
 import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -798,6 +800,74 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert result is None
         assert _Hung.killed, "a hung git is not left running"
         assert any("TimeoutExpired" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_a_sweep_that_holds_the_pipe_open_is_killed_at_the_deadline(self, tmp_path, monkeypatch, caplog):
+        """A `read()` on a pipe git keeps open without writing never returns, so a
+        `wait(timeout)` placed after it could never run. The reader now pumps on a
+        helper thread against the module's deadline, and a silent git is killed."""
+        class _StalledPipe:
+            def __init__(self, gate):
+                self.gate = gate
+
+            def read(self, _size):
+                self.gate.wait()
+                return b""
+
+        class _Stalled:
+            killed = False
+
+            def __init__(self, *_a, **_k):
+                self.gate = threading.Event()
+                self.stdout = _StalledPipe(self.gate)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                _Stalled.killed = True
+                self.gate.set()
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Stalled)
+        monkeypatch.setattr(cs, "_GIT_TIMEOUT", 0.2)
+        started = time.monotonic()
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None
+        assert _Stalled.killed, "a silent git is not left holding the pipe"
+        assert time.monotonic() - started < 5, "returned at the deadline, not never"
+        assert any("TimeoutExpired" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_an_unterminated_final_record_is_kept_and_counted(self, tmp_path, monkeypatch):
+        """`_git_records` keeps a trailing record with no NUL after it; the streamed
+        reader must agree, or the two would disagree about the same output."""
+        class _Short:
+            def __init__(self, *_a, **_k):
+                self.stdout = io.BytesIO(b"a.py\0b.py")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Short)
+
+        assert cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5) == (["a.py", "b.py"], 2)
+        assert cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 1) == (["a.py"], 2)
 
     def test_a_launch_failure_is_a_warning_and_a_miss_is_not(self, tmp_path, monkeypatch, caplog):
         """The tool failing and git answering "no" must not look alike in a log."""

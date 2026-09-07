@@ -47,6 +47,8 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -831,8 +833,8 @@ def _git_records_bounded(
     ``None`` for any non-answer, like its sibling.
     """
     kept: List[str] = []
-    total = 0
-    tail = b""
+    counts = [0]
+    deadline = time.monotonic() + _GIT_TIMEOUT
     try:
         with subprocess.Popen(
             ["git"] + args,
@@ -842,14 +844,23 @@ def _git_records_bounded(
             stderr=subprocess.DEVNULL,
         ) as proc:
             assert proc.stdout is not None
-            for chunk in iter(lambda: proc.stdout.read(65536), b""):
-                parts = (tail + chunk).split(b"\0")
-                tail = parts.pop()
-                total += len(parts)
-                for raw in parts[: max(0, keep - len(kept))]:
-                    kept.append(raw.decode("utf-8", "surrogateescape"))
+            # The pipe is read on a helper thread against the module's deadline. A
+            # blocking read on the main thread was bounded by nothing: a git that holds
+            # stdout open without writing never returns from `read`, so the `wait`
+            # with its timeout behind it could never run. Threads are how `subprocess`
+            # itself does this portably (`communicate`), and pipes are not selectable
+            # everywhere this runs.
+            pump = threading.Thread(
+                target=_pump_records, args=(proc.stdout, keep, kept, counts), daemon=True,
+            )
+            pump.start()
+            pump.join(timeout=max(0.0, deadline - time.monotonic()))
+            if pump.is_alive():
+                proc.kill()
+                pump.join(timeout=1.0)
+                raise subprocess.TimeoutExpired(cmd="git", timeout=_GIT_TIMEOUT)
             try:
-                returncode = proc.wait(timeout=_GIT_TIMEOUT)
+                returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 proc.kill()
                 raise
@@ -859,7 +870,27 @@ def _git_records_bounded(
     if returncode:
         logger.debug("change-summary git query exited %d", returncode)
         return None
-    return kept, total
+    return kept, counts[0]
+
+
+def _pump_records(stream: Any, keep: int, kept: List[str], counts: List[int]) -> None:
+    """Split a NUL-delimited byte stream as it arrives: keep up to ``keep``, count all.
+
+    ``counts`` is a one-element list so the total crosses the thread boundary without a
+    lock — the caller reads it only after joining. An unterminated final record is a
+    record too, as :func:`_git_records` treats it.
+    """
+    tail = b""
+    for chunk in iter(lambda: stream.read(65536), b""):
+        parts = (tail + chunk).split(b"\0")
+        tail = parts.pop()
+        counts[0] += len(parts)
+        for raw in parts[: max(0, keep - len(kept))]:
+            kept.append(raw.decode("utf-8", "surrogateescape"))
+    if tail:
+        counts[0] += 1
+        if len(kept) < keep:
+            kept.append(tail.decode("utf-8", "surrogateescape"))
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-stream
 
 
