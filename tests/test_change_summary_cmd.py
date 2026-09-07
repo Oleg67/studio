@@ -533,6 +533,24 @@ class TestPrivacy:
         assert payload["changes"]["changed"] == 3
         assert _lines(out_human)
 
+    def test_a_surrogate_from_the_log_is_escaped_not_a_whole_digest_lost(self, tmp_path, monkeypatch):
+        """`surrogateescape` only re-encodes the surrogates it made (U+DC80–U+DCFF). A
+        `"\\ud800"` that a log line carries through `json.loads` is a different kind, and
+        encoding it raised — so one bad event field replaced the whole digest with the
+        last-resort reason instead of one escaped value in the decisions dimension."""
+        assert cmd._json_safe("\ud800") == "\\ud800"
+        assert cmd._json_safe(os.fsdecode(b"bad\xff.py")) == "bad\\xff.py"
+        repo = _project_repo(tmp_path, monkeypatch, events=[
+            _event("2026-06-01T00:00:00+00:00", "run1", "validation"),
+            _event("2026-06-01T00:00:01+00:00", "run1", "\ud800odd"),
+        ])
+
+        rc, data = _payload(repo)
+
+        assert rc == 0
+        assert "reason" not in data, "the decisions dimension is stated, not the digest lost"
+        assert data["decisions"]["by_event"] == {"\\ud800odd": 1, "validation": 1}
+
     def test_a_named_base_and_an_explicit_bound_compose(self, tmp_path, monkeypatch):
         """`--since` alone needs no git; with `--base` the base still anchors the diff.
         The base used to be ignored silently, and the changes dimension went missing."""

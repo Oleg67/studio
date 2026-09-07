@@ -253,11 +253,22 @@ def _json_safe(value: Any) -> Any:
     ``json.dumps`` accepts it and ``print`` then raises ``UnicodeEncodeError`` on the way
     to stdout — a traceback and a non-zero exit from the one mode meant for scripts. The
     escape is valid to emit and readable as the bytes it stands for.
+
+    Two kinds of surrogate can arrive. ``surrogateescape`` only re-encodes the ones it
+    made itself (U+DC80–U+DCFF, one per undecodable byte); any other lone surrogate —
+    a ``"\\ud800"`` that a decision-log line carried through ``json.loads``, say —
+    makes it raise, and the whole digest would have fallen to the last-resort guard for
+    one bad field. Those are escaped as themselves instead.
     """
     if isinstance(value, str):
-        return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+        try:
+            raw = value.encode("utf-8", "surrogateescape")
+        except UnicodeEncodeError:
+            raw = value.encode("utf-8", "backslashreplace")
+        return raw.decode("utf-8", "backslashreplace")
     if isinstance(value, dict):
-        return {key: _json_safe(item) for key, item in value.items()}
+        # Keys too: an event name from the log is a key of `by_event`.
+        return {_json_safe(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
