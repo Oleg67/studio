@@ -104,7 +104,10 @@ def _window_line(window: core.ChangeWindow) -> str:
     if not window.available:
         return f"window: unavailable ({window.reason}); --since <timestamp> scopes decisions without git"
     if window.base_sha:
-        return f"window: since {window.base_ref} @ {window.base_sha[:8]} ({window.since})"
+        # The bound first, then what anchors the diff: the bound is the base commit's
+        # time unless the caller pinned it with --since, and the line reads the same way
+        # either way rather than pretending an explicit bound came from the commit.
+        return f"window: since {window.since} against {window.base_ref} @ {window.base_sha[:8]}"
     return f"window: since {window.since} (explicit; no base commit to diff against)"
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-window-line
 
@@ -183,6 +186,20 @@ def _decision_runs(selection: core.EventSelection) -> List[Tuple[str, int]]:
     return runs
 
 
+def _run_prefix_width(run_ids: List[str]) -> int:
+    """Shortest prefix length, at least 8, that keeps the shown run ids distinct.
+
+    Two runs sharing their first eight characters rendered as two identical labels, so a
+    reader could not tell that two runs, not one, produced the decisions. The width
+    grows until the shown prefixes differ, the way git lengthens short shas.
+    """
+    width = 8
+    longest = max((len(run_id) for run_id in run_ids), default=width)
+    while width < longest and len({run_id[:width] for run_id in run_ids}) < len(run_ids):
+        width += 1
+    return width
+
+
 def _decision_lines(selection: core.EventSelection) -> List[str]:
     """State the decisions recorded inside the window, and every way the log fell short.
 
@@ -198,7 +215,9 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         by_kind = Counter(str(e.get("event")) for e in decisions)
         kinds = ", ".join(f"{kind} ×{n}" for kind, n in sorted(by_kind.items(), key=lambda kv: (-kv[1], kv[0])))
         lines = [f"why: {len(decisions)} decision(s) in {len(runs)} run(s): {kinds}"]
-        named = ", ".join(f"{run_id[:8]} ×{n}" for run_id, n in runs[:_MAX_NAMED_RUNS])
+        shown = runs[:_MAX_NAMED_RUNS]
+        width = _run_prefix_width([run_id for run_id, _ in shown])
+        named = ", ".join(f"{run_id[:width]} ×{n}" for run_id, n in shown)
         more = len(runs) - _MAX_NAMED_RUNS
         lines.append(f"runs: {named}" + (f" (+{more} more)" if more > 0 else ""))
     else:
@@ -225,6 +244,25 @@ def _apply_ceiling(lines: List[str]) -> Tuple[List[str], int]:
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-payload
+def _json_safe(value: Any) -> Any:
+    """Return ``value`` with every string encodable: undecodable filename bytes, carried
+    as lone surrogates by ``surrogateescape``, become ``\\xNN`` escapes.
+
+    Git paths are decoded with ``surrogateescape`` so a legal non-UTF-8 filename
+    round-trips through the linkage. A lone surrogate cannot be *written*, though:
+    ``json.dumps`` accepts it and ``print`` then raises ``UnicodeEncodeError`` on the way
+    to stdout — a traceback and a non-zero exit from the one mode meant for scripts. The
+    escape is valid to emit and readable as the bytes it stands for.
+    """
+    if isinstance(value, str):
+        return value.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _window_payload(window: core.ChangeWindow) -> Dict[str, Any]:
     # The project root is deliberately absent: it is an absolute path, and the digest
     # must carry nothing a home directory or username could reach a review through.
@@ -294,13 +332,15 @@ def compose_digest(root: Path, *, base: str = "", since: str = "") -> Dict[str, 
     root = Path(root).resolve()
     reason = _project_gate(root)
     if reason:
-        return {"status": _STATUS, "reason": reason,
-                "lines": [f"{reason}: nothing to summarise"], "omitted": 0}
+        return _json_safe({"status": _STATUS, "reason": reason,
+                           "lines": [f"{reason}: nothing to summarise"], "omitted": 0})
     window = core.resolve_window(root, base=base, since=since)
     selection = core.select_events(window)
     report = core.link_changed_files(window)
     lines, omitted = _apply_ceiling(_digest_lines(window, selection, report))
-    return {
+    # Every string in the payload — the lines included — is made encodable here, once,
+    # so neither rendering can raise on the way to stdout.
+    return _json_safe({
         "status": _STATUS,
         "lines": lines,
         "omitted": omitted,
@@ -308,7 +348,7 @@ def compose_digest(root: Path, *, base: str = "", since: str = "") -> Dict[str, 
         "changes": _changes_payload(report),
         "requirements": _requirement_ids(report),
         "decisions": _decisions_payload(selection),
-    }
+    })
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-compose
 
 
@@ -345,7 +385,9 @@ def cmd_change_summary(argv: List[str]) -> int:
         # like a bug. Said here, once, where the user actually looks.
         epilog=(
             "How the digest is built: the window runs from the merge-base with the canonical "
-            "remote's default branch (--base or --since override it). Changed files are "
+            "remote's default branch; --base names a different anchor for the file diff, and "
+            "--since pins the decision boundary to a timestamp (alone, it needs no git; with "
+            "--base, both apply). Changed files are "
             "listed from git against the working tree, untracked files included; a file "
             "is included or excluded by the project's own scope policy (the same one "
             f"`cfs validate` uses), and at most {core.MAX_CHANGED_ENTRIES:,} entries are "
@@ -361,7 +403,8 @@ def cmd_change_summary(argv: List[str]) -> int:
     p.add_argument("--base", default="",
                    help="Base ref the window is measured from (default: the canonical remote's default branch)")
     p.add_argument("--since", default="",
-                   help="Explicit ISO-8601 lower bound for decisions; skips git entirely")
+                   help=("Explicit ISO-8601 lower bound for decisions. On its own it needs no git; "
+                         "with --base, the base still anchors the changed-file diff"))
     args = ui.parse_args_or_json_error(p, argv)
     if args is None:
         return 2

@@ -121,7 +121,7 @@ class TestTheDigestReadsTheBranch:
 
         assert rc == 0
         assert lines == [
-            f"window: since upstream/main @ {base} ({since})",
+            f"window: since {since} against upstream/main @ {base}",
             "changes: 2 file(s): 1 reference requirements",
             "markers: 1 of 2 changed files carry requirement markers",
             f"requirements: {MARKER}",
@@ -321,6 +321,37 @@ class TestTheCeilingIsACeilingNotAQuota:
         assert line == "requirements: cpt-x-0, cpt-x-1, cpt-x-2, cpt-x-3, cpt-x-4 (+2 more)"
         assert cmd._requirements_line([]) is None
 
+    @pytest.mark.parametrize("count,suffix", [(5, ""), (6, " (+1 more)")])
+    def test_the_requirements_cap_boundary(self, count, suffix):
+        """Exactly at the cap nothing is cut; one over cuts one — where an off-by-one in
+        the slice or the arithmetic would first show."""
+        ids = [f"cpt-x-{i}" for i in range(count)]
+
+        assert cmd._requirements_line(ids) == "requirements: " + ", ".join(ids[:5]) + suffix
+
+    @pytest.mark.parametrize("count,suffix", [(3, ""), (4, " (+1 more)")])
+    def test_the_runs_cap_boundary(self, count, suffix):
+        selection = core.EventSelection(
+            events=tuple(_event(f"2026-06-01T00:00:0{i}+00:00", f"run{i}", "validation") for i in range(count)),
+            runs=tuple(f"run{i}" for i in range(count)), available=True, reason=core.REASON_OK,
+        )
+
+        lines = cmd._decision_lines(selection)
+
+        assert lines[1] == "runs: " + ", ".join(f"run{i} ×1" for i in range(3)) + suffix
+
+    def test_runs_sharing_a_prefix_are_told_apart(self):
+        """Two runs with the same first eight characters used to render as two identical
+        labels; the prefix now grows until the shown ids differ, as git does for shas."""
+        selection = core.EventSelection(
+            events=(_event("2026-06-01T00:00:00+00:00", "abcdefgh1111", "validation"),
+                    _event("2026-06-01T00:00:01+00:00", "abcdefgh2222", "review")),
+            runs=("abcdefgh1111", "abcdefgh2222"), available=True, reason=core.REASON_OK,
+        )
+
+        assert cmd._decision_lines(selection)[1] == "runs: abcdefgh1 ×1, abcdefgh2 ×1"
+        assert cmd._run_prefix_width(["abcdefgh1111", "12345678"]) == 8
+
 
 # -------------------------------------------------------- the digest never counts itself
 
@@ -448,7 +479,7 @@ class TestEveryDegradedLineCarriesItsDenominator:
         assert cmd._window_line(core.ChangeWindow(
             base_ref="upstream/main", base_sha="0123456789ab", since="2026-01-01T00:00:00+00:00",
             available=True, reason=core.REASON_OK,
-        )) == "window: since upstream/main @ 01234567 (2026-01-01T00:00:00+00:00)"
+        )) == "window: since 2026-01-01T00:00:00+00:00 against upstream/main @ 01234567"
         assert cmd._window_line(core.ChangeWindow(
             since="2026-01-01T00:00:00+00:00", available=True, reason=core.REASON_OK,
         )) == "window: since 2026-01-01T00:00:00+00:00 (explicit; no base commit to diff against)"
@@ -469,6 +500,50 @@ class TestPrivacy:
 
         assert rc == 0
         assert len(lines) == 6
+
+    def test_an_undecodable_filename_cannot_crash_either_rendering(self, tmp_path, monkeypatch):
+        """Git paths are decoded with `surrogateescape` so a legal non-UTF-8 name round-
+        trips; a lone surrogate then raised `UnicodeEncodeError` inside `print`, past the
+        last-resort guard, in the one mode meant for scripts. The output stream here
+        encodes strictly, as a real stdout does — a `StringIO` would not have noticed."""
+        if os.name == "nt":
+            pytest.skip("arbitrary bytes are not legal in Windows file names")
+        repo = _project_repo(tmp_path, monkeypatch)
+        (repo / os.fsdecode(b"bad\xff.py")).write_text("x = 1\n", encoding="utf-8")
+
+        def _run_strict(argv):
+            saved = is_json_mode()
+            set_json_mode(False)
+            raw = io.BytesIO()
+            strict = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+            try:
+                with redirect_stdout(strict):
+                    rc = cli.main(argv)
+            finally:
+                set_json_mode(saved)
+            strict.flush()
+            return rc, raw.getvalue().decode("utf-8")
+
+        rc_json, out_json = _run_strict(["change-summary", "--json", "--root", str(repo)])
+        rc_human, out_human = _run_strict(["change-summary", "--root", str(repo)])
+
+        assert (rc_json, rc_human) == (0, 0)
+        payload = json.loads(out_json)
+        assert "bad\\xff.py" in [f["path"] for f in payload["changes"]["files"]], "escaped, not dropped"
+        assert payload["changes"]["changed"] == 3
+        assert _lines(out_human)
+
+    def test_a_named_base_and_an_explicit_bound_compose(self, tmp_path, monkeypatch):
+        """`--since` alone needs no git; with `--base` the base still anchors the diff.
+        The base used to be ignored silently, and the changes dimension went missing."""
+        repo = _project_repo(tmp_path, monkeypatch)
+        base = _git(repo, "rev-parse", "upstream/main")[:8]
+
+        rc, lines = _digest(repo, "--base", "upstream/main", "--since", "2026-01-01T00:00:00+00:00")
+
+        assert rc == 0
+        assert lines[0] == f"window: since 2026-01-01T00:00:00+00:00 against upstream/main @ {base}"
+        assert lines[1].startswith("changes: 2 file(s)"), "the diff is anchored, not lost"
 
     def test_no_output_carries_a_path_home_user_or_author(self, tmp_path, monkeypatch):
         repo = _project_repo(tmp_path, monkeypatch)
