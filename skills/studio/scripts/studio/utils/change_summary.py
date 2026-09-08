@@ -80,6 +80,14 @@ _PATH_ERRORS = sys.getfilesystemencodeerrors()
 #: grow: a child that never writes a NUL was otherwise buffered without limit. Far above
 #: any path a repository holds, and far below the point where it would matter.
 _MAX_RECORD_BYTES = 1 << 20
+
+#: What the three readers below say when git could not be launched at all, and when it
+#: ran and refused. One template each, because an operator greps a log for a fixed
+#: phrase: three readers wording the same outcome three ways is three things to search
+#: for. Both carry the exception *type* or the exit code, never the message — an
+#: ``OSError``'s text can carry a path.
+_LOG_GIT_FAILED = "change-summary git query could not run: %s"
+_LOG_GIT_EXITED = "change-summary git query exited %d"
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reader-bounds
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-environment
@@ -283,12 +291,11 @@ def _git_query(project_root: Path, args: List[str]) -> Tuple[Optional[str], bool
         )
     except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         # Warning, not debug: git not launching is an environment fault an operator
-        # should see, unlike the routine non-zero exit below. The type, not the message
-        # — an OSError's text can carry a path.
-        logger.warning("change-summary git query could not run: %s", type(exc).__name__)
+        # should see, unlike the routine non-zero exit below.
+        logger.warning(_LOG_GIT_FAILED, type(exc).__name__)
         return None, True
     if result.returncode:
-        logger.debug("change-summary git query exited %d", result.returncode)
+        logger.debug(_LOG_GIT_EXITED, result.returncode)
         return None, False
     line = result.stdout.strip().splitlines()
     return (line[0].strip() if line else None), False
@@ -840,10 +847,10 @@ def _git_records(project_root: Path, args: List[str]) -> Optional[List[str]]:
     except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
         # Warning, not debug, for the same reason as `_git_query`: this is the tool
         # failing, not git answering "no", and the two must not look alike in a log.
-        logger.warning("change-summary git query could not run: %s", type(exc).__name__)
+        logger.warning(_LOG_GIT_FAILED, type(exc).__name__)
         return None
     if result.returncode:
-        logger.debug("change-summary git query exited %d", result.returncode)
+        logger.debug(_LOG_GIT_EXITED, result.returncode)
         return None
     # A trailing NUL leaves one empty tail record; drop it without dropping
     # legitimately empty interior records, which would desynchronise the walk.
@@ -915,10 +922,10 @@ def _git_records_bounded(
                 proc.kill()
                 raise
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("change-summary git query could not run: %s", type(exc).__name__)
+        logger.warning(_LOG_GIT_FAILED, type(exc).__name__)
         return None
     if returncode:
-        logger.debug("change-summary git query exited %d", returncode)
+        logger.debug(_LOG_GIT_EXITED, returncode)
         return None
     return kept, counts[0]
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-stream
