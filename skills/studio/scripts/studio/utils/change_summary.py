@@ -110,6 +110,13 @@ _GIT_REDIRECT_VARS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_CEILING_DIRECTORIES",
+    # Widens the upward search instead of narrowing it: with this set, discovery crosses
+    # a mount boundary and can settle on an ancestor repository on another filesystem
+    # rather than stopping at the requested project's own. Cleared for symmetry with
+    # ``GIT_CEILING_DIRECTORIES`` above — leaving the variable that widens the walk while
+    # clearing the one that restricts it would make the search depend on the ambient
+    # environment in exactly the direction that hurts.
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     # The second mechanism: git also takes *configuration* from the environment, and
     # config reaches these queries even though it cannot redirect discovery. Measured —
     # with `core.excludesFile` injected through any of the three below,
@@ -815,6 +822,18 @@ class LinkReport:
     renderer checks is ``examined == len(files) + excluded``, and every row that carries
     no marker is in exactly one of ``deleted``, ``unreadable`` or ``not_a_file`` — or is
     a regular file that was read and simply carries none.
+
+    ``unreadable`` is **the aggregate of every reason no marker could be established**,
+    not only a failed read: a file whose scope could not be determined
+    (:data:`REASON_SCOPE_UNKNOWN`), one whose markers would not parse
+    (:data:`REASON_MARKERS_INVALID`) and one whose scan failed unexpectedly
+    (:data:`REASON_SCAN_FAILED`) all land here alongside
+    :data:`REASON_FILE_UNREADABLE`. Splitting it would put a counter on each cause and
+    an invariant on none of them — the exactly-one property above is what a renderer
+    checks its arithmetic against. The distinction is not lost: each row keeps its own
+    ``reason``, so the per-file detail says which cause applied while the counter says
+    only how many rows yielded nothing. A renderer naming this count must therefore name
+    the aggregate rather than one of its causes.
     """
 
     files: Tuple[FileLink, ...] = ()

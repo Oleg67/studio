@@ -628,6 +628,12 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         for name in (
             "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
             "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+            # Widens the upward search where `GIT_CEILING_DIRECTORIES` narrows it, so
+            # discovery could settle on an ancestor repository across a mount boundary
+            # instead of the project's own. Covered by name only: constructing a mount
+            # boundary needs privileges a test suite does not have, and clearing the
+            # narrowing variable while leaving the widening one is the asymmetry.
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
         ):
             assert name in cs._GIT_REDIRECT_VARS, name
         # The indexed pairs need no entry of their own: git ignores `GIT_CONFIG_KEY_n`
