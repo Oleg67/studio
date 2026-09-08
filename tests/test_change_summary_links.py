@@ -570,6 +570,71 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         assert report.available is True, report.reason
         assert [f.path for f in report.files] == ["mine.py"], "this project's files, not the decoy's"
 
+    @pytest.mark.parametrize(
+        "env",
+        [
+            pytest.param(
+                {
+                    "GIT_CONFIG_COUNT": "1",
+                    "GIT_CONFIG_KEY_0": "core.excludesFile",
+                    "GIT_CONFIG_VALUE_0": "{excludes}",
+                },
+                id="indexed-pairs",
+            ),
+            pytest.param(
+                {"GIT_CONFIG_PARAMETERS": "'core.excludesfile'='{excludes}'"},
+                id="config-parameters",
+            ),
+            pytest.param({"GIT_CONFIG_GLOBAL": "{config}"}, id="global-config-file"),
+            pytest.param({"GIT_CONFIG_SYSTEM": "{config}"}, id="system-config-file"),
+        ],
+    )
+    def test_ambient_git_config_cannot_hide_a_new_file_from_the_listing(
+        self, tmp_path, monkeypatch, env,
+    ):
+        """Git takes configuration from the environment too, and configuration reaches
+        these queries even where it cannot redirect discovery.
+
+        Measured before the fix: with `core.excludesFile` injected through any of these
+        four interfaces, `ls-files --others --exclude-standard` returned *nothing* for a
+        repository whose untracked file it otherwise lists. So a brand-new file was
+        absent from the digest while the report still called itself available and
+        complete — the silent omission this module exists to prevent, arriving through
+        the environment rather than through the code.
+
+        `core.worktree` is deliberately *not* the case under test: injected this way it
+        is set but ignored for discovery, and only redirects once `GIT_DIR` is also set,
+        which is cleared and covered by the test above.
+        """
+        repo = _repo_with_base(tmp_path)
+        (repo / "brand-new.py").write_text(_code(), encoding="utf-8")
+        excludes = tmp_path / "excludes"
+        excludes.write_text("brand-new.py\n", encoding="utf-8")
+        config = tmp_path / "gitconfig"
+        config.write_text(f"[core]\n\texcludesFile = {excludes}\n", encoding="utf-8")
+        for name, value in env.items():
+            monkeypatch.setenv(name, value.format(excludes=excludes, config=config))
+
+        report = _report(repo)
+
+        assert report.available is True, report.reason
+        assert "brand-new.py" in [f.path for f in report.files], (
+            "an ambient config must not decide what the digest can see"
+        )
+
+    def test_the_config_interfaces_are_cleared_by_name(self):
+        """Names, not just behaviour: git gained the indexed interface after `GIT_DIR`,
+        and a future one would pass the behavioural test above only by accident."""
+        for name in (
+            "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+        ):
+            assert name in cs._GIT_REDIRECT_VARS, name
+        # The indexed pairs need no entry of their own: git ignores `GIT_CONFIG_KEY_n`
+        # and `GIT_CONFIG_VALUE_n` unless the count says how many to read, verified, so
+        # clearing the count clears the family without scanning for indices.
+        assert not [n for n in cs._GIT_REDIRECT_VARS if n.startswith("GIT_CONFIG_KEY")]
+
     def test_every_git_call_site_runs_with_the_sanitised_environment(self):
         """Structural: a new call site that forgets `env=_git_env()` fails here rather
         than in review — which is how the record query slipped through the first time."""

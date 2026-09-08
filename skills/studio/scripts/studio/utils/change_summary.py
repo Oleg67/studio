@@ -91,12 +91,17 @@ _LOG_GIT_EXITED = "change-summary git query exited %d"
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reader-bounds
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-environment
-#: Environment variables that redirect git away from the repository it was pointed at.
+#: Environment variables that let the ambient environment change what these queries
+#: answer. Two mechanisms, both cleared, because naming the directory is not enough on
+#: either count.
 #:
-#: ``cwd=`` is *not* sufficient on its own: an ambient ``GIT_DIR`` overrides it, so a
-#: query about project A answered from project B's repository. Verified —
-#: ``GIT_DIR=b/.git git -C a log`` reports b's commit, not a's. Every one of these is
-#: cleared so the answer describes the project the caller named and nothing else.
+#: The first **redirects which repository git reads**: an ambient ``GIT_DIR`` overrides
+#: ``cwd=``, so a query about project A was answered from project B's repository.
+#: Verified — ``GIT_DIR=b/.git git -C a log`` reports b's commit, not a's.
+#:
+#: The second **changes what git reports about the right repository**, and is described
+#: at the group below. Every variable here is cleared, so the answer describes the
+#: project the caller named, in the state that project is actually in.
 _GIT_REDIRECT_VARS = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -105,6 +110,26 @@ _GIT_REDIRECT_VARS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_CEILING_DIRECTORIES",
+    # The second mechanism: git also takes *configuration* from the environment, and
+    # config reaches these queries even though it cannot redirect discovery. Measured —
+    # with `core.excludesFile` injected through any of the three below,
+    # `ls-files --others --exclude-standard` returned **nothing** for a repository whose
+    # untracked file it otherwise lists. That is the silent omission this module exists
+    # to prevent, arriving through the environment rather than through the code, so the
+    # digest would have called a brand-new file absent while reporting itself complete.
+    #
+    # `core.worktree` is *not* the vector it first appears to be: injected this way it
+    # is set (``git config core.worktree`` echoes it back) but ignored for discovery, so
+    # `--show-toplevel` and the listings stay with the directory git was pointed at. It
+    # only redirects once `GIT_DIR` is also set — verified, and that is cleared above,
+    # which is what makes the two groups here complementary rather than overlapping.
+    "GIT_CONFIG_PARAMETERS",
+    # Gates the indexed `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` pairs: verified that
+    # without a count git ignores them entirely, so clearing the count clears the family
+    # and no unbounded scan for indices is needed.
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
 )
 
 #: Refs tried in order when the caller names no base.
