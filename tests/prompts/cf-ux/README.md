@@ -28,7 +28,7 @@ the `llm-rubric` asserts; sub-100ms text guards catch skill-load failures.
 | Env | Effect |
 |---|---|
 | `REQUEST_TIMEOUT_MS=900000` | promptfoo python-worker timeout (default 300s is too short for sandbox init + cold codex). |
-| `CF_UX_SHARED_SANDBOX=/path` | Reuse a pre-initialized sandbox; skip setup/teardown. |
+| `CF_UX_SHARED_SANDBOX=/path` | Reuse a pre-initialized sandbox; skip setup/teardown. **Point this only at a throwaway directory** — the Claude provider runs with `--permission-mode bypassPermissions`, which is safe against the per-run temp sandbox it normally builds, but writes wherever this says. |
 | `CF_UX_KEEP_SANDBOX=1` | Keep the sandbox after the run; print its path. |
 
 ## Layout
@@ -38,11 +38,37 @@ tests/prompts/cf-ux/
 ├── promptfooconfig.yaml
 ├── providers/
 │   ├── _sandbox.py          — tmpdir + local cfs init context manager
-│   ├── claude_provider.py   — claude -p, JSON output, returns metadata
+│   ├── claude_provider.py   — claude -p, bypassPermissions, stream-json
 │   ├── codex_provider.py    — codex exec, approval=never, workspace-write
 │   └── grader_claude.py     — claude -p --disable-slash-commands (judge)
 └── README.md
 ```
+
+## A run that did not load the skill is an error, not a score
+
+The Claude provider decides from the tool-call trace whether the `cf` skill
+actually executed, and returns a promptfoo **error** when it did not — before
+the rubric ever sees the text.
+
+This matters because the failure is silent and looks like success. Skill
+*execution* asks for permission and `-p` has nobody to ask, so without
+`--permission-mode bypassPermissions` the skill is denied, the agent answers the
+request directly, and the answer is plausible enough for the rubric to pass it.
+The suite then reports confidently on an agent that never loaded Studio. Any
+measurement built on that — question counts, gate behaviour, UX assertions —
+describes the fallback path.
+
+So the check is positive rather than a substring search over the answer: a
+`Skill` tool-use event naming `cf`, whose result is not an error. The metadata
+carries `skill_state` (`ran` / `failed` / `absent`) and `skills_invoked`, and an
+unscored answer is kept under `unscored_output` for diagnosis rather than
+graded. A transcript with no terminal `result` event is an error too — there is
+then no answer to grade and no trace to trust.
+
+Expect errors, not just failures, if the CLI's invocation contract changes
+again. That is the intended behaviour: an error says the suite could not
+measure, which is different from Studio behaving badly, and the two were
+previously indistinguishable.
 
 ## Current baseline (pilot)
 
@@ -88,10 +114,10 @@ and drive the next skill-hardening iteration.
 
 ## Next steps
 
-- Parse `claude -p --output-format stream-json` to capture tool-call
-  traces and assert directly on `Skill` invocations / sub-agent
-  dispatches (would replace several llm-rubric blocks with deterministic
-  checks).
+- Assert directly on sub-agent dispatches from the tool-call trace, the way
+  the `Skill` invocation now is (would replace several llm-rubric blocks
+  with deterministic checks). The stream-json parsing this needs is already
+  in `claude_provider.py`; what is missing is the per-scenario assertions.
 - Cover write-paths end-to-end (`cf-generate` actually creating an ADR
   after inputs are collected) with `--sandbox workspace-write` + per-
   test fresh sandbox.
