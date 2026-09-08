@@ -558,6 +558,35 @@ class TestEveryDegradedLineCarriesItsDenominator:
             "markers: 0 of 9 changed files carry requirement markers",
         ]
 
+    def test_the_two_exclusion_rules_are_independent_where_they_diverge(self, tmp_path, monkeypatch):
+        """Two rules drop events, by different tests, and the divergent case pins both.
+
+        `_is_own_invocation` drops an event by *command* -- this command's own reads, so
+        a digest never reports its own footprint. `_TELEMETRY_EVENTS` drops by *kind*,
+        so any `invocation` or `read` is not a decision whoever issued it. An
+        `invocation` from another command is where they disagree: it survives the first
+        rule and not the second, so it must be counted among `events` and in `by_event`
+        while contributing nothing to `decisions`. Asserting only the agreeing cases
+        would let either rule be widened into the other without a test noticing.
+        """
+        events = [
+            _event("2026-06-01T00:00:00+00:00", "run1", "validation"),
+            {**_event("2026-06-01T00:00:01+00:00", "run1", "invocation"), "command": "resolve-vars"},
+            {**_event("2026-06-01T00:00:02+00:00", "run1", "invocation"), "command": "change-summary"},
+        ]
+        repo = _project_repo(tmp_path, monkeypatch, events=events)
+
+        rc, data = _payload(repo)
+
+        decisions = data["decisions"]
+        assert rc == 0
+        assert decisions["by_event"].get("invocation") == 1, (
+            "another command's invocation is retained; this command's own is not"
+        )
+        assert decisions["events"] == 2, "the validation and the foreign invocation"
+        assert decisions["decisions"] == 1, "only the validation is a decision"
+        assert [r["run_id"] for r in decisions["runs"]] == ["run1"]
+
     def test_the_aggregate_count_is_not_labelled_as_one_of_its_causes(self, tmp_path, monkeypatch):
         """`unreadable` holds every reason no marker could be established, so a file
         whose *scope* could not be determined is counted there too. Labelling the count
@@ -772,7 +801,14 @@ class TestPrivacy:
         (repo / "bin.py").write_bytes(b"x = 1\n\x00binary")
         elsewhere = tmp_path / "elsewhere-shared" / "log.jsonl"
         elsewhere.parent.mkdir()
-        _write_log(elsewhere, DEFAULT_EVENTS)
+        # Every degradation at once, not just the two file/log ones: an event whose
+        # timestamp will not parse and one carrying no run id are separate reported
+        # fields, and they were only ever exercised at unit level against an
+        # `EventSelection` -- never through the real serialisation alongside these
+        # path assertions, which is where a leak would actually surface.
+        undated = dict(_event("not-a-timestamp", "run3", "validation"))
+        runless = dict(_event("2026-06-01T00:00:04+00:00", "", "review"))
+        _write_log(elsewhere, [*DEFAULT_EVENTS, undated, runless])
         monkeypatch.setenv("CFS_DECISION_LOG", str(elsewhere))
         home = os.path.expanduser("~")
         user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
@@ -782,6 +818,8 @@ class TestPrivacy:
 
         assert rc == 0
         assert data["decisions"]["log_overridden"] is True, "the override was in force"
+        assert data["decisions"]["undated"] >= 1, "an undated event was in force"
+        assert data["decisions"]["runless"] >= 1, "a runless event was in force"
         assert [f["reason"] for f in data["changes"]["files"] if f["path"] == "bin.py"] == [core.REASON_FILE_UNREADABLE]
         for needle in (str(tmp_path), str(elsewhere), home):
             assert needle not in out
