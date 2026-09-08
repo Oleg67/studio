@@ -1,6 +1,9 @@
 ---
-version: 1.1.1
+version: 1.2.0
 significant_changes:
+  - version: 1.2.0
+    date: 2026-09-08
+    summary: Recorded ADR-0023, the autonomous interaction default with statically declared gate risk types.
   - version: 1.1.1
     date: 2026-07-27
     summary: Documented the implemented OpenCode v1.18.4 collision-exclusion record and ownership-unproven rerun behavior.
@@ -326,6 +329,7 @@ The following architecture decision records (ADRs) drive the design:
 - `cpt-studio-adr-rebrand-and-mirror-override` — rebrand to Constructor Studio (`cfs`) and global mirror-override capability
 - `cpt-studio-adr-github-release-version-authority` — GitHub Release/tag provenance as the version authority for GitHub-backed proxy and kit state
 - `cpt-studio-adr-thin-skills-module-first` — thin standalone skills, shared runtime modules, canonical artifacts, and unified result envelopes for the AI runtime
+- `cpt-studio-adr-autonomous-default-and-gate-risk` — autonomous interaction mode as the default, with each gate declaring a static risk type (`confirmation`/`decision`/`blocking`); undeclared gates are treated as `blocking`; a `decision` gate resolves only against an explicitly keyed source by exact match, never by inferring intent, and a `blocking` gate is passable only by a fresh explicit authorisation satisfying that gate; a mode selects how already-declared authority is exercised rather than granting any new authority
 
 ### 1.3 Architecture Layers
 
@@ -1570,6 +1574,7 @@ The following design domains do not require dedicated architecture sections. Eac
   - `cpt-studio-adr-prefer-cpt-cli-for-agents` — prefer `cpt` CLI over direct script invocation in agent prompts; graceful fallback to raw Python path
   - `cpt-studio-adr-ralphex-delegation-skill` — dedicated `cf-ralphex` skill with bounded delegation contract for autonomous plan execution via ralphex
   - `cpt-studio-adr-thin-skills-module-first` — thin standalone skills with a module-first runtime and canonical artifact/result contracts
+  - `cpt-studio-adr-autonomous-default-and-gate-risk` — autonomous interaction mode as the default, with each gate declaring a static risk type
 - **Features**: [features/](./features/) — `core-infra.md`, `kit-management.md`, `traceability-validation.md`, `agent-integration.md`, `version-config.md`, `developer-experience.md`, `spec-coverage.md`, `v2-v3-migration.md`, `workspace.md`, `ralphex-delegation.md`, `subagent-registration.md`
 
 ### Specifications
