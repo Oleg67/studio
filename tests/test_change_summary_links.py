@@ -776,6 +776,30 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert total == 6
         assert [status for status, _ in entries] == ["A", "?", "?"]
 
+    @pytest.mark.parametrize("tracked,keep", [(0, 4), (1, 3), (2, 2), (3, 2), (9, 2)])
+    def test_the_sweep_keeps_only_what_the_shared_ceiling_can_still_seat(self, tracked, keep, tmp_path, monkeypatch):
+        """The interleave gives tracked entries at most half the ceiling, so once the diff
+        is in hand the room left for new files is known. The sweep is asked for that many
+        and no more — not the whole ceiling, to be trimmed after the fact."""
+        repo = _repo_with_base(tmp_path)
+        for i in range(tracked):
+            (repo / f"t{i}.py").write_text("x = 1\n", encoding="utf-8")
+        if tracked:
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "tracked")
+        asked = []
+        real = cs._git_records_bounded
+
+        def spy(root, args, keep_arg, **kwargs):
+            asked.append(keep_arg)
+            return real(root, args, keep_arg, **kwargs)
+        monkeypatch.setattr(cs, "_git_records_bounded", spy)
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 4)
+
+        cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert asked == [keep]
+
     def test_a_skipped_record_takes_no_kept_slot_and_is_not_counted(self, tmp_path):
         """Deduplication happens inside the stream. A record the caller already holds —
         here `a.txt`, in the diff as deleted and first in the sweep — neither occupies one

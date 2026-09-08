@@ -1103,9 +1103,10 @@ def _collect_changed_entries(
     git holds in memory to produce it, so streaming it would bound nothing the
     repository does not already. The untracked sweep is the unbounded one — an
     unignored dependency tree can run to hundreds of thousands of paths — so it is
-    streamed: past the ceiling its paths are *counted* but not stored, and it is
-    deduplicated against the diff as it streams, so a path already seen is neither
-    stored nor counted, and takes no slot from a path that is genuinely new.
+    streamed: it keeps only as many paths as the shared ceiling can still seat once the
+    diff is in hand, *counts* the rest, and is deduplicated against the diff as it
+    streams, so a path already seen is neither stored nor counted, and takes no slot
+    from a path that is genuinely new.
 
     Rename detection is pinned with ``-M`` rather than left to the ambient
     ``diff.renames`` setting, because :func:`_walk_name_status` keeps a rename's new
@@ -1145,8 +1146,12 @@ def _collect_changed_entries(
     seen: Dict[str, str] = {}
     for status, rel_path in _walk_name_status(diffed):
         seen.setdefault(rel_path, status)
+    # The sweep keeps only as many paths as the shared ceiling can still seat. The
+    # interleave gives tracked entries at most half of it, so once the diff is in hand
+    # the room left for new files is known, and nothing is retained only to be dropped.
+    keep = MAX_CHANGED_ENTRIES - min(len(seen), (MAX_CHANGED_ENTRIES + 1) // 2)
     swept = _git_records_bounded(
-        project_root, ["ls-files", "--others", "--exclude-standard", "-z"], MAX_CHANGED_ENTRIES,
+        project_root, ["ls-files", "--others", "--exclude-standard", "-z"], keep,
         # Deduplicated inside the stream, before the ceiling. Checked afterwards, a
         # `git rm --cached` file — in the diff already — was counted a second time once
         # past the ceiling, and below it had taken a kept slot from a genuinely new file.
