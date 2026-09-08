@@ -198,7 +198,7 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 - User runs `cfs change-summary --json` → the same lines plus the full data behind each of them, as JSON
 
 **Error Scenarios**:
-- Not a git repository · git unavailable · decision log disabled, absent or unreadable · corrupt log lines · not a Studio project → each states its own reason and denominator, and the exit code is still 0
+- Not a git repository · git unavailable · decision log disabled, absent or unreadable · corrupt log lines · not a Studio project → each states its own reason, and a denominator wherever one exists — a dimension that is unavailable has nothing to count and states its reason alone — and the exit code is still 0
 - No changes against the base → one line, `no changes against <ref>`, naming the base and nothing else: there is nothing to review, so no other dimension is consulted for a line, and a zero-file denominator would restate what the line already says; exit 0
 - Unknown flag → usage error, exit 2 — the only non-zero exit the command has
 
