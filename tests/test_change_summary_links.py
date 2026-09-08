@@ -759,6 +759,23 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         of the minority when the majority alone reaches the cap."""
         assert cs._interleave(first, second, 3) == expected
 
+    def test_a_lopsided_population_keeps_the_minority_on_the_real_path(self, tmp_path, monkeypatch):
+        """The same asymmetry through git: one tracked change beside five new files under a
+        cap of 3. The tracked change is seated, the rest of the cap goes to new files, and
+        the total is the whole population — statuses and count, not the picker alone."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "t.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "tracked")
+        for i in range(5):
+            (repo / f"u{i}.py").write_text("y = 2\n", encoding="utf-8")
+        monkeypatch.setattr(cs, "MAX_CHANGED_ENTRIES", 3)
+
+        entries, total = cs._collect_changed_entries(repo, _git(repo, "rev-parse", "upstream/main"))
+
+        assert total == 6
+        assert [status for status, _ in entries] == ["A", "?", "?"]
+
     def test_a_skipped_record_takes_no_kept_slot_and_is_not_counted(self, tmp_path):
         """Deduplication happens inside the stream. A record the caller already holds —
         here `a.txt`, in the diff as deleted and first in the sweep — neither occupies one
@@ -891,6 +908,34 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
 
         assert result is None
         assert _Endless.reads == 4, "stopped the read after the bound was crossed, not at the deadline"
+        assert any("ValueError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+    def test_a_terminated_record_over_the_bound_is_refused_too(self, tmp_path, monkeypatch, caplog):
+        """The bound applies to a completed record as much as to the unterminated tail;
+        checking the tail alone let a record that ended inside the chunk through."""
+        class _Proc:
+            def __init__(self, *_a, **_k):
+                self.stdout = io.BytesIO(b"x" * 300 + b"\0" + b"a.py\0")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(cs.subprocess, "Popen", _Proc)
+        monkeypatch.setattr(cs, "_MAX_RECORD_BYTES", 200)
+
+        with caplog.at_level("WARNING", logger="studio"):
+            result = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert result is None
         assert any("ValueError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
     def test_the_bounded_reader_keeps_the_cap_and_counts_the_rest(self, tmp_path):

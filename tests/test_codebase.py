@@ -87,6 +87,31 @@ class TestScanRegisteredCodebaseReferences:
         assert code_files_skipped == 1
         assert hits == []
 
+    def test_the_size_ceiling_applies_to_the_bytes_read_not_to_an_earlier_look(self, tmp_path: Path, monkeypatch):
+        """A `stat` followed by an unbounded read trusted the measurement, so a file that
+        grew between the two was read whole. The scan reads through the bounded reader:
+        a file that is past the ceiling at the moment it is read is declined, whatever
+        an earlier look at it said."""
+        from studio.utils import codebase as codebase_module
+
+        monkeypatch.setattr(codebase_module, "_MAX_CODE_FILE_BYTES", 40)
+        code_dir = tmp_path / "src"
+        code_dir.mkdir()
+        big = code_dir / "big.py"
+        big.write_text("# @cpt-begin:cpt-x:p1:inst-a\n")
+        real = codebase_module.read_code_text
+
+        def grows_then_reads(path, **kwargs):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("pass\n" * 20)
+            return real(path, **kwargs)
+        monkeypatch.setattr(codebase_module, "read_code_text", grows_then_reads)
+        ctx = _FakeCtx(tmp_path, [_FakeCodebaseEntry(code_dir, [".py"])])
+
+        hits, code_files_scanned, code_files_skipped = scan_registered_codebase_references(ctx)
+
+        assert (hits, code_files_scanned, code_files_skipped) == ([], 0, 1)
+
     def test_oversized_file_is_skipped_not_read(self, tmp_path: Path, monkeypatch):
         from studio.utils import codebase as codebase_module
 

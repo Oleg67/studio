@@ -134,9 +134,10 @@ REASON_GIT_UNAVAILABLE = "git unavailable"
 REASON_NO_BASE_REF = "no default base ref found"
 REASON_BASE_REF_UNKNOWN = "requested base ref not found"
 REASON_NO_MERGE_BASE = "no merge base with the base ref"
-#: A merge-base miss in a shallow clone says nothing about history: the branch point may
-#: lie beyond the fetched depth. CI checkouts default to depth 1, so this is common.
-REASON_SHALLOW_HISTORY = "history is shallow; the branch point was not fetched"
+#: A merge-base miss in a shallow clone decides nothing: the branch point may lie beyond
+#: the fetched depth, or the histories may be unrelated, and a truncated history cannot
+#: tell which. The reason says so rather than pick one. CI checkouts default to depth 1.
+REASON_SHALLOW_HISTORY ="no merge base in a shallow history; the branch point may lie beyond the fetched depth"
 REASON_NO_BASE_TIME = "base commit has no readable timestamp"
 REASON_NOT_A_PROJECT = "not inside a Studio project"
 REASON_LOG_DISABLED = "decision log disabled"
@@ -371,8 +372,10 @@ def _is_shallow(project_root: Path) -> Tuple[bool, bool]:
 
     Returns ``(shallow, tool_failed)``, like every other probe here. Asked only after a
     merge-base miss, so it costs nothing on the common path, and only to choose between
-    two reasons: a miss in full history is a fact about the branches, a miss in a shallow
-    one is a fact about the fetch. The failure flag is kept rather than dropped: a probe
+    two reasons: a miss in full history is a fact about the branches; a miss in a shallow
+    one is undecidable — the branch point may lie beyond the fetched depth, or the
+    histories may be unrelated, and a truncated history cannot tell the two apart — so it
+    is reported as exactly that. The failure flag is kept rather than dropped: a probe
     that never ran answered neither way, and an earlier version read that as "not
     shallow" and reported unrelated history on the strength of a timeout.
     """
@@ -928,9 +931,12 @@ def _pump_records(
     not, since this reader lists paths and there is no empty path. Whatever is raised in
     here is recorded rather than lost: an exception ends a thread and is printed nowhere,
     and the caller would have read a stopped pump as a finished one — a partial listing
-    as the whole. A record longer than :data:`_MAX_RECORD_BYTES` is such a failure.
+    as the whole. A record longer than :data:`_MAX_RECORD_BYTES` is such a failure,
+    whether it has been terminated or is still accruing in the tail.
     """
     def take(raw: bytes) -> None:
+        if len(raw) > _MAX_RECORD_BYTES:
+            raise ValueError("record exceeds the streamed reader's size bound")
         record = raw.decode(_PATH_ENCODING, _PATH_ERRORS)
         if not record or record in skip:
             return
@@ -1091,8 +1097,8 @@ def _collect_changed_entries(
 ) -> Optional[Tuple[List[Tuple[str, str]], int]]:
     """List ``(status, path)`` for everything changed since ``base_sha``, plus the total.
 
-    Returns ``(entries, total)``: at most :data:`MAX_CHANGED_ENTRIES` entries
-    materialised, and the count of every distinct path git reported. The tracked diff
+    Returns ``(entries, total)``: at most :data:`MAX_CHANGED_ENTRIES` entries returned
+    for examination, and the count of every distinct path git reported. The tracked diff
     is captured whole: its size is bounded by the repository's tracked-file count, which
     git holds in memory to produce it, so streaming it would bound nothing the
     repository does not already. The untracked sweep is the unbounded one — an

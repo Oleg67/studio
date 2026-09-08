@@ -872,17 +872,23 @@ def _code_reference_hit(ref: CodeReference, file_path: Path) -> Dict[str, object
 
 
 def _scan_code_file_references(file_path: Path, ctx) -> Optional[List[Dict[str, object]]]:
-    """Parse one code file for marker references, or None if skipped/unparsable."""
+    """Parse one code file for marker references, or None if skipped/unparsable.
+
+    Read through :func:`read_code_text`, so the size ceiling bounds the bytes actually
+    read. A ``stat`` followed by an unbounded read measured the file and then trusted the
+    measurement: a file that grew between the two was read whole however large it had
+    become, and never declined.
+    """
     if _is_ignored_code_file(file_path, ctx):
         return None
-    try:
-        if file_path.stat().st_size > _MAX_CODE_FILE_BYTES:
+    text, errs = read_code_text(file_path)
+    if text is None:
+        if any(err.get("code") == EC.FILE_TOO_LARGE for err in errs):
             _warn_codebase(f"skipping {file_path}: exceeds {_MAX_CODE_FILE_BYTES}-byte scan limit")
-            return None
-    except OSError as exc:
-        _warn_codebase(f"failed to stat {file_path}: {exc}")
+        else:
+            _warn_codebase(f"failed to read {file_path}: {errs[0].get('code') if errs else 'unknown'}")
         return None
-    cf, errs = CodeFile.from_path(file_path)
+    cf, errs = CodeFile.from_text(file_path, text)
     if errs or cf is None:
         return None
     return [_code_reference_hit(ref, file_path) for ref in cf.references]
