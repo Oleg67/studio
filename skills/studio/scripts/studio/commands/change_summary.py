@@ -172,6 +172,14 @@ def _requirements_line(ids: List[str]) -> Optional[str]:
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-decision-lines
 def _is_own_invocation(event: Dict[str, Any]) -> bool:
+    """Whether ``event`` is a ``change-summary`` invocation — any instance's, not only this one's.
+
+    By kind, deliberately. Every such invocation is a *read* of the log, this process's
+    or another's, and none of them is a decision about the change. Excluding only the
+    current run's would let the previous run's read surface in the next digest, so two
+    consecutive digests of one repository state would differ — the determinism the suite
+    pins would be lost to the digest's own footprint.
+    """
     return event.get("event") == "invocation" and event.get("command") == _SELF_COMMAND
 
 
@@ -200,6 +208,12 @@ def _run_prefix_width(run_ids: List[str]) -> int:
     return width
 
 
+def _run_label(run_id: str, width: int) -> str:
+    """A run's label in the digest: its prefix — or the whole unattributed marker, which
+    is a word rather than an identifier, and cut to eight characters told a reader nothing."""
+    return run_id if run_id == core.RUN_UNATTRIBUTED else run_id[:width]
+
+
 def _decision_lines(selection: core.EventSelection) -> List[str]:
     """State the decisions recorded inside the window, and every way the log fell short.
 
@@ -220,7 +234,7 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         # handle into the log, and a folded run sharing it left a shown label matching
         # two runs there while the digest gave no sign of it.
         width = _run_prefix_width([run_id for run_id, _ in runs])
-        named = ", ".join(f"{run_id[:width]} ×{n}" for run_id, n in shown)
+        named = ", ".join(f"{_run_label(run_id, width)} ×{n}" for run_id, n in shown)
         more = len(runs) - _MAX_NAMED_RUNS
         lines.append(f"runs: {named}" + (f" (+{more} more)" if more > 0 else ""))
     else:
@@ -229,6 +243,10 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         lines.append(f"decision log: {selection.skipped_lines} unparseable line(s) skipped")
     if selection.undated:
         lines.append(f"decision log: {selection.undated} undated event(s) excluded")
+    if selection.runless:
+        # The payload carries this count; a reader of the plain digest is owed it too, or
+        # the runs line under-reports the run breakdown with no sign that anything is missing.
+        lines.append(f"decision log: {selection.runless} event(s) carry no run id")
     if selection.log_overridden:
         lines.append("decision log: shared via CFS_DECISION_LOG; decisions are not attributable to this project")
     return lines
@@ -267,6 +285,10 @@ def _json_safe(value: Any) -> Any:
         try:
             raw = value.encode("utf-8", "surrogateescape")
         except UnicodeEncodeError:
+            # Not a filename byte: some other lone surrogate, most likely a corrupt
+            # decision-log line. Escaped rather than lost -- and said aloud, at the level
+            # the other guards in this module use, so a mangled field has a trail.
+            logger.warning("change-summary payload carried a lone surrogate outside the filename range; escaped")
             raw = value.encode("utf-8", "backslashreplace")
         return raw.decode("utf-8", "backslashreplace")
     if isinstance(value, dict):

@@ -271,6 +271,39 @@ class TestEveryMatrixRowExitsZeroWithAStatedReason:
         assert rc == 2
         assert json.loads(out)["status"] == "ERROR"
 
+    @pytest.mark.parametrize("fixture,extra,exit_code,window", [
+        ("work", [], 0, "available"),
+        ("no-work", [], 0, "no-changes"),
+        ("work", ["--base", "upstream/main"], 0, "available"),
+        ("work", ["--base", "no-such-ref"], 0, core.REASON_BASE_REF_UNKNOWN),
+        ("work", ["--since", "yesterday"], 0, core.REASON_INVALID_SINCE),
+        ("no-repo", [], 0, core.REASON_NOT_A_REPO),
+        ("work", ["--nonsense"], 2, "usage"),
+    ], ids=["default-base+changes", "default-base+none", "named-base", "unknown-base",
+            "bad-since", "not-a-repo", "usage-error"])
+    def test_the_exit_and_status_truth_table(self, fixture, extra, exit_code, window, tmp_path, monkeypatch):
+        """The behaviour matrix as one table: every row asserts its exit code and, in the
+        JSON rendering, the status and the window's availability or stated reason — so a
+        row cannot change its exit or status without this table going red."""
+        if fixture == "no-repo":
+            root = _make_studio_project(tmp_path / "p")
+        else:
+            root = _project_repo(tmp_path, monkeypatch, with_work=(fixture == "work"))
+
+        rc, out = _run(["change-summary", "--json", "--root", str(root), *extra])
+        data = json.loads(out)
+
+        assert rc == exit_code
+        if window == "usage":
+            assert data["status"] == "ERROR"
+        elif window == "available":
+            assert data["status"] == "OK" and data["window"]["available"] is True
+        elif window == "no-changes":
+            assert data["status"] == "OK" and data["lines"] == ["no changes against upstream/main"]
+        else:
+            assert data["status"] == "OK" and data["window"]["available"] is False
+            assert data["window"]["reason"] == window
+
 
 # ------------------------------------------------------------------- the ceiling
 
@@ -303,6 +336,33 @@ class TestTheCeilingIsACeilingNotAQuota:
         assert len(data["lines"]) == 3
         assert data["omitted"] == 4
         assert data["lines"][-1] == "(+4 more line(s) omitted; --json carries everything)"
+
+    def test_a_real_overflow_reports_the_same_omission_in_both_renderings(self, tmp_path, monkeypatch):
+        """More than ten lines composed through `_digest_lines` itself at the default
+        ceiling — every degradation the log can carry, plus a capped scan with a
+        requirement — and the count the last human line states must be the count the
+        payload carries. Lowering the ceiling to force the cut tested the arithmetic on a
+        fixture too small to overflow on its own."""
+        monkeypatch.setattr(cmd, "_project_gate", lambda _root: None)
+        monkeypatch.setattr(core, "resolve_window", lambda *_a, **_k: core.ChangeWindow(
+            project_root=str(tmp_path), base_ref="upstream/main", base_sha="0123456789ab",
+            since="2026-01-01T00:00:00+00:00", available=True, reason=core.REASON_OK,
+        ))
+        monkeypatch.setattr(core, "select_events", lambda _window: core.EventSelection(
+            events=(_event("2026-06-01T00:00:00+00:00", "run1", "validation"),), runs=("run1",),
+            undated=1, runless=1, skipped_lines=1, log_overridden=True, available=True, reason=core.REASON_OK,
+        ))
+        monkeypatch.setattr(core, "link_changed_files", lambda _window: core.LinkReport(
+            files=(core.FileLink(path="m.py", status="M", references=("cpt-x-1",), defines=(), reason=""),),
+            changed=13, examined=9, linked=1, truncated=4, available=True, reason=core.REASON_OK,
+        ))
+
+        data = cmd.compose_digest(tmp_path)
+
+        assert len(data["lines"]) == cmd.LINE_CEILING
+        last = data["lines"][-1]
+        assert last.startswith("(+") and last.endswith(" more line(s) omitted; --json carries everything)")
+        assert int(last[2:].split(" ", 1)[0]) == data["omitted"] > 0
 
     def test_no_line_is_emitted_without_data_behind_it(self, tmp_path, monkeypatch):
         repo = _project_repo(tmp_path, monkeypatch)
@@ -407,6 +467,24 @@ class TestTheDigestNeverCountsItself:
         assert payload["decisions"] == 1
         assert payload["runs"] == [{"run_id": "r1", "decisions": 1}]
 
+    def test_every_change_summary_invocation_is_excluded_whatever_its_run(self):
+        """By kind, not by instance: another process's read of the log is no more a
+        decision than this one's, and excluding only the current run's would let the
+        previous run's read surface in the next digest and break the determinism above."""
+        selection = core.EventSelection(
+            events=(
+                {**_event("2026-06-01T00:00:00+00:00", "r1", "invocation"), "command": "change-summary"},
+                {**_event("2026-06-01T00:00:01+00:00", "r2", "invocation"), "command": "change-summary"},
+                _event("2026-06-01T00:00:02+00:00", "r1", "validation"),
+            ),
+            runs=("r1", "r2"), available=True, reason=core.REASON_OK,
+        )
+
+        payload = cmd._decisions_payload(selection)
+
+        assert (payload["events"], payload["decisions"]) == (1, 1), "both reads gone, the decision kept"
+        assert payload["runs"] == [{"run_id": "r1", "decisions": 1}]
+
     def test_a_window_with_only_telemetry_says_so_with_its_denominator(self):
         selection = core.EventSelection(
             events=(_event("2026-06-01T00:00:00+00:00", "r1", "invocation"),),
@@ -476,7 +554,7 @@ class TestEveryDegradedLineCarriesItsDenominator:
 
     def test_undated_and_shared_log_conditions_each_get_a_line(self):
         selection = core.EventSelection(
-            events=(), runs=(), undated=2, skipped_lines=1, log_overridden=True,
+            events=(), runs=(), undated=2, runless=3, skipped_lines=1, log_overridden=True,
             available=True, reason=core.REASON_OK,
         )
 
@@ -484,8 +562,23 @@ class TestEveryDegradedLineCarriesItsDenominator:
             "why: no decisions recorded in this window (0 event(s) scanned)",
             "decision log: 1 unparseable line(s) skipped",
             "decision log: 2 undated event(s) excluded",
+            "decision log: 3 event(s) carry no run id",
             "decision log: shared via CFS_DECISION_LOG; decisions are not attributable to this project",
         ]
+
+    def test_runless_decisions_are_labelled_in_full_not_by_a_prefix(self):
+        """A decision with no run id lands in the unattributed bucket; cut to eight
+        characters its label read `(unattri`, which told a reader nothing, and the plain
+        digest never said such events existed while the payload counted them."""
+        selection = core.EventSelection(
+            events=(_event("2026-06-01T00:00:00+00:00", "", "validation"),),
+            runs=(), runless=1, available=True, reason=core.REASON_OK,
+        )
+
+        lines = cmd._decision_lines(selection)
+
+        assert lines[1] == f"runs: {core.RUN_UNATTRIBUTED} ×1"
+        assert "decision log: 1 event(s) carry no run id" in lines
 
     def test_the_window_line_names_its_source(self):
         assert cmd._window_line(core.ChangeWindow(
@@ -575,14 +668,39 @@ class TestPrivacy:
         assert lines[0] == f"window: since 2026-01-01T00:00:00+00:00 against upstream/main @ {base}"
         assert lines[1].startswith("changes: 2 file(s)"), "the diff is anchored, not lost"
 
+    def test_the_escape_is_exact_and_survives_json(self):
+        """The contract is `\\xNN` per undecodable byte, every byte, round-tripping through
+        JSON; a test that only checked the digest did not crash could not tell a lost
+        byte from a kept one."""
+        path = "bad" + b"\xff\xfe".decode("utf-8", "surrogateescape") + ".py"
+
+        safe = cmd._json_safe({"path": path})
+
+        assert safe == {"path": "bad\\xff\\xfe.py"}
+        assert json.loads(json.dumps(safe)) == safe
+
+    def test_a_surrogate_that_is_not_a_filename_byte_is_escaped_and_said(self, caplog):
+        """The fallback for a lone surrogate `surrogateescape` did not make — a corrupt log
+        line's `\\ud800` — leaves a trail at warning; the routine filename case stays quiet."""
+        with caplog.at_level("WARNING", logger="studio"):
+            escaped = cmd._json_safe("\ud800x")
+            routine = cmd._json_safe(b"\xff".decode("utf-8", "surrogateescape"))
+
+        assert escaped == "\\ud800x"
+        assert routine == "\\xff"
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1 and "lone surrogate" in warnings[0]
+
     def test_no_output_carries_a_path_home_user_or_author(self, tmp_path, monkeypatch):
         repo = _project_repo(tmp_path, monkeypatch)
         home = os.path.expanduser("~")
         user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
 
-        _, human = _run(["change-summary", "--root", str(repo)])
-        _, as_json = _run(["change-summary", "--json", "--root", str(repo)])
+        rc_human, human = _run(["change-summary", "--root", str(repo)])
+        rc_json, as_json = _run(["change-summary", "--json", "--root", str(repo)])
 
+        assert (rc_human, rc_json) == (0, 0), "a digest was produced; an error text would prove nothing"
+        assert json.loads(as_json)["window"]["available"] is True
         for text in (human, as_json):
             assert str(tmp_path) not in text, "no absolute path, in either rendering"
             assert home not in text
