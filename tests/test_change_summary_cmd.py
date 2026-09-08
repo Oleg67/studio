@@ -333,6 +333,45 @@ class TestTheCeilingIsACeilingNotAQuota:
         assert kept[-1] == "(+2 more line(s) omitted; --json carries everything)"
         assert kept[:-1] == lines[: cmd.LINE_CEILING - 1]
 
+    def test_the_ceiling_cuts_the_run_breakdown_before_any_integrity_line(self):
+        """What the ceiling sacrifices first has to be the least load-bearing line.
+
+        The four "decision log:" lines are how the digest admits it could not see
+        everything -- unreadable lines, undated events, events with no run id, a shared
+        log. Emitted after the run breakdown they were structurally the *first* thing
+        cut, so a large enough change set made the digest stop reporting that three log
+        lines were unreadable in order to keep printing which runs they came from.
+
+        Stated precisely, because the ordering is a priority and not a guarantee: the
+        breakdown is now last, so it is the first line the ceiling takes. A deep enough
+        overflow still reaches an integrity line -- the omission summary occupies a slot
+        of its own, so the smallest overflow already costs two lines -- and what covers
+        that case is the omission count itself plus the JSON, which carries every one of
+        these counts as a field whatever the human rendering had room for.
+        """
+        selection = core.EventSelection(
+            events=(_event("2026-06-01T00:00:00+00:00", "run1", "validation"),),
+            runs=("run1",), skipped_lines=3, undated=2, runless=1,
+            log_overridden=True, available=True, reason=core.REASON_OK,
+        )
+
+        lines = cmd._decision_lines(selection)
+
+        integrity = [i for i, line in enumerate(lines) if line.startswith("decision log:")]
+        breakdown = [i for i, line in enumerate(lines) if line.startswith("runs: ")]
+        assert len(integrity) == 4, "all four degradations are in force"
+        assert breakdown == [len(lines) - 1], "the breakdown is last, so it is cut first"
+        assert max(integrity) < breakdown[0], "every integrity line outranks the breakdown"
+
+        # And in a render that overflows, the breakdown is what went.
+        kept, omitted = cmd._apply_ceiling(["window: ..."] * 5 + lines)
+
+        assert omitted, "the fixture must actually overflow"
+        assert not [line for line in kept if line.startswith("runs: ")]
+        assert len([line for line in kept if line.startswith("decision log:")]) == 3, (
+            "the breakdown first, then integrity lines only as the overflow deepens"
+        )
+
     @pytest.mark.parametrize("over", [-1, 0, 1, 2, 10])
     def test_the_reported_count_is_the_count_of_lines_genuinely_not_returned(self, over):
         """The invariant behind the number, across the boundary, derived independently.
@@ -661,7 +700,9 @@ class TestEveryDegradedLineCarriesItsDenominator:
 
         lines = cmd._decision_lines(selection)
 
-        assert lines[1] == f"runs: {core.RUN_UNATTRIBUTED} ×1"
+        # By content, not by index: the run breakdown now follows the integrity lines so
+        # the ceiling cuts it before them, and this test is about the label, not the order.
+        assert f"runs: {core.RUN_UNATTRIBUTED} ×1" in lines
         assert "decision log: 1 event(s) carry no run id" in lines
 
     def test_the_window_line_names_its_source(self):

@@ -241,9 +241,10 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         width = _run_prefix_width([run_id for run_id, _ in runs])
         named = ", ".join(f"{_run_label(run_id, width)} ×{n}" for run_id, n in shown)
         more = len(runs) - _MAX_NAMED_RUNS
-        lines.append(f"runs: {named}" + (f" (+{more} more)" if more > 0 else ""))
+        detail = [f"runs: {named}" + (f" (+{more} more)" if more > 0 else "")]
     else:
         lines = [f"why: no decisions recorded in this window ({len(events)} event(s) scanned)"]
+        detail = []
     if selection.skipped_lines:
         lines.append(f"decision log: {selection.skipped_lines} unparseable line(s) skipped")
     if selection.undated:
@@ -254,7 +255,15 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         lines.append(f"decision log: {selection.runless} event(s) carry no run id")
     if selection.log_overridden:
         lines.append("decision log: shared via CFS_DECISION_LOG; decisions are not attributable to this project")
-    return lines
+    # The run breakdown goes last, after the integrity lines rather than before them,
+    # because :func:`_apply_ceiling` cuts from the end. Emitted in the other order, the
+    # four lines above were structurally the first thing dropped whenever a change set
+    # produced enough earlier lines to reach the ceiling — so the digest would quietly
+    # stop saying that three log lines were unreadable in order to keep printing which
+    # runs they came from. That is the silent omission this command exists to avoid, and
+    # it also reads better: a caveat about the count sits beside the count, and the
+    # per-run detail is what a reader can most afford to lose.
+    return lines + detail
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary-digest:p1:inst-digest-decision-lines
 
 
