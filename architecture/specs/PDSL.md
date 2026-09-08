@@ -109,6 +109,7 @@ Use this small keyword set before inventing new words.
 | `EMIT_MENU` | Show a named `MENU` block |
 | `MENU` | User choice surface |
 | `TITLE` | User-facing menu title |
+| `TYPE` | Declared gate risk: `confirmation`, `decision` or `blocking` |
 | `OPTIONS` | Valid menu choices and their actions |
 | `INVALID` | Invalid menu input handling |
 | `WAIT` | Stop for user input |
@@ -337,6 +338,117 @@ Menu rules:
 - Invalid input is specified.
 - If the menu is a hard interaction boundary, it ends with `STOP_TURN`.
 - Suggested options belong in `TITLE` or `NOTES`, not hidden in prose.
+
+### Declared gate risk
+
+A menu may declare how much authority it carries, so the decision is read from
+source rather than re-derived while running.
+
+```pdsl
+MENU PlanApprovalGate:
+  TITLE: Approve this plan?
+  TYPE: blocking
+  OPTIONS:
+    1 approve -> CONTINUE CurrentWorkflow
+    2 revise -> CONTINUE PlanRevision
+  INVALID:
+    EMIT "Reply with 1 or 2."
+    WAIT user.reply
+    STOP_TURN
+```
+
+| `TYPE` | meaning |
+|---|---|
+| `confirmation` | the workflow has already derived the answer, **and the action it takes is reversible** |
+| `decision` | the answer changes the work product |
+| `blocking` | irreversible, external, or permission-expanding |
+
+Rules:
+
+- `TYPE` is a **static constant**: one bare lowercase token from the table
+  above, never interpolated, never a variable, never carrying a `WHEN` clause.
+  Where risk genuinely differs by entry mode, emit two differently-typed menus —
+  subject to the constraints on splitting recorded in
+  `cpt-studio-adr-autonomous-default-and-gate-risk`, which a lint cannot check.
+- At most one `TYPE` per menu.
+- **`TYPE` may be omitted.** An undeclared menu is valid, and a *newly added*
+  menu must declare one, so menus migrate one at a time and the undeclared set
+  can only shrink.
+- **What an omitted `TYPE` means at runtime is not implemented here, and this
+  spec does not claim otherwise.** Nothing reads a declaration today, in any
+  mode: the rules above are lint only. The intended contract is that an
+  undeclared menu is treated as `blocking` — the conservative direction, in
+  which a gate asks rather than proceeds.
+- **Nothing resolves a gate from a declared type today**, so this lint changes
+  no runtime behaviour. Two shipped paths *do* auto-resolve gates, and neither
+  reads a declaration: assistant mode's own auto-selection rule
+  (`skills/studio/modules/gates/simple-mode-rules.md:19`), the autonomy overlay
+  (`workflows/brave-new-world.md`), and sub-agent dispatch's pre-set rule
+  (`skills/studio/modules/subagents/dispatch.md:43`), all of which decide by
+  runtime judgement. So an undeclared menu is **not** fail-closed today — it is
+  subject to those three paths exactly as it was before this change.
+- **Enforcing the default here would not make it true.** A lint cannot bind
+  either path; both must be retired or bound to declared types by the change
+  that introduces declaration-driven resolution, which is where the obligation
+  and a test asserting that an omitted `TYPE` produces blocking behaviour
+  belong. Until then, omission is *unvalidated*, and the safety of the
+  grandfathered set rests on those two paths being narrow and reviewed — not on
+  a default that has been demonstrated.
+- **`TYPE` is read only in the menu's declaration region:** from the menu
+  header up to the first section that is not `TITLE` or `TYPE`. A declaration
+  outside a menu, nested in its body, or trailing it is inert, and is reported
+  rather than ignored.
+- **A line indented deeper than the menu's other sub-headers is continuation
+  text of the header above it**, not a header of its own — so a title running
+  onto a second line is read as title text. A `TYPE:` written there is not read
+  as the declaration, and a near-miss written there is not reported. The level
+  is taken from the menu's first sub-header, whichever that is, and measured per
+  menu rather than per block.
+- **Any recognized section other than `TITLE` or `TYPE` ends the region** — `OPTIONS:`,
+  `INVALID:`, and also `NOTES:`, `RULES:`, `ON_ERROR:`, `PURPOSE:` and the
+  rest. Unrecognized prose headers such as `NOTE:` and `ELSE:` do not. So put
+  `TYPE` before `NOTES:`, not after it.
+- A sub-header **in that region** that is a near-miss of `TYPE` is an error, so
+  a typo cannot silently leave a gate undeclared. Reported: a misspelling
+  (`TYP:`, `TPYE:`), a miscasing (`Type:`) when its value is a gate type,
+  decoration around the name (`- TYPE:`, `` `TYPE:` ``, `[TYPE]:`,
+  `**TYPE:**`), a separator other than `:` (`TYPE = blocking`,
+  `TYPE -> blocking`) or none at all (`TYPE blocking`), an invisible or
+  confusable character in the name, and a rejected alternative (`RISK:`,
+  `GATE_TYPE:`).
+- Detection is by edit distance 1 from `TYPE`, counting a transposition as one,
+  after folding case and trimming `_`/`-` from the ends, plus that alias list.
+  The trimming means many decorated spellings reduce to `TYPE` and are caught,
+  so the radius is wide; what matters to an author is which *words* fall in it.
+  The ordinary English words are `HYPE`, `TAPE`, `TYKE`, `TYPED`, `TYPES`,
+  `TYPO` and `TYRE`; `RISK` is flagged deliberately. `GATE:` is **not**
+  flagged: in a codebase about gates it is a plausible sub-header.
+- **The boundary, stated rather than implied.** Decoration is discarded, not
+  listed, so the set of decorated forms is open-ended. What is *not* detected
+  is a declaration with another token embedded in it — `1. TYPE:`,
+  `- [x] TYPE:`, `<b>TYPE</b>:`, `TYPE(gate):` — a near-miss **outside** the
+  region, which is read as prose, a declaration or near-miss written as
+  **continuation text**, indented past the menu's other sub-headers, and a name
+  spelled in lookalikes this map does not carry at **two or more** positions
+  (`ᴛʏPE:`, `ᴛʏᴘᴇ:`), which sit outside the distance-1 radius — one such letter
+  is still caught by distance, and any number of *mapped* ones fold to `TYPE`
+  and are caught too. That last limit is deliberate rather than pending: PDSL
+  is authored in ASCII, so widening the rule would trade a spelling nobody
+  writes for false positives on prose in another script. In every such case the
+  gate is left undeclared, and therefore `blocking` **under the model this spec
+  records** — the failure direction is more friction, never more autonomy. That
+  is the contract rather than current behaviour: as stated above, an undeclared
+  menu is not fail-closed today, because three shipped paths still resolve one
+  by runtime judgement.
+- Everything else is prose, in the region or out of it: `NOTE:`, `NOTES:` and
+  `ELSE:`, any lower- or mixed-case line whose value is **some other token**
+  (`type: skill`, `**Type**: CLI`), and any line with neither a separator nor a
+  gate type as its value (`Tape recorder notes`).
+- An **empty** value is not prose. `type:` and `Type:` are reported as near-misses
+  and `TYPE:` as a non-literal, because a header written with its separator and
+  nothing after it is an abandoned declaration rather than front matter — the one
+  case where a lower-case candidate is reported despite its value not being a gate
+  type.
 
 ---
 

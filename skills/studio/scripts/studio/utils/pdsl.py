@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -118,6 +119,10 @@ class _BlockValidationState:
     in_menu: bool = False
     do_count: int = 0
     rules_count: int = 0
+    menu_name: Optional[str] = None
+    menu_type_line: int = 0
+    gate_scope: bool = False
+    sub_header_indent: Optional[int] = None
 
 
 FENCE_RE = re.compile(r"^```(?P<lang>[A-Za-z0-9_-]+)?\s*$")
@@ -127,6 +132,48 @@ MATCHES_RE = re.compile(r"\bmatches\(\s*[^,]+,\s*(?P<quote>['\"]?)(?P<name>[A-Za
 SECTION_HEAD_RE = re.compile(r"^(?P<section>[A-Z][A-Z0-9_-]*):")
 ACTION_HEAD_RE = re.compile(r"^(?:-\s+)?(?P<token>[A-Z][A-Z0-9_-]*)(?=\b|\s|$)")
 MENU_OPTION_RE = re.compile(r"^(?:-\s+)?(?P<number>\d+)\b.*->")
+
+# A declared gate type is one of these bare tokens and nothing else: an
+# interpolation, a variable or a trailing WHEN is a runtime decision in
+# disguise and fails membership here.
+GATE_TYPES = ("confirmation", "decision", "blocking")
+GATE_HEADER = "TYPE"
+# Sub-headers permitted at an indent inside a MENU. `TYPE` is absent on purpose:
+# it is dispatched before the indent guard, so listing it here would be dead.
+MENU_SUB_HEADERS = frozenset({"TITLE", "OPTIONS", "INVALID"})
+# Keywords considered for this declaration and rejected. Someone reaching for
+# one has written an inert header, so it is reported rather than ignored.
+GATE_HEADER_ALIASES = frozenset({
+    "RISK", "RISK_TYPE", "GATE_RISK", "GATE_TYPE", "MENU_TYPE", "RISK_LEVEL",
+})
+# MENU blocks legitimately carry prose and control-flow headers (NOTE:, ELSE:),
+# so an unrecognized one is reported only when it is a near-miss of the gate
+# keyword. Distance 1 keeps ordinary four-letter words (TIME:, TIPS:, NOTE:)
+# out while still catching TYP:, TYPO: and TYPES:.
+GATE_HEADER_TYPO_DISTANCE = 1
+# A declaration is recognized by discarding decoration rather than by listing
+# the forms it can take: enumerating them is unbounded, and three review passes
+# each found more (backticks, brackets, quotes, an arrow, a zero-width space).
+# Only non-alphanumerics may precede the name, and only a separator or a literal
+# gate type may follow it -- so `Tape recorder notes` stays prose.
+GATE_DECORATION_RE = re.compile(r"^[^A-Za-z0-9]*")
+GATE_NAME_RE = re.compile(r"[^\W\d][\w-]*")
+GATE_SEPARATOR_RE = re.compile(r"^[^A-Za-z0-9]*(?:->|=>|[:=])")
+# Invisible characters are removed by Unicode category rather than by listing
+# them: `Cf` covers zero-width spaces, joiners and bidi controls, `Mn` covers
+# combining marks, and `Cc` covers stray control characters.
+GATE_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Mn"})
+# Cyrillic and Greek capitals that render like Latin ones, so `TYPE` typed with
+# any of them is still read as an attempt at a declaration. NFKC folding handles
+# the fullwidth and mathematical alphabets before this map is applied.
+GATE_NAME_CONFUSABLES = {
+    "\u0410": "A", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041e": "O",
+    "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0423": "Y", "\u0425": "X",
+    "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H",
+    "\u0399": "I", "\u039a": "K", "\u039c": "M", "\u039d": "N", "\u039f": "O",
+    "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+}
+GATE_VALUE_ELLIPSIS = 60
 
 # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-load-rule-registry
 SECTION_HEADERS = {
@@ -142,6 +189,7 @@ SECTION_HEADERS = {
     "NOTES",
     "PATTERNS",
     "TITLE",
+    "TYPE",
     "OPTIONS",
     "INVALID",
 }
@@ -408,8 +456,10 @@ def _validate_block(block: PdslBlock) -> List[PdslFinding]:
         ):
             continue
 
-        if _handle_section_header_line(stripped, raw_line, state):
+        if _handle_section_header_line(block, line_no, stripped, raw_line, findings, state):
             continue
+
+        _report_malformed_gate_header(block, line_no, raw_line, stripped, findings, state)
 
         if _handle_pattern_line(
             block,
@@ -462,29 +512,351 @@ def _handle_unit_or_menu_line(
     state.section = None
     state.menu_expected = None
     state.in_menu = kind == "MENU"
+    # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+    # These two resets are what make the one-declaration-per-menu rule per-menu,
+    # and what lets its finding name the menu.
+    state.menu_name = name
+    state.menu_type_line = 0
+    # Reset per MENU, not per block: a later menu may indent its sub-headers
+    # differently, and a stale level would read that menu's whole body as
+    # continuation text -- suppressing its declaration *and* the pre-existing
+    # option-numbering checks.
+    state.sub_header_indent = None
+    # @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+    # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+    state.gate_scope = state.in_menu
+    # @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
     state.do_count = 0
     state.rules_count = 0
     return True
 
 
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+def _is_header_continuation(indent_len: int, state: _BlockValidationState) -> bool:
+    """True when a line is continuation text of the sub-header above it.
+
+    A MENU's sub-headers share one indent; a line deeper than that is the
+    previous header's own text. Without this, a title running onto a second
+    line was read as a header in its own right -- reported as a misspelled
+    declaration if it resembled one, and worse, *accepted* as the menu's
+    declaration if it began with `TYPE:`.
+
+    The level is learned from the first sub-header rather than compared against
+    a remembered one, so there is no value to bootstrap and no ordering in which
+    the check fails to apply.
+    """
+    return (
+        state.in_menu
+        # Only inside the declaration region. Past it a deeper line is an
+        # action body, where a `TYPE:` is a misplaced declaration worth
+        # reporting rather than prose to be ignored.
+        and state.gate_scope
+        and state.sub_header_indent is not None
+        and indent_len > state.sub_header_indent
+    )
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+def _report_unrecognized_sub_header(
+    block: PdslBlock,
+    line_no: int,
+    raw_line: str,
+    section_name: str,
+    findings: List[PdslFinding],
+    state: _BlockValidationState,
+) -> None:
+    """Report an unrecognized header that is a near-miss of the gate keyword."""
+    # `gate_scope` is only ever assigned from `in_menu`, so it implies it.
+    if state.gate_scope and _is_gate_header_typo(section_name):
+        findings.append(_gate_header_finding(block, line_no, raw_line, section_name))
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+
+
 def _handle_section_header_line(
+    block: PdslBlock,
+    line_no: int,
     stripped: str,
     raw_line: str,
+    findings: List[PdslFinding],
     state: _BlockValidationState,
 ) -> bool:
-    """Process section headers and update parser state."""
+    """Process section headers, and track where a gate declaration is read.
+
+    `in_menu` is deliberately left alone. A MENU's *declaration region* is
+    tracked separately in `gate_scope`: it runs from the MENU header to the
+    first section that is not `TITLE` or `TYPE`. Nothing outside that region is
+    read as a declaration, so there is no need to decide where a MENU "ends" --
+    an earlier attempt to do that suppressed the pre-existing menu numbering
+    checks for the rest of the block.
+    """
     section_head = SECTION_HEAD_RE.match(stripped)
     if not section_head:
         return False
     section_name = section_head.group("section")
-    if section_name not in SECTION_HEADERS:
-        return True
     indent_len = len(raw_line) - len(raw_line.lstrip(" "))
-    if indent_len > 0 and not (state.in_menu and section_name in {"TITLE", "OPTIONS", "INVALID"}):
+    # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+    if state.in_menu and state.sub_header_indent is None:
+        state.sub_header_indent = indent_len
+    # A recognized sub-header is a header wherever it sits: exempting it keeps
+    # an indented `OPTIONS:` opening its section, so the pre-existing option
+    # checks still run. Only non-sub-header lines can be continuation text.
+    if section_name not in MENU_SUB_HEADERS and _is_header_continuation(indent_len, state):
+        return True
+    # @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+    if section_name not in SECTION_HEADERS:
+        _report_unrecognized_sub_header(block, line_no, raw_line, section_name, findings, state)
+        return True
+    # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+    if section_name not in ("TITLE", GATE_HEADER):
+        state.gate_scope = False
+    # @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-region
+    # @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+    if section_name == GATE_HEADER:
+        _handle_gate_type_header(block, line_no, raw_line, stripped, findings, state)
+        return True
+    # @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+    if indent_len > 0 and not (state.in_menu and section_name in MENU_SUB_HEADERS):
         return True
     state.section = section_name
     state.menu_expected = 1 if state.in_menu and section_name == "OPTIONS" else None
     return True
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+def _handle_gate_type_header(
+    block: PdslBlock,
+    line_no: int,
+    raw_line: str,
+    stripped: str,
+    findings: List[PdslFinding],
+    state: _BlockValidationState,
+) -> None:
+    """Validate one `TYPE:` declaration and record that this MENU carries one.
+
+    An absent declaration is valid: an undeclared gate is treated as `blocking`
+    at runtime, so the existing surface migrates gate by gate. Only a
+    declaration the block cannot support is reported here.
+    """
+    if not state.gate_scope:
+        # Outside a MENU, or past its declaration region. `gate_scope` is only
+        # ever set from `in_menu`, so it implies it.
+        findings.append(_finding(
+            block, "PDSL702", line_no, raw_line,
+            f"`{GATE_HEADER}:` declares gate risk where nothing reads it",
+            hint=f"Put {GATE_HEADER} directly under its MENU header, before OPTIONS.",
+        ))
+        return
+    if state.menu_type_line:
+        findings.append(_finding(
+            block, "PDSL701", line_no, raw_line,
+            f"MENU `{_elide(state.menu_name or '')}` declares {GATE_HEADER} more than once",
+            hint=(f"Keep one {GATE_HEADER}; the earlier declaration is at "
+                  f"line {state.menu_type_line}."),
+        ))
+        return
+    state.menu_type_line = line_no
+    value = stripped[len(GATE_HEADER) + 1:].strip()
+    if value not in GATE_TYPES:
+        findings.append(_finding(
+            block, "PDSL700", line_no, raw_line,
+            f"MENU {GATE_HEADER} must be one literal token of {', '.join(GATE_TYPES)} "
+            f"(found `{_elide(value)}`)",
+            hint="Declare risk statically; where it varies, emit two differently-typed gates.",
+        ))
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+def _report_malformed_gate_header(
+    block: PdslBlock,
+    line_no: int,
+    raw_line: str,
+    stripped: str,
+    findings: List[PdslFinding],
+    state: _BlockValidationState,
+) -> None:
+    """Report a gate declaration written in a form PDSL does not accept.
+
+    Decoration is discarded rather than enumerated: only non-alphanumerics may
+    precede the name, and a trailing run of them is skipped before looking for
+    the separator. So a bullet, backticks, brackets, quotes, an arrow or a
+    zero-width space all reduce to the same candidate, and no list of forms has
+    to be kept current.
+
+    Adds a finding only. The line is still offered to the other checks, so a
+    malformed declaration does not mask an unrelated finding on the same line.
+    """
+    # Reached only when `_handle_section_header_line` returned False, so this
+    # line is not a recognized header and needs no second check for one.
+    if not state.gate_scope:
+        return
+    if _is_header_continuation(len(raw_line) - len(raw_line.lstrip(" ")), state):
+        return
+    candidate = _gate_header_candidate(stripped)
+    if candidate is None:
+        return
+    name, has_separator, value = candidate
+    if not _is_gate_header_typo(name):
+        return
+    # PDSL headers are upper-case. A lower- or mixed-case candidate is usually
+    # prose or front matter (`type: skill`, `**Type**: CLI`), so it is reported
+    # only when its value is a gate type -- which is the miscasing #152 names.
+    if not name.isupper() and value and value.lower() not in GATE_TYPES:
+        return
+    # Without a separator this is only a declaration attempt when the value's
+    # first word is a gate type -- so `TYPE | blocking` and `TYPE (blocking)`
+    # are reported while `Tape recorder notes` stays prose.
+    if not has_separator:
+        first_word = GATE_NAME_RE.search(value)
+        if first_word is None or first_word.group().lower() not in GATE_TYPES:
+            return
+    findings.append(_gate_header_finding(block, line_no, raw_line, name))
+
+
+def _gate_header_candidate(stripped: str) -> Optional[Tuple[str, bool, str]]:
+    """Return `(name, has_separator, value)` for a line that may be a declaration.
+
+    Invisible characters are removed and the rest folded per character before
+    the name is located, so a lookalike in the middle of `TYPE` cannot truncate
+    it. Folding may drop a character, so the reported name is recovered through
+    a per-character source map rather than by reusing a folded offset.
+    """
+    visible = "".join(
+        char for char in stripped
+        if unicodedata.category(char) not in GATE_INVISIBLE_CATEGORIES
+    )
+    # Folding can drop a character, so it is not length-preserving and an offset
+    # into the folded string is not an offset into the original. Carry each
+    # folded character's source index so the reported name stays a real slice of
+    # the author's own spelling.
+    folded: List[str] = []
+    origin: List[int] = []
+    for index, char in enumerate(visible):
+        piece = _fold_char(char)
+        if piece:
+            folded.append(piece)
+            origin.append(index)
+    line = "".join(folded)
+    name_match = GATE_NAME_RE.match(line, GATE_DECORATION_RE.match(line).end())
+    if name_match is None:
+        return None
+    rest = line[name_match.end():]
+    reported = visible[origin[name_match.start()]:origin[name_match.end() - 1] + 1]
+    separator = GATE_SEPARATOR_RE.match(rest)
+    if separator is None:
+        return reported, False, rest.strip()
+    return reported, True, rest[separator.end():].strip()
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+def _gate_header_finding(
+    block: PdslBlock,
+    line_no: int,
+    raw_line: str,
+    name: str,
+) -> PdslFinding:
+    """Build the finding for a header that is not a usable gate declaration."""
+    return _finding(
+        block, "PDSL703", line_no, raw_line,
+        f"MENU sub-header `{_elide(name)}:` is not a gate declaration and is ignored",
+        hint=f"Write `{GATE_HEADER}: <{' | '.join(GATE_TYPES)}>`; a near-miss leaves the gate undeclared.",
+    )
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+def _elide(value: str) -> str:
+    """Shorten an author-supplied value so a finding message stays bounded."""
+    if len(value) <= GATE_VALUE_ELLIPSIS:
+        return value
+    return value[:GATE_VALUE_ELLIPSIS - 3] + "..."
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-declaration-literal
+
+
+# @cpt-begin:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
+def _fold_char(char: str) -> str:
+    """Fold one character towards ASCII, but only when it stays one character.
+
+    Offsets must survive folding, because the reported header name is sliced
+    from the author's own spelling. NFKC is not length-preserving -- `\u203c`
+    becomes `!!` -- so a multi-character result is left alone and simply reads
+    as decoration.
+    """
+    folded = unicodedata.normalize("NFKC", char).upper()
+    if len(folded) != 1:
+        # NFKC expands it (`\u203c` -> `!!`). Dropped rather than kept, so it
+        # cannot truncate a name it sits inside; the caller's source map keeps
+        # the reported spelling correct despite the length change.
+        return ""
+    return GATE_NAME_CONFUSABLES.get(folded, folded)
+
+
+def _normalize_header_name(name: str) -> str:
+    """Fold a header name to ASCII capitals for the near-miss test.
+
+    Per-character folding collapses the fullwidth and mathematical alphabets
+    and maps Cyrillic or Greek lookalikes to their Latin twin, so a name that
+    *renders* as `TYPE` is read as an attempt at a declaration however it was
+    typed -- while every offset is preserved.
+    """
+    return "".join(
+        _fold_char(char)
+        for char in name
+        if unicodedata.category(char) not in GATE_INVISIBLE_CATEGORIES
+    )
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Optimal string alignment distance, counting an adjacent transposition as one.
+
+    Plain Levenshtein scores a swap as two edits, which would let the commonest
+    typo class -- `TPYE`, `TYEP` -- past a distance-1 threshold.
+    """
+    rows, columns = len(left) + 1, len(right) + 1
+    grid = [[0] * columns for _ in range(rows)]
+    for row in range(rows):
+        grid[row][0] = row
+    for column in range(columns):
+        grid[0][column] = column
+    for row in range(1, rows):
+        for column in range(1, columns):
+            cost = left[row - 1] != right[column - 1]
+            grid[row][column] = min(
+                grid[row - 1][column] + 1,
+                grid[row][column - 1] + 1,
+                grid[row - 1][column - 1] + cost,
+            )
+            if (
+                row > 1
+                and column > 1
+                and left[row - 1] == right[column - 2]
+                and left[row - 2] == right[column - 1]
+            ):
+                grid[row][column] = min(grid[row][column], grid[row - 2][column - 2] + 1)
+    return grid[-1][-1]
+
+
+def _is_gate_header_typo(raw_name: str) -> bool:
+    """True when a header looks like a botched gate declaration.
+
+    Normalization happens here so every caller sees the same rule: confusable
+    letters are mapped, case is folded, and `_`/`-` are trimmed at the ends
+    where they are decoration but kept inside a name like `RISK_TYPE`.
+
+    The length check is a pure short-circuit -- a name whose length differs by
+    more than the threshold can never be within it -- but it is load-bearing for
+    cost, not correctness: without it a long unrecognized header runs the
+    quadratic grid on every line of a large file to no possible effect.
+    """
+    name = _normalize_header_name(raw_name).strip("_-")
+    if name.replace("-", "_") in GATE_HEADER_ALIASES:
+        return True
+    if abs(len(name) - len(GATE_HEADER)) > GATE_HEADER_TYPO_DISTANCE:
+        return False
+    return _edit_distance(name, GATE_HEADER) <= GATE_HEADER_TYPO_DISTANCE
+# @cpt-end:cpt-studio-algo-pdsl-validation-cli-helper-validate:p1:inst-gate-header-near-miss
 
 
 def _handle_pattern_line(
