@@ -817,18 +817,41 @@ class TestRegistrationAndTheAdvisoryContract:
 
     def test_the_command_is_wired_into_no_gate(self):
         """An advisory found inside a gate is the exact failure this command promised
-        not to ship, so the promise is checked structurally rather than recorded: the
-        Makefile, every workflow file, and any pre-commit configuration."""
+        not to ship, so the promise is checked structurally rather than recorded.
+
+        The file set is **discovered, not listed**: everything under `.github`, at any
+        depth and whatever the extension, plus the Makefile and any pre-commit config.
+        Enumerating `workflows/*.yml` meant a gate added as a composite action, a nested
+        workflow, or a `settings.yml` naming required checks would never be scanned and
+        this test would stay green while the command was wired — the failure it exists
+        to catch, one directory over.
+
+        **Both spellings are rejected.** The CLI name cannot reach a gate without
+        `change-summary`, but the module can: `python -m studio.commands.change_summary`
+        invokes it just as well, and only the hyphen was checked.
+
+        What this cannot cover, stated rather than implied: GitHub's branch protection
+        and rulesets are account-side configuration, not repository text, so no test in
+        this repository can assert on the required-status-check list. `pyproject.toml`
+        is likewise out of scope by intent — it declares tool configuration rather than
+        gate invocations, and its coverage and vulture sections name modules
+        legitimately, so scanning it would fail on a benign entry.
+        """
         root = Path(__file__).resolve().parents[1]
-        workflows = root / ".github" / "workflows"
+        github = root / ".github"
         gate_files = [
-            root / "Makefile",
-            *sorted(workflows.glob("*.yml")), *sorted(workflows.glob("*.yaml")),
-            *(p for p in (root / ".pre-commit-config.yaml", root / ".pre-commit-config.yml") if p.exists()),
+            *(p for p in [root / "Makefile"] if p.exists()),
+            *sorted(p for p in github.rglob("*") if p.is_file()),
+            *(p for p in root.glob(".pre-commit-config.y*ml") if p.is_file()),
         ]
-        assert len(gate_files) >= 2, "the Makefile and at least one workflow must be scanned"
+        names = {p.name for p in gate_files}
+        assert "Makefile" in names, "the Makefile must be scanned"
+        assert any(p.parent.name == "workflows" for p in gate_files), "workflows must be scanned"
+
         for path in gate_files:
-            assert "change-summary" not in path.read_text(encoding="utf-8"), path
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for spelling in ("change-summary", "change_summary"):
+                assert spelling not in text, f"{path} wires {spelling}"
 
     def test_help_names_the_heuristics_that_shape_the_output(self, capsys):
         """A user who only reads --help would otherwise take an excluded file or a
