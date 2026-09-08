@@ -563,8 +563,53 @@ class TestTheDigestNeverCountsItself:
         )
 
         assert cmd._decision_lines(selection) == [
-            "why: no decisions recorded in this window (1 event(s) scanned)",
+            "why: no decisions recorded in this window (1 event(s) in it)",
         ]
+
+    def test_the_no_decisions_line_counts_the_window_not_the_whole_log(self):
+        """The number is the window's population; the word said it was the log's.
+
+        `selection.scanned` is every parseable event in the log, in or out of the
+        window. `events` is what fell inside it with this command's own invocations
+        dropped. The line printed the second and called it "scanned", so a log holding
+        a hundred older entries reported "0 event(s) scanned" having scanned all
+        hundred — a denominator that was not one.
+        """
+        selection = core.EventSelection(
+            events=(_event("2026-06-01T00:00:00+00:00", "r1", "invocation"),),
+            runs=("r1",), scanned=100, available=True, reason=core.REASON_OK,
+        )
+
+        line = cmd._decision_lines(selection)[0]
+
+        assert line == "why: no decisions recorded in this window (1 event(s) in it)"
+        assert "scanned" not in line, "the count is the window's, so the word must not claim the log's"
+        assert "100" not in line, "and the log's own total must not appear -- see the next test"
+
+    def test_the_payload_omits_the_log_total_because_it_grows_every_run(self, tmp_path, monkeypatch):
+        """`scanned` is the denominator a reader might reasonably expect here, and it is
+        left out on purpose rather than by oversight.
+
+        It counts this command's own logged invocations, so carrying it would make two
+        consecutive digests of an unchanged repository differ by one — the determinism
+        `_is_own_invocation` exists to hold. There is no self-excluded variant to offer
+        instead: the selection keeps no events from outside the window, so their
+        invocations cannot be identified and subtracted.
+
+        Asserted as an absence because adding it looks like an improvement. It is the
+        change this test exists to stop.
+        """
+        repo = _project_repo(tmp_path, monkeypatch)
+
+        rc, data = _payload(repo)
+
+        assert rc == 0
+        assert "scanned" not in data["decisions"], (
+            "exporting the log total would break run-to-run byte-identity"
+        )
+        assert {"events", "decisions", "undated", "runless", "skipped_lines"} <= set(data["decisions"]), (
+            "the stable counts are all carried"
+        )
 
 
 # ------------------------------------------------------------------ scope reporting
@@ -682,7 +727,7 @@ class TestEveryDegradedLineCarriesItsDenominator:
         )
 
         assert cmd._decision_lines(selection) == [
-            "why: no decisions recorded in this window (0 event(s) scanned)",
+            "why: no decisions recorded in this window (0 event(s) in it)",
             "decision log: 1 unparseable line(s) skipped",
             "decision log: 2 undated event(s) excluded",
             "decision log: 3 event(s) carry no run id",

@@ -243,7 +243,19 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         more = len(runs) - _MAX_NAMED_RUNS
         detail = [f"runs: {named}" + (f" (+{more} more)" if more > 0 else "")]
     else:
-        lines = [f"why: no decisions recorded in this window ({len(events)} event(s) scanned)"]
+        # Not "scanned", which is what this said and is not what the number is: these
+        # are the events left *after* the window filter and after this command's own
+        # invocations were dropped. A log holding a hundred older entries reported
+        # "0 event(s) scanned" having scanned all hundred.
+        #
+        # The count is left as the population it describes rather than joined to
+        # `selection.scanned`, which would name the log's true total: that total
+        # includes this command's own invocations, so printing it would make two
+        # consecutive digests of an unchanged repository differ by one. Determinism
+        # wins over the wider denominator here, and every event counted below *is* a
+        # telemetry event, since a non-telemetry one would have made this the other
+        # branch.
+        lines = [f"why: no decisions recorded in this window ({len(events)} event(s) in it)"]
         detail = []
     if selection.skipped_lines:
         lines.append(f"decision log: {selection.skipped_lines} unparseable line(s) skipped")
@@ -343,6 +355,14 @@ def _decisions_payload(selection: core.EventSelection) -> Dict[str, Any]:
     decisions = [e for e in events if e.get("event") not in _TELEMETRY_EVENTS]
     return {
         "available": selection.available, "reason": selection.reason,
+        # `selection.scanned` -- every parseable event in the log, in or out of the
+        # window -- is deliberately *not* carried, and it is the one denominator a
+        # reader might expect here. It counts this command's own logged invocations, so
+        # exporting it would make two consecutive digests of an unchanged repository
+        # differ by one, which is the determinism `_is_own_invocation` exists to hold
+        # and `test_consecutive_runs_are_byte_identical_although_each_logs_an_invocation`
+        # pins. There is no self-excluded variant to offer instead: the selection keeps
+        # no events from outside the window, so their invocations cannot be identified.
         "events": len(events), "decisions": len(decisions),
         "by_event": dict(sorted(Counter(str(e.get("event")) for e in events).items())),
         "runs": [{"run_id": run_id, "decisions": n} for run_id, n in _decision_runs(selection)],
