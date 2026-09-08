@@ -279,8 +279,16 @@ class TestEveryMatrixRowExitsZeroWithAStatedReason:
         ("work", ["--since", "yesterday"], 0, core.REASON_INVALID_SINCE),
         ("no-repo", [], 0, core.REASON_NOT_A_REPO),
         ("work", ["--nonsense"], 2, "usage"),
+        # The parser fails in more ways than an unknown flag, and each must still be the
+        # *only* non-zero exit this command produces. An option given without its value
+        # is the form a person actually hits, and it was the one row missing.
+        ("work", ["--base"], 2, "usage"),
+        ("work", ["--since"], 2, "usage"),
+        ("work", ["--root"], 2, "usage"),
+        ("work", ["stray-positional"], 2, "usage"),
     ], ids=["default-base+changes", "default-base+none", "named-base", "unknown-base",
-            "bad-since", "not-a-repo", "usage-error"])
+            "bad-since", "not-a-repo", "usage-unknown-flag", "usage-base-no-value",
+            "usage-since-no-value", "usage-root-no-value", "usage-unexpected-argument"])
     def test_the_exit_and_status_truth_table(self, fixture, extra, exit_code, window, tmp_path, monkeypatch):
         """The behaviour matrix as one table: every row asserts its exit code and, in the
         JSON rendering, the status and the window's availability or stated reason — so a
@@ -540,10 +548,33 @@ class TestEveryDegradedLineCarriesItsDenominator:
 
         assert cmd._changes_lines(report) == [
             "changes: 9 file(s): 2 reference requirements; 1 declare requirements; "
-            "3 excluded by the project's scope policy; 1 deleted; 1 could not be read or parsed; "
+            "3 excluded by the project's scope policy; 1 deleted; 1 yielded no marker information; "
             "1 not regular files",
             "markers: 0 of 9 changed files carry requirement markers",
         ]
+
+    def test_the_aggregate_count_is_not_labelled_as_one_of_its_causes(self, tmp_path, monkeypatch):
+        """`unreadable` holds every reason no marker could be established, so a file
+        whose *scope* could not be determined is counted there too. Labelling the count
+        "could not be read or parsed" told a reader a scope-policy failure was a
+        file-access one. The per-file reason must still name the real cause, which is
+        what makes the aggregate label honest rather than merely vaguer.
+        """
+        repo = _project_repo(tmp_path, monkeypatch)
+        (repo / "scopeless.py").write_text("x = 1\n", encoding="utf-8")
+        monkeypatch.setattr(core, "_in_project_scope", lambda *_a, **_k: None)
+
+        rc, data = _payload(repo)
+
+        assert rc == 0
+        assert data["changes"]["unreadable"] >= 1, "a scope failure lands in the aggregate"
+        reasons = {f["reason"] for f in data["changes"]["files"]}
+        assert core.REASON_SCOPE_UNKNOWN in reasons, "the row keeps its own cause"
+        changes = [line for line in data["lines"] if line.startswith("changes:")]
+        assert any("yielded no marker information" in line for line in changes)
+        assert not any("could not be read or parsed" in line for line in changes), (
+            "the aggregate must not be named after one of its causes"
+        )
 
     def test_a_capped_scan_names_the_population_its_tallies_describe(self):
         """`changed` is every file git reported; the tallies were computed over the

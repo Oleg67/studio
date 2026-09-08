@@ -136,7 +136,12 @@ def _changes_lines(report: core.LinkReport) -> List[str]:
         (report.declaring, "declare requirements"),
         (report.excluded, "excluded by the project's scope policy"),
         (report.deleted, "deleted"),
-        (report.unreadable, "could not be read or parsed"),
+        # The aggregate, named as one. This counter holds every reason no marker could
+        # be established -- undeterminable scope and an unexpected scan failure as well
+        # as a failed read or an unparsable marker -- so labelling it "could not be read
+        # or parsed" told a reader that a scope-policy failure was a file-access one.
+        # The per-file `reason` in the JSON still names the individual cause.
+        (report.unreadable, "yielded no marker information"),
         (report.not_a_file, "not regular files"),
     ]
     detail = "; ".join(f"{count} {label}" for count, label in tallies if count)
