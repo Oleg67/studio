@@ -325,6 +325,25 @@ class TestTheCeilingIsACeilingNotAQuota:
         assert kept[-1] == "(+2 more line(s) omitted; --json carries everything)"
         assert kept[:-1] == lines[: cmd.LINE_CEILING - 1]
 
+    @pytest.mark.parametrize("over", [-1, 0, 1, 2, 10])
+    def test_the_reported_count_is_the_count_of_lines_genuinely_not_returned(self, over):
+        """The invariant behind the number, across the boundary, derived independently.
+
+        The count above is pinned at one length; a review read that as an off-by-one and
+        proposed `len(lines) - LINE_CEILING`, which would report 1 where two source lines
+        are genuinely absent. So `dropped` here is counted by asking which of the input
+        strings are missing from the output — never from the formula — and must equal
+        what the digest says it omitted. Understating is the failure that matters: this
+        command exists so that what it drops is visible.
+        """
+        lines = [f"line {i}" for i in range(cmd.LINE_CEILING + over)]
+
+        kept, omitted = cmd._apply_ceiling(list(lines))
+
+        dropped = len([line for line in lines if line not in kept])
+        assert omitted == dropped, "the stated omission is the real one"
+        assert len(kept) <= cmd.LINE_CEILING, "a ceiling, not a quota"
+
     def test_the_ceiling_is_enforced_on_the_real_path(self, tmp_path, monkeypatch):
         """Lowered, so the real digest overflows; the arithmetic is tested above."""
         repo = _project_repo(tmp_path, monkeypatch)
