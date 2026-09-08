@@ -982,6 +982,15 @@ def _git_records_bounded(
             except subprocess.TimeoutExpired:
                 proc.kill()
                 raise
+    except subprocess.TimeoutExpired as exc:
+        # Caught ahead of its own base class on purpose. A timeout here is always
+        # *post-launch*: `Popen` takes no timeout, so the only two sources are the pump
+        # overrunning the deadline and the `wait` above — git started and then held the
+        # pipe or its exit. That is the stream failing, which the docstring promises is
+        # reported as distinct from a launch failure; falling through to the handler
+        # below reported it with the launch template and lost that distinction.
+        logger.warning(_LOG_GIT_STREAM_FAILED, type(exc).__name__)
+        return None
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning(_LOG_GIT_FAILED, type(exc).__name__)
         return None

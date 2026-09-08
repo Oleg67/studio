@@ -622,6 +622,52 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
             "an ambient config must not decide what the digest can see"
         )
 
+    def test_no_launch_is_handed_a_redirect_variable_and_git_still_answers(
+        self, tmp_path, monkeypatch,
+    ):
+        """Behavioural, for the whole tuple at once: what the child is actually given.
+
+        Tuple membership is not the property that matters — a launch site that forgot
+        `env=_git_env()` would leave every name in the tuple and still hand git the
+        ambient value. So this captures the `env=` handed over at *both* mechanisms,
+        `run` and `Popen`, which are separate call sites.
+
+        Every variable is set to `"1"`, which is hostile to git if honoured rather than
+        merely odd: `GIT_DIR=1` points at a directory that is not a repository, and
+        `GIT_CONFIG_COUNT=1` with no `GIT_CONFIG_KEY_0` is a fatal config error. So the
+        window resolving and the sweep returning is itself the evidence that none of
+        them reached git — including the two whose own effects need a mount boundary or
+        a system config file to observe directly.
+        """
+        repo = _repo_with_base(tmp_path)
+        (repo / "brand-new.py").write_text(_code(), encoding="utf-8")
+        real_run, real_popen = cs.subprocess.run, cs.subprocess.Popen
+        handed = []
+
+        def _run(args, **kwargs):
+            handed.append(kwargs.get("env"))
+            return real_run(args, **kwargs)
+
+        def _popen(args, **kwargs):
+            handed.append(kwargs.get("env"))
+            return real_popen(args, **kwargs)
+
+        # Patched after the fixture, so the fixture's own git calls are not intercepted.
+        for name in cs._GIT_REDIRECT_VARS:
+            monkeypatch.setenv(name, "1")
+        monkeypatch.setattr(cs.subprocess, "run", _run)
+        monkeypatch.setattr(cs.subprocess, "Popen", _popen)
+
+        report = _report(repo)
+
+        assert report.available is True, report.reason
+        assert "brand-new.py" in [f.path for f in report.files], "the sweep ran too"
+        assert len(handed) >= 2, "both mechanisms must have launched"
+        for env in handed:
+            assert env is not None, "a launch without an explicit environment inherits"
+            leaked = [n for n in cs._GIT_REDIRECT_VARS if n in env]
+            assert not leaked, f"handed to git: {leaked}"
+
     def test_the_config_interfaces_are_cleared_by_name(self):
         """Names, not just behaviour: git gained the indexed interface after `GIT_DIR`,
         and a future one would pass the behavioural test above only by accident."""
@@ -1154,7 +1200,13 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
 
         assert result is None
         assert _Hung.killed, "a hung git is not left running"
-        assert any("TimeoutExpired" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+        # The stream template: git launched and then held the pipe or its exit, which
+        # the docstring promises is reported as distinct from a launch failure. Asserting
+        # only that "TimeoutExpired" appeared passed under either template, so the
+        # promise was untested -- and was in fact being broken.
+        assert cs._LOG_GIT_STREAM_FAILED % "TimeoutExpired" in [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
 
     def test_a_sweep_that_holds_the_pipe_open_is_killed_at_the_deadline(self, tmp_path, monkeypatch, caplog):
         """A `read()` on a pipe git keeps open without writing never returns, so a
@@ -1198,7 +1250,13 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert result is None
         assert _Stalled.killed, "a silent git is not left holding the pipe"
         assert time.monotonic() - started < 5, "returned at the deadline, not never"
-        assert any("TimeoutExpired" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+        # The stream template: git launched and then held the pipe or its exit, which
+        # the docstring promises is reported as distinct from a launch failure. Asserting
+        # only that "TimeoutExpired" appeared passed under either template, so the
+        # promise was untested -- and was in fact being broken.
+        assert cs._LOG_GIT_STREAM_FAILED % "TimeoutExpired" in [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
 
     def test_an_unterminated_final_record_is_kept_and_counted(self, tmp_path, monkeypatch):
         """`_git_records` keeps a trailing record with no NUL after it; the streamed
