@@ -352,6 +352,18 @@ class TestTheCeilingIsACeilingNotAQuota:
         assert cmd._decision_lines(selection)[1] == "runs: abcdefgh1 ×1, abcdefgh2 ×1"
         assert cmd._run_prefix_width(["abcdefgh1111", "12345678"]) == 8
 
+    def test_a_folded_run_sharing_a_prefix_still_widens_the_shown_one(self):
+        """The prefix is a handle into the log, so it must be unique among every run in
+        the window, not only the three shown: a fourth run folded into "(+1 more)" that
+        shared eight characters with a shown one left that label matching two runs."""
+        runs = ("abcdefgh1111", "r2", "r3", "abcdefgh2222")
+        events = tuple(
+            _event(f"2026-06-01T00:00:0{i}+00:00", run_id, "validation") for i, run_id in enumerate(runs)
+        )
+        selection = core.EventSelection(events=events, runs=runs, available=True, reason=core.REASON_OK)
+
+        assert cmd._decision_lines(selection)[1] == "runs: abcdefgh1 ×1, r2 ×1, r3 ×1 (+1 more)"
+
 
 # -------------------------------------------------------- the digest never counts itself
 

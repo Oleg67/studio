@@ -187,11 +187,11 @@ def _decision_runs(selection: core.EventSelection) -> List[Tuple[str, int]]:
 
 
 def _run_prefix_width(run_ids: List[str]) -> int:
-    """Shortest prefix length, at least 8, that keeps the shown run ids distinct.
+    """Shortest prefix length, at least 8, that keeps the given run ids distinct.
 
     Two runs sharing their first eight characters rendered as two identical labels, so a
     reader could not tell that two runs, not one, produced the decisions. The width
-    grows until the shown prefixes differ, the way git lengthens short shas.
+    grows until the prefixes differ, the way git lengthens short shas.
     """
     width = 8
     longest = max((len(run_id) for run_id in run_ids), default=width)
@@ -216,7 +216,10 @@ def _decision_lines(selection: core.EventSelection) -> List[str]:
         kinds = ", ".join(f"{kind} ×{n}" for kind, n in sorted(by_kind.items(), key=lambda kv: (-kv[1], kv[0])))
         lines = [f"why: {len(decisions)} decision(s) in {len(runs)} run(s): {kinds}"]
         shown = runs[:_MAX_NAMED_RUNS]
-        width = _run_prefix_width([run_id for run_id, _ in shown])
+        # Widened over every run in the window, not only the shown ones: the prefix is a
+        # handle into the log, and a folded run sharing it left a shown label matching
+        # two runs there while the digest gave no sign of it.
+        width = _run_prefix_width([run_id for run_id, _ in runs])
         named = ", ".join(f"{run_id[:width]} ×{n}" for run_id, n in shown)
         more = len(runs) - _MAX_NAMED_RUNS
         lines.append(f"runs: {named}" + (f" (+{more} more)" if more > 0 else ""))
