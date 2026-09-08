@@ -654,10 +654,18 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
 
         assert launches >= 3
         assert source.count("env=_git_env()") == launches, "every launch, not most of them"
-        # And every captured launch decodes with the codec the streamed reader uses, so
-        # the two readers of one path cannot disagree about its name.
-        assert source.count("encoding=_PATH_ENCODING,") == source.count("subprocess.run(")
-        assert "raw.decode(_PATH_ENCODING, _PATH_ERRORS)" in source
+        # And no reader of a *path* may use `text=True`, which switches on universal
+        # newlines as well as decoding and so translated CR inside a filename. Only
+        # `_git_query` may, because it reads refs, shas and timestamps -- values git
+        # itself forbids a control character in. Both record readers instead decode raw
+        # slices with the one shared call, which is what makes one path one string.
+        # Counted with the trailing comma, which is the keyword-argument form: the
+        # comments here discuss `text=True` several times, and a bare substring count
+        # measured the prose as well as the code.
+        assert source.count("text=True,") == 1, "only the single-line reader may translate"
+        assert source.count(".decode(_PATH_ENCODING, _PATH_ERRORS)") == 2, (
+            "the captured record reader and the streamed one, each decoding for itself"
+        )
 
     def test_a_failed_untracked_sweep_makes_the_listing_unavailable(self, tmp_path, monkeypatch):
         """`or []` turned a failed `ls-files` into an empty one, so the report came back
@@ -929,6 +937,75 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
 
         assert captured == streamed == ["café.py"]
         assert total == 1
+
+    @pytest.mark.parametrize("raw", [b"cr\rname.py", b"crlf\r\nname.py", b"lf\nname.py"],
+                             ids=["cr", "crlf", "lf"])
+    def test_both_readers_keep_the_bytes_git_gave_them(self, tmp_path, raw):
+        """The codec was shared, but `text=True` also switches on *universal newlines*,
+        and `subprocess` offers no way to turn that off.
+
+        So the captured reader translated a CR in a path to LF while the streamed one,
+        decoding raw slices, kept it. A path may hold any byte but NUL and `/`, and only
+        NUL separates records here — nothing in this output needs translating, so
+        anything translated is corruption. Every newline shape is checked, because the
+        translation rewrites lone CR, CRLF and neither in three different ways.
+        """
+        repo = _repo_with_base(tmp_path)
+        with open(os.path.join(os.fsencode(repo), raw), "wb") as handle:
+            handle.write(b"x = 1\n")
+        expected = raw.decode(cs._PATH_ENCODING, cs._PATH_ERRORS)
+        args = ["ls-files", "--others", "--exclude-standard", "-z"]
+
+        captured = cs._git_records(repo, args)
+        streamed, total = cs._git_records_bounded(repo, args, 5)
+
+        assert captured == [expected], "the captured reader must not translate"
+        assert streamed == [expected]
+        assert total == 1
+
+    def test_a_tracked_path_holding_a_cr_is_not_reported_as_deleted(self, tmp_path):
+        """The consequence that mattered more than the missed dedup.
+
+        A translated name opens nothing, so `_link_changed_entry` found no file where
+        git had just said one changed — and a *tracked* file sitting on disk was
+        reported as "file no longer present", which is a false statement about a
+        present file rather than a merely incomplete one.
+        """
+        repo = _repo_with_base(tmp_path)
+        with open(os.path.join(os.fsencode(repo), b"tracked\rname.py"), "wb") as handle:
+            handle.write(_code().encode("utf-8"))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "cr")
+
+        report = _report(repo)
+
+        assert report.available is True, report.reason
+        assert report.deleted == 0, "the file is present"
+        assert [(f.path, f.reason) for f in report.files] == [("tracked\rname.py", cs.REASON_OK)]
+        assert [f.references for f in report.files] == [(MARKER,)], "and it was read"
+
+    def test_a_cr_path_in_both_listings_is_deduplicated(self, tmp_path):
+        """The reported failure, end to end. `git rm --cached` leaves one file deleted in
+        the index and untracked on disk, so it appears in both listings — and with the
+        two readers naming it differently the sweep's dedup missed it, so one file was
+        two rows and every counter was inflated."""
+        repo = _make_repo(tmp_path / "r")
+        with open(os.path.join(os.fsencode(repo), b"both\rname.py"), "wb") as handle:
+            handle.write(b"x = 1\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "cr")
+        # The base must *contain* the file, or `git diff` never reports it and only the
+        # sweep sees it — which is one row whether or not the readers agree, and the
+        # first version of this test passed the very mutation it was written to catch.
+        _point_ref(repo, "refs/remotes/upstream/main", _git(repo, "rev-parse", "HEAD"))
+        _commit(repo, "later.txt")
+        _git(repo, "rm", "-q", "--cached", "both\rname.py")
+
+        report = _report(repo)
+
+        rows = [f.path for f in report.files]
+        assert rows.count("both\rname.py") == 1, f"one file, one row: {rows}"
+        assert "both\nname.py" not in rows, "and not a second row under a translated name"
 
     def test_a_stream_that_fails_part_way_is_a_tool_failure_not_a_shorter_listing(
         self, tmp_path, monkeypatch, caplog,
