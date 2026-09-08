@@ -396,6 +396,11 @@ class TestTheCeilingIsACeilingNotAQuota:
 
         _, lines = _digest(repo)
 
+        # The non-empty guard comes first because it is what gives the other three
+        # assertions their force: `all([])` is True and `not any(...)` is vacuously true
+        # on an empty list, so a regression suppressing the whole digest satisfied every
+        # one of them. This fixture always yields the window, changes and markers lines.
+        assert len(lines) >= 3, f"the digest itself must be present: {lines}"
         assert not any(line.startswith("decision log:") for line in lines), "nothing was skipped or undated"
         assert not any(line.startswith("changes: scan capped") for line in lines)
         assert all(lines), "no blank lines"
