@@ -137,6 +137,18 @@ _GIT_REDIRECT_VARS = (
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
+    # Toggles whether system config participates at all, so it changes the answer in the
+    # opposite direction to the two above — and directly reverses them. Measured:
+    # `GIT_CONFIG_SYSTEM=<file setting core.excludesFile>` emptied the untracked sweep,
+    # and adding `GIT_CONFIG_NOSYSTEM=1` brought the file back. Left inherited, an
+    # ambient value would decide whether the machine's real ``/etc/gitconfig`` is
+    # consulted, which is the same ambient dependence as the rest of this tuple.
+    #
+    # With this, the set is the whole documented config surface — `git help config`
+    # lists exactly ``GIT_CONFIG_COUNT``, ``GIT_CONFIG_KEY_n``, ``GIT_CONFIG_VALUE_n``,
+    # ``GIT_CONFIG_GLOBAL``, ``GIT_CONFIG_SYSTEM`` and ``GIT_CONFIG_NOSYSTEM``, plus the
+    # undocumented ``GIT_CONFIG_PARAMETERS`` above, which was verified by measurement.
+    "GIT_CONFIG_NOSYSTEM",
 )
 
 #: Refs tried in order when the caller names no base.

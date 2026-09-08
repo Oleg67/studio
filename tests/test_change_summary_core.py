@@ -598,8 +598,25 @@ class TestPrivacy:
             "submodule", "archive", "bundle", "daemon", "send-pack", "fetch-pack",
         }
         issued: list = []
+        launches = {"run": 0, "popen": 0}
 
-        def _capture(args, **_kwargs):
+        def _capture_run(args, **_kwargs):
+            """Captures, then answers *successfully* with nothing.
+
+            Raising here made the test blind twice over: the diff query is the first
+            thing the collector runs, so a failure short-circuited it and the streamed
+            sweep below was never reached, let alone observed. An empty success lets the
+            collector walk on to the sweep.
+            """
+            launches["run"] += 1
+            issued.append(list(args))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        def _capture_popen(args, **_kwargs):
+            """The streamed reader launches through `Popen`, which patching `run` does
+            not intercept -- the asymmetry that hid this launch. Only the argv is needed,
+            so it captures and fails; the caller treats that as a tool failure."""
+            launches["popen"] += 1
             issued.append(list(args))
             raise OSError("not run")
 
@@ -612,7 +629,8 @@ class TestPrivacy:
             since="2026-01-01T00:00:00+00:00", available=True,
         )
 
-        monkeypatch.setattr(cs.subprocess, "run", _capture)
+        monkeypatch.setattr(cs.subprocess, "run", _capture_run)
+        monkeypatch.setattr(cs.subprocess, "Popen", _capture_popen)
         cs.resolve_window(repo)
         # The linkage half lives in a later change; exercise it when present so this
         # test covers every git call site on whichever branch it runs. It takes its
@@ -622,6 +640,13 @@ class TestPrivacy:
             linker(window)
 
         assert issued, "the helper must actually have been exercised"
+        # Both launch mechanisms, counted separately. The claim is "every git subcommand
+        # this module issues", and a launch nobody observed cannot support it: with only
+        # `run` patched, changing the sweep's subcommand to `ls-remote` left this test
+        # green. Asserting each count is non-zero is what stops that recurring, since a
+        # future refactor moving a query between the two would otherwise pass silently.
+        assert launches["run"], "the captured queries must have been exercised"
+        assert launches["popen"] and linker is not None, "the streamed query too"
         for argv in issued:
             subcommand = argv[1] if len(argv) > 1 else ""
             assert subcommand not in remote_capable, f"remote-capable: {subcommand}"

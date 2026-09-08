@@ -628,6 +628,10 @@ class TestTheListingIsAboutTheProjectNamedAndNothingElse:
         for name in (
             "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
             "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+            # Reverses the two above rather than adding to them: it decides whether
+            # system config participates at all. Measured -- `GIT_CONFIG_SYSTEM` alone
+            # emptied the sweep, and adding this brought the file back.
+            "GIT_CONFIG_NOSYSTEM",
             # Widens the upward search where `GIT_CEILING_DIRECTORIES` narrows it, so
             # discovery could settle on an ancestor repository across a mount boundary
             # instead of the project's own. Covered by name only: constructing a mount
