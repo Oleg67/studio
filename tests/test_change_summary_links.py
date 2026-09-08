@@ -950,6 +950,8 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         anything translated is corruption. Every newline shape is checked, because the
         translation rewrites lone CR, CRLF and neither in three different ways.
         """
+        if os.name == "nt":
+            pytest.skip("CR and LF are not legal file-name characters on Windows")
         repo = _repo_with_base(tmp_path)
         with open(os.path.join(os.fsencode(repo), raw), "wb") as handle:
             handle.write(b"x = 1\n")
@@ -971,6 +973,8 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         reported as "file no longer present", which is a false statement about a
         present file rather than a merely incomplete one.
         """
+        if os.name == "nt":
+            pytest.skip("a carriage return is not a legal file-name character on Windows")
         repo = _repo_with_base(tmp_path)
         with open(os.path.join(os.fsencode(repo), b"tracked\rname.py"), "wb") as handle:
             handle.write(_code().encode("utf-8"))
@@ -989,6 +993,8 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         the index and untracked on disk, so it appears in both listings — and with the
         two readers naming it differently the sweep's dedup missed it, so one file was
         two rows and every counter was inflated."""
+        if os.name == "nt":
+            pytest.skip("a carriage return is not a legal file-name character on Windows")
         repo = _make_repo(tmp_path / "r")
         with open(os.path.join(os.fsencode(repo), b"both\rname.py"), "wb") as handle:
             handle.write(b"x = 1\n")
