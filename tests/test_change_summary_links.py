@@ -1307,6 +1307,84 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5) == (["a.py", "b.py"], 2)
         assert cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 1) == (["a.py"], 2)
 
+    def test_text_mode_translates_a_cr_which_is_why_these_readers_take_bytes(self):
+        """The mechanism behind the fix, pinned without a CR file name or git.
+
+        The three tests above need a real path containing CR, which Windows rejects, so
+        they skip there and this regression class had no platform-independent cover.
+        A mock cannot supply it: patching `subprocess.run` replaces the very code that
+        does the translating, so a faked `stdout` proves nothing about text mode. What
+        *is* portable is the translation itself — so this drives a real subprocess whose
+        output holds a CR, reads it both ways, and shows they disagree.
+
+        Any Python interpreter will do, so it runs everywhere the suite does.
+        """
+        emit = [sys.executable, "-c",
+                r"import sys; sys.stdout.buffer.write(b'cr\rname.py\x00')"]
+
+        as_text = subprocess.run(
+            emit, capture_output=True, text=True,
+            encoding=cs._PATH_ENCODING, errors=cs._PATH_ERRORS, check=True,
+        ).stdout
+        as_bytes = subprocess.run(emit, capture_output=True, check=True).stdout
+
+        assert as_bytes.split(b"\0")[0] == b"cr\rname.py", "the bytes git actually wrote"
+        assert as_text.split("\0")[0] == "cr\nname.py", (
+            "text mode rewrites the CR -- this is the corruption the fix avoids"
+        )
+        assert as_text.split("\0")[0] != as_bytes.split(b"\0")[0].decode(
+            cs._PATH_ENCODING, cs._PATH_ERRORS,
+        ), "so the two readers could not have agreed while one used text mode"
+
+    def test_both_readers_agree_on_a_cr_record_without_touching_the_filesystem(
+        self, tmp_path, monkeypatch,
+    ):
+        """The paired decode, portable: identical bytes in, identical strings out.
+
+        The fake for `run` honours the `text`/`encoding` keywords the way `subprocess`
+        itself does — decode, then translate newlines — rather than ignoring them. That
+        is what makes this catch a reader switching back to text mode *on the value*
+        instead of on a type error: with `text=True` restored it returns the translated
+        string, exactly as the real thing would, and the comparison below fails on the
+        corrupted path. The test above proves the fake's translation is faithful.
+        """
+        record = b"cr\rname.py\0crlf\r\nname.py\0"
+        expected = ["cr\rname.py", "crlf\r\nname.py"]
+
+        def _fake_run(*_a, **kwargs):
+            if not (kwargs.get("text") or kwargs.get("encoding")):
+                return subprocess.CompletedProcess([], 0, record, b"")
+            decoded = record.decode(kwargs.get("encoding") or "utf-8",
+                                    kwargs.get("errors") or "strict")
+            translated = decoded.replace("\r\n", "\n").replace("\r", "\n")
+            return subprocess.CompletedProcess([], 0, translated, "")
+
+        class _Emitting:
+            def __init__(self, *_a, **_k):
+                self.stdout = io.BytesIO(record)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(cs.subprocess, "run", _fake_run)
+        monkeypatch.setattr(cs.subprocess, "Popen", _Emitting)
+
+        captured = cs._git_records(tmp_path, ["ls-files", "-z"])
+        streamed, total = cs._git_records_bounded(tmp_path, ["ls-files", "-z"], 5)
+
+        assert captured == expected, "the captured reader keeps both newline shapes"
+        assert streamed == expected
+        assert total == 2
+
     def test_a_launch_failure_is_a_warning_and_a_miss_is_not(self, tmp_path, monkeypatch, caplog):
         """The tool failing and git answering "no" must not look alike in a log."""
         repo = _make_repo(tmp_path / "r")
