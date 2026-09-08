@@ -520,23 +520,46 @@ class TestTheDigestNeverCountsItself:
                if '"command": "change-summary"' in line]
         assert len(own) == 6, "the exclusion did the work, not an unwritten log"
 
-    def test_telemetry_and_own_invocations_are_not_decisions(self):
+    def test_the_whole_event_population_is_partitioned_in_both_renderings(self):
+        """One fixture holding every category, asserted in both renderings at once.
+
+        Two independent rules act here and each existing test exercised a slice of the
+        result, so a regression could retain self events or misclassify a foreign
+        command's telemetry without any single assertion failing on the *partition*:
+
+        * a **decision** (`validation`, `r1`) — counted, and its run is named;
+        * **read telemetry** (`r1`) — kept among `events`, not a decision;
+        * a **foreign command's invocation** (`resolve-vars`, `r2`) — survives the
+          self-exclusion, which is by command, and is dropped by the telemetry rule,
+          which is by kind. This is the case the two rules disagree on;
+        * **this command's own invocation** (`change-summary`, `r9`) — gone entirely,
+          so `r9` exists in `runs` yet must not appear in either rendering;
+        * a **telemetry-only run** (`r2`, and `r9` before exclusion) — no decisions, so
+          absent from the run breakdown while its events still count.
+        """
         selection = core.EventSelection(
             events=(
                 _event("2026-06-01T00:00:00+00:00", "r1", "validation"),
                 _event("2026-06-01T00:00:01+00:00", "r1", "read"),
-                {**_event("2026-06-01T00:00:02+00:00", "r9", "invocation"), "command": "change-summary"},
+                {**_event("2026-06-01T00:00:02+00:00", "r2", "invocation"), "command": "resolve-vars"},
+                {**_event("2026-06-01T00:00:03+00:00", "r9", "invocation"), "command": "change-summary"},
             ),
-            runs=("r1", "r9"), available=True, reason=core.REASON_OK,
+            runs=("r1", "r2", "r9"), available=True, reason=core.REASON_OK,
         )
 
         lines = cmd._decision_lines(selection)
         payload = cmd._decisions_payload(selection)
 
         assert lines == ["why: 1 decision(s) in 1 run(s): validation ×1", "runs: r1 ×1"]
-        assert payload["events"] == 2, "the read stays; the digest's own invocation is gone"
-        assert payload["decisions"] == 1
-        assert payload["runs"] == [{"run_id": "r1", "decisions": 1}]
+        assert payload["events"] == 3, "the read and the foreign invocation stay; our own is gone"
+        assert payload["decisions"] == 1, "only the validation"
+        assert payload["by_event"] == {"invocation": 1, "read": 1, "validation": 1}, (
+            "exactly one invocation survives -- the foreign one, not ours"
+        )
+        assert payload["runs"] == [{"run_id": "r1", "decisions": 1}], (
+            "the telemetry-only runs carry no decisions, so they are not named"
+        )
+        assert "r2" not in lines[1] and "r9" not in lines[1]
 
     def test_every_change_summary_invocation_is_excluded_whatever_its_run(self):
         """By kind, not by instance: another process's read of the log is no more a
