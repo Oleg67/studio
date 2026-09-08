@@ -88,6 +88,11 @@ _MAX_RECORD_BYTES = 1 << 20
 #: ``OSError``'s text can carry a path.
 _LOG_GIT_FAILED = "change-summary git query could not run: %s"
 _LOG_GIT_EXITED = "change-summary git query exited %d"
+#: Distinct from :data:`_LOG_GIT_FAILED` on purpose: git launched and then the stream
+#: broke part-way, which is a different fact for an operator than git never starting.
+#: Named for the same reason as the other two, and because a test asserting the exact
+#: message needs the template rather than a substring of it.
+_LOG_GIT_STREAM_FAILED = "change-summary git query stream failed: %s"
 # @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reader-bounds
 
 # @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-environment
@@ -970,7 +975,7 @@ def _git_records_bounded(
                 # prefix presented as the listing is the silent omission this module
                 # exists to prevent — so nothing is returned rather than part of it.
                 proc.kill()
-                logger.warning("change-summary git query stream failed: %s", type(failure[0]).__name__)
+                logger.warning(_LOG_GIT_STREAM_FAILED, type(failure[0]).__name__)
                 return None
             try:
                 returncode = proc.wait(timeout=max(0.0, deadline - time.monotonic()))

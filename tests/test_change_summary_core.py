@@ -191,7 +191,11 @@ class TestANamedBaseIsNeverSilentlyIgnored:
             assert cs._git_query(tmp_path, ["status"]) == (None, True)
 
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert warnings and "OSError" in warnings[0]
+        # Against the shared template, not a substring of it. `"OSError" in message`
+        # passed for any wording that happened to name the type, so the three readers
+        # could drift back to three phrasings -- which is the thing the constant exists
+        # to prevent -- without a test noticing.
+        assert warnings and warnings[0] == cs._LOG_GIT_FAILED % "OSError"
         assert "/secret/bin/git" not in warnings[0]
 
 

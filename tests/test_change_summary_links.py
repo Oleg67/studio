@@ -971,7 +971,12 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
 
         assert result is None, "a prefix is not the listing"
         assert _Proc.killed
-        assert any("OSError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+        # The stream template, not the launch one: git started and the pipe then broke,
+        # which is a different fact for an operator. Asserted exactly, so the two
+        # cannot converge on one wording and lose that distinction.
+        assert cs._LOG_GIT_STREAM_FAILED % "OSError" in [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ], "the shared template, not merely a message naming the type"
 
     def test_a_record_that_never_ends_is_bounded_not_buffered_forever(self, tmp_path, monkeypatch, caplog):
         """`keep` bounds how many records are stored, not how long one may grow; a child
@@ -1094,6 +1099,20 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         repo = _make_repo(tmp_path / "r")
 
         assert cs._git_records_bounded(repo, ["rev-parse", "--verify", "refs/heads/no-such"], 5) is None
+
+    def test_a_launch_failure_and_a_broken_stream_do_not_share_one_message(self):
+        """Two different facts for an operator: git never started, versus git started
+        and the pipe broke part-way.
+
+        Pinned here rather than left to the two tests that assert each message, because
+        those compare against the templates themselves — so if the two names ever became
+        one value, both would still pass while the log lost the distinction. Verified: a
+        mutation aliasing one to the other passed the whole streaming suite until this
+        existed.
+        """
+        assert cs._LOG_GIT_FAILED != cs._LOG_GIT_STREAM_FAILED
+        assert "could not run" in cs._LOG_GIT_FAILED
+        assert "stream failed" in cs._LOG_GIT_STREAM_FAILED
 
     def test_the_bounded_reader_degrades_when_git_cannot_launch(self, tmp_path, monkeypatch, caplog):
         def _no_git(*_a, **_k):
@@ -1219,7 +1238,7 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         with caplog.at_level("WARNING", logger="studio"):
             assert cs._git_records(repo, ["diff"]) is None
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert warnings and "OSError" in warnings[0]
+        assert warnings and warnings[0] == cs._LOG_GIT_FAILED % "OSError"
         assert "/secret/path" not in warnings[0], "the type, not the message"
 
 
