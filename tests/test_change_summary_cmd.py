@@ -708,6 +708,31 @@ class TestPrivacy:
                 assert not re.search(rf"\b{re.escape(user)}\b", text)
             assert "Test User" not in text and "test@example.com" not in text, "no commit author"
 
+    def test_degraded_inputs_carry_no_path_either(self, tmp_path, monkeypatch):
+        """The degraded fields are where a path would leak if anywhere: a file that could
+        not be read carries a reason, and a shared log carries the fact of its override.
+        With both in force, neither the project root, the override path, the home
+        directory nor the user may appear in the serialised payload."""
+        repo = _project_repo(tmp_path, monkeypatch)
+        (repo / "bin.py").write_bytes(b"x = 1\n\x00binary")
+        elsewhere = tmp_path / "elsewhere-shared" / "log.jsonl"
+        elsewhere.parent.mkdir()
+        _write_log(elsewhere, DEFAULT_EVENTS)
+        monkeypatch.setenv("CFS_DECISION_LOG", str(elsewhere))
+        home = os.path.expanduser("~")
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or ""
+
+        rc, out = _run(["change-summary", "--json", "--root", str(repo)])
+        data = json.loads(out)
+
+        assert rc == 0
+        assert data["decisions"]["log_overridden"] is True, "the override was in force"
+        assert [f["reason"] for f in data["changes"]["files"] if f["path"] == "bin.py"] == [core.REASON_FILE_UNREADABLE]
+        for needle in (str(tmp_path), str(elsewhere), home):
+            assert needle not in out
+        if user and user not in MARKER:
+            assert not re.search(rf"\b{re.escape(user)}\b", out)
+
 
 # ---------------------------------------------------------------------- fail-safe
 
