@@ -41,7 +41,7 @@ to be declared, and re-resolving it here would duplicate that gate for cosmetic 
 @cpt-algo:cpt-studio-algo-developer-experience-change-summary:p1
 """
 
-# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-datamodel
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reader-bounds
 from __future__ import annotations
 
 import logging
@@ -80,7 +80,9 @@ _PATH_ERRORS = sys.getfilesystemencodeerrors()
 #: grow: a child that never writes a NUL was otherwise buffered without limit. Far above
 #: any path a repository holds, and far below the point where it would matter.
 _MAX_RECORD_BYTES = 1 << 20
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reader-bounds
 
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-environment
 #: Environment variables that redirect git away from the repository it was pointed at.
 #:
 #: ``cwd=`` is *not* sufficient on its own: an ambient ``GIT_DIR`` overrides it, so a
@@ -120,7 +122,9 @@ _DEFAULT_BASE_REFS = (
     "origin/master",
     "master",
 )
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-git-environment
 
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reason-vocabulary
 # Reasons are module constants so the renderer and the tests share one vocabulary
 # instead of matching on prose that can drift.
 REASON_OK = ""
@@ -137,7 +141,7 @@ REASON_NO_MERGE_BASE = "no merge base with the base ref"
 #: A merge-base miss in a shallow clone decides nothing: the branch point may lie beyond
 #: the fetched depth, or the histories may be unrelated, and a truncated history cannot
 #: tell which. The reason says so rather than pick one. CI checkouts default to depth 1.
-REASON_SHALLOW_HISTORY ="no merge base in a shallow history; the branch point may lie beyond the fetched depth"
+REASON_SHALLOW_HISTORY = "no merge base in a shallow history; the branch point may lie beyond the fetched depth"
 REASON_NO_BASE_TIME = "base commit has no readable timestamp"
 REASON_NOT_A_PROJECT = "not inside a Studio project"
 REASON_LOG_DISABLED = "decision log disabled"
@@ -180,8 +184,10 @@ MAX_CHANGED_ENTRIES = 1000
 #: discards real information (see :func:`_canonical_run_id`). Sharing a label is
 #: cosmetic; dropping an event is not.
 RUN_UNATTRIBUTED = "(unattributed)"
+# @cpt-end:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-reason-vocabulary
 
 
+# @cpt-begin:cpt-studio-algo-developer-experience-change-summary:p1:inst-change-summary-datamodel
 @dataclass(frozen=True)
 class ChangeWindow:
     """The span of work a digest covers.

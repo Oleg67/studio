@@ -240,7 +240,7 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 **Output**: The span of work a change digest covers, and the decision-log events recorded inside it
 
 **Rules**:
-1. [x] - `p1` - Define the window and selection result types as immutable records, and the reason vocabulary shared by producer and renderer so an unavailable dimension is always named rather than shown as empty - `inst-change-summary-datamodel`
+1. [x] - `p1` - Define the window and selection result types as immutable records, so a snapshot of what git said cannot be edited after the counts describing it were taken - `inst-change-summary-datamodel`
 2. [x] - `p1` - Answer read-only git queries as one line of output or nothing, keeping a tool failure apart from a valid negative so a timeout is never reported as a conclusion about history - `inst-change-summary-git-query`
 3. [x] - `p1` - Detect whether the project root sits inside a git work tree, telling not-a-repository apart from a repository without a working tree and from git itself failing to answer - `inst-change-summary-detect-repo`
 4. [x] - `p1` - Resolve the base ref, preferring the canonical remote over a fork's lagging default, and honour or refuse an explicitly requested ref rather than substituting a fallback - `inst-change-summary-default-base`
@@ -267,6 +267,9 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 25. [x] - `p1` - Stream the one git query whose output the repository does not bound, keeping records up to the ceiling and counting the rest as they pass, so the cost the ceiling exists to bound is the cost actually bounded; read it against the query timeout so a git that holds the pipe open in silence is killed and reported rather than waited on forever; and report a stream that failed part-way as a tool failure, never as a shorter listing - `inst-change-summary-git-stream`
 26. [x] - `p1` - Share the ceiling between tracked and untracked entries by taking from each in turn once it bites, so brand-new files are never the first thing dropped from a large change set - `inst-change-summary-share-ceiling`
 27. [x] - `p1` - Split the streamed bytes into records as they arrive, judging each against the records the caller already holds before it can take a kept slot or add to the count; bound the length of one record so a stream that never delimits cannot grow without limit; decode with the same codec as every other git reader so one path is one string; and record any failure for the caller rather than let the thread end unseen - `inst-change-summary-pump-records`
+28. [x] - `p1` - Fix the bounds every git reader in this module obeys — how long one query may run, the codec a path is decoded with, and the longest single record a stream may buffer — in one place, so the captured reader and the streamed reader cannot disagree about the same file's name or about when to give up - `inst-change-summary-reader-bounds`
+29. [x] - `p1` - Establish which repository git answers about and which commit it is compared against: clear every environment variable that redirects git away from the directory it was pointed at, since naming the directory alone is not sufficient, and prefer the canonical remote's own default branch over a fork's, which lags it - `inst-change-summary-git-environment`
+30. [x] - `p1` - Name every outcome this module can report as one shared vocabulary, so producer, renderer and tests agree on what an unavailable dimension is called rather than matching on prose that drifts, and bound how many changed entries are examined from the feature's own premise rather than arbitrarily - `inst-change-summary-reason-vocabulary`
 
 ## 4. States (CDSL)
 
