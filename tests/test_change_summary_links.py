@@ -962,6 +962,47 @@ class TestTheCeilingIsSharedAndTheSweepIsStreamed:
         assert result is None
         assert any("ValueError" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")
 
+    def test_an_oversized_record_makes_the_whole_listing_unavailable(self, tmp_path, monkeypatch):
+        """The unit above shows the reader returns no answer; this shows the absence
+        reaches the report as unavailable with its reason — not as an empty, available
+        untracked list, which an `or ([], 0)` fallback in the collector would produce
+        while quietly dropping every new file."""
+        repo = _repo_with_base(tmp_path)
+        (repo / "m.py").write_text(_code(), encoding="utf-8")
+        _git(repo, "add", "m.py")
+        _git(repo, "commit", "-q", "-m", "add")
+
+        class _Proc:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"x" * 300 + b"\0")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        real_popen = subprocess.Popen
+
+        def only_the_sweep_is_faked(args, *rest, **kwargs):
+            # `subprocess.run` launches through the same `Popen`, so the window's and the
+            # diff's queries must still reach git; only the untracked sweep is stood in for.
+            return _Proc() if "ls-files" in args else real_popen(args, *rest, **kwargs)
+        monkeypatch.setattr(cs.subprocess, "Popen", only_the_sweep_is_faked)
+        monkeypatch.setattr(cs, "_MAX_RECORD_BYTES", 200)
+
+        report = _report(repo)
+
+        assert report.available is False, "a listing the sweep could not complete is not a listing"
+        assert report.reason == cs.REASON_DIFF_UNAVAILABLE
+        assert report.files == ()
+
     def test_the_bounded_reader_keeps_the_cap_and_counts_the_rest(self, tmp_path):
         repo = _repo_with_base(tmp_path)
         for i in range(5):
