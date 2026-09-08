@@ -98,7 +98,9 @@ class TestScanRegisteredCodebaseReferences:
         code_dir = tmp_path / "src"
         code_dir.mkdir()
         big = code_dir / "big.py"
-        big.write_text("# @cpt-begin:cpt-x:p1:inst-a\n")
+        # Valid content, so the old stat-then-read path would have *scanned* the grown
+        # file rather than rejected a malformed marker; only the ceiling declines it.
+        big.write_text("pass\n")
         real = codebase_module.read_code_text
 
         def grows_then_reads(path, **kwargs):
