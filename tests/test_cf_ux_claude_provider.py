@@ -44,9 +44,9 @@ def _skill_result(call_id: str = "t1", *, is_error: bool = False) -> dict:
     ]}}
 
 
-def _result(text: str = "the answer", cost: float = 0.01) -> dict:
+def _result(text: str = "the answer", cost: float = 0.01, **overrides) -> dict:
     return {"type": "result", "subtype": "success", "result": text,
-            "session_id": "s1", "num_turns": 3, "total_cost_usd": cost}
+            "session_id": "s1", "num_turns": 3, "total_cost_usd": cost, **overrides}
 
 
 def _stream(*events: dict) -> str:
@@ -62,9 +62,11 @@ def run_provider(tmp_path, monkeypatch):
     def _fake_sandbox():
         yield tmp_path
 
-    def _make(stdout: str, returncode: int = 0, stderr: str = ""):
+    def _make(stdout: str, returncode: int = 0, stderr: str = "", raises: Exception | None = None):
         def _fake_run(cmd, **_kwargs):
             seen["cmd"] = list(cmd)
+            if raises is not None:
+                raise raises
             return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
         monkeypatch.setattr(claude_provider, "sandbox", _fake_sandbox)
@@ -112,6 +114,59 @@ class TestARunThatLoadedTheSkillIsScored:
         assert out["cost"] == 0.02
         assert out["metadata"]["skill_state"] == "ran"
         assert out["metadata"]["num_turns"] == 3
+        assert out["metadata"]["unparsed_lines"] == 0, "a clean transcript dropped nothing"
+
+    def test_a_namespaced_cf_skill_is_still_the_cf_skill(self, run_provider):
+        """`plugin:skill` is how a skill from a marketplace is named, so the
+        trailing segment is the identifier to compare."""
+        out, _seen = run_provider(
+            _stream(_skill_call(skill="studio:cf"), _skill_result(), _result()),
+        )
+
+        assert out["output"] == "the answer"
+        assert out["metadata"]["skill_state"] == "ran"
+
+    def test_the_metadata_names_the_skill_and_keeps_the_input_beside_it(self, run_provider):
+        """`skills_invoked` used to hold `'{"command": "cf"}'` — a serialized
+        payload under a key promising a name. The raw input is still worth having
+        for diagnosis, so it keeps its own key instead of borrowing this one."""
+        out, _seen = run_provider(
+            _stream(_skill_call(skill="studio:cf"), _skill_result(), _result()),
+        )
+
+        assert out["metadata"]["skills_invoked"] == ["cf"]
+        assert out["metadata"]["skill_call_inputs"] == ['{"command": "studio:cf"}']
+
+    def test_the_request_text_is_not_listed_as_a_skill_name(self, run_provider):
+        """Which key holds the name is not contractual, so every string value is
+        a candidate — but only the ones shaped like an identifier. Otherwise a
+        field promising names reports the user's sentence as one of them."""
+        call = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "cf", "args": "write a PRD for the billing service",
+            }},
+        ]}}
+
+        out, _seen = run_provider(_stream(call, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_state"] == "ran"
+        assert out["metadata"]["skills_invoked"] == ["cf"]
+
+    def test_a_result_event_with_no_subtype_is_still_an_answer(self, run_provider):
+        """Only a subtype that is present and says otherwise means a short turn.
+        An unfamiliar event shape must not be able to manufacture failures."""
+        bare = {"type": "result", "result": "the answer", "session_id": "s1"}
+
+        out, _seen = run_provider(_stream(_skill_call(), _skill_result(), bare))
+
+        assert out["output"] == "the answer"
+
+    def test_two_result_events_are_read_as_ending_in_the_last(self, run_provider):
+        out, _seen = run_provider(
+            _stream(_skill_call(), _skill_result(), _result("first"), _result("second")),
+        )
+
+        assert out["output"] == "second"
 
     def test_a_skill_that_ran_alongside_a_failed_unrelated_tool_still_counts(self, run_provider):
         """Only the `Skill` call's own result decides this. An unrelated tool
@@ -168,7 +223,72 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
-        assert out["metadata"]["skills_invoked"], "and it says which did run"
+        assert out["metadata"]["skills_invoked"] == ["superpowers"], "and it says which did run"
+
+    def test_a_skill_whose_name_merely_begins_with_cf_is_not_the_cf_skill(self, run_provider):
+        out, _seen = run_provider(
+            _stream(_skill_call(skill="cf-generate"), _skill_result(), _result()),
+        )
+
+        assert "output" not in out
+        assert "none of them named 'cf'" in out["error"]
+
+    def test_argument_text_naming_cf_is_not_the_skill_naming_cf(self, run_provider):
+        """The prompt this suite sends is `/cf <request>`, so every scenario's
+        argument text carries "cf". Under substring containment a competing skill
+        that quoted the user message back was scored as the cf skill running —
+        the false positive the whole PR exists to remove, reintroduced by the
+        matcher itself."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming",
+                "args": "the user asked: /cf write a PRD for cf-studio",
+            }},
+        ]}}
+
+        out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
+
+        assert "output" not in out
+        assert "none of them named 'cf'" in out["error"]
+
+    def test_a_failed_cf_call_beside_a_successful_other_skill_is_not_a_run(self, run_provider):
+        """Evidence has to be bound per call. "Some Skill call succeeded" and
+        "some payload names cf" were both true here while the cf call itself
+        errored."""
+        out, _seen = run_provider(_stream(
+            _skill_call("A", skill="cf"),
+            _skill_call("B", skill="superpowers:brainstorming"),
+            _skill_result("A", is_error=True),
+            _skill_result("B"),
+            _result("drafted directly"),
+        ))
+
+        assert "output" not in out
+        assert "came back as an error" in out["error"]
+
+    def test_a_cf_call_with_no_result_at_all_is_not_a_confirmed_run(self, run_provider):
+        """Absence of a result is not a non-error result. A trace cut off after
+        the call — a killed CLI, a truncated stream — is the case this module
+        exists to refuse, so it cannot be the case it waves through."""
+        out, _seen = run_provider(_stream(_skill_call(), _result("answered anyway")))
+
+        assert "output" not in out
+        assert "no result in the transcript" in out["error"]
+
+    def test_a_repeated_call_id_collapses_to_the_last_one(self, run_provider):
+        """The id is the only binding between a call and its result, so a
+        collision has to resolve one way. Last wins, and it can only take
+        evidence away: here the cf call is overwritten by a later rival sharing
+        its id, and the verdict is refusal rather than an unexamined pass."""
+        out, _seen = run_provider(_stream(
+            _skill_call("dup", skill="cf"),
+            _skill_call("dup", skill="superpowers"),
+            _skill_result("dup"),
+            _result(),
+        ))
+
+        assert "output" not in out
+        assert "none of them named 'cf'" in out["error"]
 
 
 # ------------------------------------------------------------------ fail-closed
@@ -179,11 +299,85 @@ class TestAnUnreadableRunIsNeverScored:
         """Without the terminal event there is no answer to grade and no transcript
         to trust. Returning the raw text would hand the rubric something to score
         with no idea what produced it."""
-        out, _seen = run_provider(_stream(_skill_call(), _skill_result()))
+        transcript = _stream(_skill_call(), _skill_result())
+
+        out, _seen = run_provider(transcript)
 
         assert "output" not in out
         assert "no result event" in out["error"]
-        assert out["metadata"]["stdout_tail"]
+        assert out["metadata"]["stdout_tail"].endswith(json.dumps(_skill_result()))
+
+    def test_the_missing_result_error_names_both_causes(self, run_provider):
+        """A budget ceiling reached mid-turn ends the stream exactly as an
+        unhonoured `--output-format` does, and the two lead to opposite fixes:
+        raise the budget, or chase a CLI contract change. Naming only the second
+        sent triage after a bug that was not there."""
+        out, seen = run_provider(_stream(_skill_call(), _skill_result()))
+
+        budget = seen["cmd"][seen["cmd"].index("--max-budget-usd") + 1]
+        assert f"--max-budget-usd {budget}" in out["error"], "the ceiling it may have hit"
+        assert "stream-json" in out["error"], "or the regression it may be instead"
+
+    @pytest.mark.parametrize("ending", [
+        {"subtype": "error_max_turns"},
+        {"subtype": "error_during_execution"},
+        {"is_error": True},
+    ])
+    def test_a_turn_that_stopped_short_is_not_graded(self, run_provider, ending):
+        """The skill can load and the turn still fail — hit max turns, hit the
+        budget, error out. `result` then holds whatever had been written when the
+        limit landed, and grading that fragment reports on Studio for a run that
+        never finished."""
+        out, _seen = run_provider(
+            _stream(_skill_call(), _skill_result(), _result("half a gate", **ending)),
+        )
+
+        assert "output" not in out
+        assert "did not finish the turn" in out["error"]
+        assert out["metadata"]["skill_state"] == "ran", "the skill loaded; the turn is what failed"
+        assert out["metadata"]["unscored_output"] == "half a gate"
+
+    def test_a_dropped_line_is_counted_where_the_verdict_is_read(self, run_provider):
+        """A line that will not parse can be a dropped `tool_result`, and the
+        verdict is read off exactly those. Skipping one silently let the evidence
+        shrink without the answer admitting it."""
+        transcript = (
+            json.dumps(_skill_call()) + "\n"
+            + "{ truncated mid-line\n"
+            + json.dumps(_skill_result()) + "\n"
+            + json.dumps(_result()) + "\n"
+        )
+
+        out, _seen = run_provider(transcript)
+
+        assert out["metadata"]["unparsed_lines"] == 1
+
+    def test_a_timeout_reports_how_long_it_ran_and_where(self, run_provider, tmp_path):
+        """850s under the 900s worker deadline is a documented failure mode. It
+        used to come back as a bare error string, so a wave of them could not be
+        told apart from runs that failed instantly."""
+        out, _seen = run_provider(
+            "", raises=subprocess.TimeoutExpired(cmd=["claude"], timeout=850),
+        )
+
+        assert f"timed out after {claude_provider.CALL_TIMEOUT_S}s" in out["error"]
+        assert set(out["metadata"]) == {"duration_s", "sandbox"}
+        assert out["metadata"]["sandbox"] == str(tmp_path)
+
+    def test_a_setup_timeout_is_not_blamed_on_the_cli(self, monkeypatch):
+        """`git` and the in-tree `cfs init` carry their own deadlines. Reported as
+        "claude timed out after 850s", they pointed triage at a process that had
+        not started yet."""
+        def _fake_sandbox():
+            raise subprocess.TimeoutExpired(cmd=["git", "init"], timeout=180)
+
+        monkeypatch.setattr(claude_provider, "sandbox", _fake_sandbox)
+
+        out = claude_provider.call_api("write a PRD")
+
+        assert "sandbox setup timed out after 180s" in out["error"]
+        assert "git" in out["error"]
+        assert "claude" not in out["error"], "the CLI was never reached"
 
     def test_a_non_json_stream_is_an_error(self, run_provider):
         out, _seen = run_provider("not json at all\nnor this\n")
@@ -206,7 +400,40 @@ class TestAnUnreadableRunIsNeverScored:
         assert out["output"] == "survived"
         assert out["metadata"]["skill_state"] == "ran"
 
-    def test_a_non_zero_exit_still_reports_the_exit(self, run_provider):
+    def test_a_non_zero_exit_still_reports_the_exit(self, run_provider, tmp_path):
         out, _seen = run_provider("", returncode=2, stderr="unknown flag")
 
         assert "claude exited 2" in out["error"]
+        assert out["metadata"]["sandbox"] == str(tmp_path), "which tree, as elsewhere"
+
+
+# --------------------------------------------------- what bypassPermissions rests on
+
+class TestTheSandboxIsWipedEvenWhenTheRunDies:
+    """`bypassPermissions` is defensible because the tree it writes into is
+    temporary and always removed. That is a claim about `_sandbox.sandbox()`, so
+    these drive the real one — the rest of the suite fakes it away."""
+
+    def test_the_directory_is_gone_after_the_invocation_raises(self, tmp_path, monkeypatch):
+        sandbox_module = pytest.importorskip("_sandbox")
+        monkeypatch.delenv("CF_UX_SHARED_SANDBOX", raising=False)
+        monkeypatch.delenv("CF_UX_KEEP_SANDBOX", raising=False)
+        monkeypatch.setattr(sandbox_module, "_SANDBOX_PARENT", tmp_path / "cf-ux-sandboxes")
+        # `cfs init` in a fresh tree is minutes of work and is not what is under
+        # test here; the process-wide signal handlers would outlive the test.
+        monkeypatch.setattr(sandbox_module, "_init_sandbox", lambda root: None)
+        monkeypatch.setattr(sandbox_module, "_install_handlers_once", lambda: None)
+        seen: dict = {}
+
+        def _dies(cmd, **kwargs):
+            seen["cwd"] = Path(kwargs["cwd"])
+            assert seen["cwd"].is_dir(), "the CLI is handed a real directory to write in"
+            raise RuntimeError("the CLI died mid-run")
+
+        monkeypatch.setattr(claude_provider.subprocess, "run", _dies)
+
+        out = claude_provider.call_api("write a PRD")
+
+        assert "unexpected: RuntimeError" in out["error"]
+        assert not seen["cwd"].exists(), "and the directory does not outlive the run"
+        assert seen["cwd"] not in sandbox_module._LIVE_SANDBOXES

@@ -58,12 +58,33 @@ The suite then reports confidently on an agent that never loaded Studio. Any
 measurement built on that — question counts, gate behaviour, UX assertions —
 describes the fallback path.
 
-So the check is positive rather than a substring search over the answer: a
-`Skill` tool-use event naming `cf`, whose result is not an error. The metadata
-carries `skill_state` (`ran` / `failed` / `absent`) and `skills_invoked`, and an
-unscored answer is kept under `unscored_output` for diagnosis rather than
-graded. A transcript with no terminal `result` event is an error too — there is
-then no answer to grade and no trace to trust.
+So the check is positive rather than a substring search over the answer: one
+`Skill` tool-use event whose input names `cf`, and a non-error `tool_result`
+bound to *that* call's id. Each half of that matters.
+
+- The name is compared **whole**, after dropping any `plugin:` namespace. The
+  prompt is `/cf <request>`, so the argument text carries "cf" on every
+  scenario here — under substring containment a competing skill that quoted the
+  user message back counted as this one running.
+- The result must belong to the cf call. "Some `Skill` call succeeded" and
+  "some call named cf" can both hold while the cf call is the one that errored.
+- No result at all is not a non-error result. A trace cut off after the call is
+  refused, not read as a success.
+
+Three more shapes are errors for the same reason — there is no answer to grade,
+or no trace to trust:
+
+| Shape | Why it cannot be scored |
+|---|---|
+| No terminal `result` event | Nothing to grade, and the transcript is incomplete. Names both causes: the `--max-budget-usd` ceiling reached mid-turn ends the stream exactly as an unhonoured `--output-format` does. |
+| `result` with a non-success `subtype` | The turn stopped short (`error_max_turns`, `error_during_execution`), so `result` holds a fragment, not an answer — even when the skill did load. An *absent* subtype is not treated this way: an unfamiliar shape should not manufacture failures. |
+| A line that will not parse | Counted in `unparsed_lines` rather than dropped silently, because a lost line can be a lost `tool_result` and the verdict above is read off exactly those. |
+
+Metadata: `skill_state` (`ran` / `failed` / `absent`), `skills_invoked` (the
+names), `skill_call_inputs` (those inputs verbatim, for when a name did not
+resolve), `unparsed_lines`, and `unscored_output` — the answer that was withheld
+from the grader, kept for diagnosis. Every return, answer or error, carries
+`duration_s` and `sandbox`.
 
 Expect errors, not just failures, if the CLI's invocation contract changes
 again. That is the intended behaviour: an error says the suite could not

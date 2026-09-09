@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from _sandbox import SandboxError, sandbox
 
@@ -38,26 +39,48 @@ DEFAULT_EFFORT = os.environ.get("CF_UX_CLAUDE_EFFORT", "low")
 # there the agent writes where it is told to.
 PERMISSION_MODE = "bypassPermissions"
 
+#: Cost ceiling for one scenario. Named because the error text for a transcript
+#: that stops early has to be able to point at it as a cause.
+MAX_BUDGET_USD = "0.30"
+
 #: The tool Claude Code reports when it executes a skill.
 _SKILL_TOOL = "Skill"
-#: The skill this suite exists to measure. Matched loosely against the tool
-#: input, since only `cf-*` skills are installed in the sandbox and the input's
-#: key for the skill name is not part of any stable contract.
+#: The skill this suite exists to measure, compared whole against each string in
+#: the tool input. Substring containment will not do: the prompt is `/cf …`, so
+#: the input's *argument* text carries "cf" on every scenario in this suite, and
+#: a competing skill (`superpowers:brainstorming`) quoting the user message back
+#: would have counted as this one running.
 _SKILL_NAME = "cf"
+#: Skill identifiers may be namespaced (`plugin:skill`); the trailing segment is
+#: the name. Splitting on these and not on `-` is what keeps a hypothetical
+#: `cf-generate` distinct from `cf`.
+_NAME_SEPARATORS = (":", "/")
+#: What a skill identifier can look like. Used to tell the name in a tool input
+#: from the request text sitting beside it, so `skills_invoked` reports names
+#: and not prose.
+_NAME_SHAPE = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
 #: What a *failed* execution looks like in the transcript: `<error>Execute
 #: skill: cf</error>`. The previous guard searched for "skills failed to load",
 #: which the CLI never emits, so it could not fire.
 _SKILL_ERROR_MARK = "Execute skill:"
+#: The terminal event's subtype when the turn ran to completion. Anything else
+#: (`error_max_turns`, `error_during_execution`) leaves `result` holding a
+#: fragment rather than an answer.
+_RESULT_OK = "success"
 
 
-def _stream_events(raw: str) -> list[dict[str, Any]]:
+def _stream_events(raw: str) -> tuple[list[dict[str, Any]], int]:
     """Parse `--output-format stream-json`: one JSON object per line.
 
-    A line that will not parse is skipped rather than fatal — the stream is a
-    transcript, and one malformed entry says nothing about the rest. Whether the
-    run is usable at all is decided by :func:`_result_event`, which fails closed.
+    Returns the events and *how many lines would not parse*. A malformed line is
+    skipped rather than fatal — the stream is a transcript, and one bad entry
+    says nothing about the rest — but it is counted and reported, because a
+    dropped line can be a dropped `tool_result`, and this module decides what a
+    run means from exactly those. Silently discarding one would let the count of
+    evidence shrink without the verdict admitting it.
     """
     events: list[dict[str, Any]] = []
+    unparsed = 0
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -65,14 +88,20 @@ def _stream_events(raw: str) -> list[dict[str, Any]]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            unparsed += 1
             continue
         if isinstance(event, dict):
             events.append(event)
-    return events
+    return events, unparsed
 
 
 def _result_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The terminal `result` event, which carries the answer and the totals."""
+    """The terminal `result` event, which carries the answer and the totals.
+
+    Last one wins: the stream is ordered and the terminal event is the final
+    one, so a transcript carrying two (a resumed or restarted turn) is read as
+    ending in its last.
+    """
     for event in reversed(events):
         if event.get("type") == "result":
             return event
@@ -87,34 +116,94 @@ def _content_blocks(event: dict[str, Any]) -> list[dict[str, Any]]:
     return [block for block in content if isinstance(block, dict)]
 
 
-def _skill_state(events: list[dict[str, Any]], raw: str) -> tuple[str, list[str], str]:
-    """Did the `cf` skill actually run? Returns ``(state, names, detail)``.
+def _invoked_names(payload: Any) -> list[str]:
+    """The skill identifiers a `Skill` tool input names.
 
-    ``state`` is ``"ran"``, ``"failed"`` or ``"absent"``. This is a *positive*
-    check against tool-use events in the transcript, not a substring search over
-    the prose: the fallback answer is well-formed and says nothing about whether
-    the skill was reached, which is exactly why the old heuristic scored it.
+    Which key holds the name is not part of any stable contract, so every string
+    value shaped like an identifier is a candidate — but each is compared
+    *whole*, after dropping any `plugin:` namespace. That is what separates the
+    skill's name from the argument text, which in this suite always quotes a
+    `/cf …` prompt.
+    """
+    if not isinstance(payload, dict):
+        return []
+    names = []
+    for value in payload.values():
+        if not isinstance(value, str) or not _NAME_SHAPE.fullmatch(value.strip()):
+            continue
+        name = value.strip()
+        for separator in _NAME_SEPARATORS:
+            name = name.rsplit(separator, 1)[-1]
+        if name:
+            names.append(name)
+    return names
+
+
+class _SkillTrace(NamedTuple):
+    """What the transcript says about the skill this suite measures."""
+
+    state: str          # "ran" | "failed" | "absent"
+    names: list[str]    # skill identifiers the transcript names
+    inputs: list[str]   # the tool inputs verbatim, serialized, for diagnosis
+    detail: str
+
+
+def _skill_trace(events: list[dict[str, Any]], raw: str) -> _SkillTrace:
+    """Did the `cf` skill actually run?
+
+    A *positive* check against tool-use events, not a substring search over the
+    prose: the fallback answer is well-formed and says nothing about whether the
+    skill was reached, which is exactly why the old heuristic scored it.
+
+    The evidence is bound per call. `ran` needs one `Skill` call that names `cf`
+    *and* a non-error result for that same call — not merely some call naming it
+    and some other call succeeding. A call with no observed result is not a
+    confirmed run either: a truncated or interrupted trace is the case this
+    whole module exists to refuse to score.
     """
     calls: dict[Any, Any] = {}
-    errored: set[Any] = set()
+    results: dict[Any, bool] = {}
     for event in events:
         for block in _content_blocks(event):
             kind = block.get("type")
             if kind == "tool_use" and block.get("name") == _SKILL_TOOL:
+                # Last wins on a repeated id. Either order is safe: the verdict
+                # below needs a success bound to the surviving cf call, and a
+                # collision can only take evidence away, never invent it.
                 calls[block.get("id")] = block.get("input") or {}
-            elif kind == "tool_result" and block.get("is_error"):
-                errored.add(block.get("tool_use_id"))
+            elif kind == "tool_result":
+                results[block.get("tool_use_id")] = bool(block.get("is_error"))
 
-    names = sorted({json.dumps(payload, default=str, sort_keys=True) for payload in calls.values()})
+    named = {call_id: _invoked_names(payload) for call_id, payload in calls.items()}
+    names = sorted({name for found in named.values() for name in found})
+    inputs = sorted({json.dumps(payload, default=str, sort_keys=True) for payload in calls.values()})
+
     if _SKILL_ERROR_MARK in raw:
-        return "failed", names, f"the transcript carries {_SKILL_ERROR_MARK!r}"
+        return _SkillTrace("failed", names, inputs, f"the transcript carries {_SKILL_ERROR_MARK!r}")
     if not calls:
-        return "absent", names, f"no {_SKILL_TOOL} tool call in the transcript"
-    if all(call_id in errored for call_id in calls):
-        return "failed", names, f"every {_SKILL_TOOL} call came back as an error"
-    if not any(_SKILL_NAME in payload for payload in names):
-        return "failed", names, f"a {_SKILL_TOOL} ran but none of them named {_SKILL_NAME!r}"
-    return "ran", names, ""
+        return _SkillTrace("absent", names, inputs, f"no {_SKILL_TOOL} tool call in the transcript")
+
+    targeted = [call_id for call_id, found in named.items() if _SKILL_NAME in found]
+    if not targeted:
+        return _SkillTrace(
+            "failed", names, inputs,
+            f"a {_SKILL_TOOL} ran but none of them named {_SKILL_NAME!r}",
+        )
+    if any(results.get(call_id) is False for call_id in targeted):
+        return _SkillTrace("ran", names, inputs, "")
+    if any(call_id not in results for call_id in targeted):
+        return _SkillTrace(
+            "failed", names, inputs,
+            f"the {_SKILL_NAME!r} call has no result in the transcript",
+        )
+    return _SkillTrace(
+        "failed", names, inputs, f"every {_SKILL_NAME!r} call came back as an error",
+    )
+
+
+def _baseline(cwd: Path, started: float) -> dict[str, Any]:
+    """What every return carries, answer or error: how long it took, and where."""
+    return {"duration_s": round(time.monotonic() - started, 2), "sandbox": str(cwd)}
 
 
 def call_api(prompt: str, options: dict | None = None, context: dict | None = None) -> dict:
@@ -124,8 +213,15 @@ def call_api(prompt: str, options: dict | None = None, context: dict | None = No
             return _invoke(prompt, cwd, started)
     except SandboxError as exc:
         return {"error": f"sandbox setup failed: {exc}"}
-    except subprocess.TimeoutExpired:
-        return {"error": f"claude timed out after {CALL_TIMEOUT_S}s"}
+    except subprocess.TimeoutExpired as exc:
+        # Not the `claude` call — `_invoke` handles its own timeout, where the
+        # sandbox path is still in scope. Reaching here means a setup command
+        # (`git`, the in-tree `cfs init`) hit its own deadline, and saying
+        # "claude timed out" would have sent triage to the wrong process.
+        return {
+            "error": f"sandbox setup timed out after {exc.timeout}s: {exc.cmd[0] if exc.cmd else '?'}",
+            "metadata": {"duration_s": round(time.monotonic() - started, 2)},
+        }
     except Exception as exc:  # noqa: BLE001 — surface unexpected errors to promptfoo
         return {"error": f"unexpected: {type(exc).__name__}: {exc}"}
 
@@ -144,44 +240,75 @@ def _invoke(prompt: str, cwd: Path, started: float) -> dict:
         # `-p` emit the intermediate events rather than the result alone.
         "--output-format", "stream-json",
         "--verbose",
-        "--max-budget-usd", "0.30",
+        "--max-budget-usd", MAX_BUDGET_USD,
         invoked,
     ]
-    proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=CALL_TIMEOUT_S, check=False,
-        stdin=subprocess.DEVNULL,
-    )
-    duration = time.monotonic() - started
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=CALL_TIMEOUT_S, check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        # Handled here rather than in `call_api` so it carries the same baseline
+        # as every other error: an operator triaging a wave of them can tell a
+        # run that burned 850s from one that failed at once, and can say where.
+        return {
+            "error": f"claude timed out after {CALL_TIMEOUT_S}s",
+            "metadata": _baseline(cwd, started),
+        }
+    base = _baseline(cwd, started)
 
     if proc.returncode != 0:
         return {
             "error": f"claude exited {proc.returncode}: {proc.stderr.strip()[:500]}",
-            "metadata": {"duration_s": round(duration, 2)},
+            "metadata": base,
         }
 
-    events = _stream_events(proc.stdout)
+    events, unparsed = _stream_events(proc.stdout)
     payload = _result_event(events)
-    base = {"duration_s": round(duration, 2), "sandbox": str(cwd)}
+    base["unparsed_lines"] = unparsed
     if payload is None:
         # Fail closed. Without the terminal event there is no answer to grade and
         # no transcript to trust, so returning the raw text would hand the rubric
         # something to score with no idea what produced it.
+        #
+        # Both causes are named because they look identical here and lead to
+        # opposite fixes: a budget ceiling reached mid-turn ends the stream just
+        # as an unhonoured `--output-format` does, and only one of them is a bug.
         return {
-            "error": "claude emitted no result event; stream-json may not have been honoured",
+            "error": (
+                "claude emitted no result event: the turn may have stopped at the "
+                f"--max-budget-usd {MAX_BUDGET_USD} ceiling, or stream-json was not honoured"
+            ),
             "metadata": {**base, "stdout_tail": proc.stdout.strip()[-500:]},
         }
 
     output_text = payload.get("result") or ""
-    state, skills, detail = _skill_state(events, proc.stdout)
+    trace = _skill_trace(events, proc.stdout)
+    state, detail = trace.state, trace.detail
     metadata = {
         **base,
         "session_id": payload.get("session_id"),
         "num_turns": payload.get("num_turns"),
         "total_cost_usd": payload.get("total_cost_usd"),
         "skill_state": state,
-        "skills_invoked": skills,
+        "skills_invoked": trace.names,
+        "skill_call_inputs": trace.inputs,
     }
     cost = payload.get("total_cost_usd")
+
+    # A turn that stopped short is not an answer, even when the skill did load:
+    # `result` then holds whatever had been written when the limit hit, and
+    # grading a fragment reports on Studio for a run that never finished. Only a
+    # subtype that is *present and not success* counts as that — an unfamiliar
+    # shape should not be able to manufacture failures.
+    subtype = payload.get("subtype")
+    if payload.get("is_error") or (subtype is not None and subtype != _RESULT_OK):
+        return {
+            "error": f"claude did not finish the turn (result subtype {subtype!r})",
+            "metadata": {**metadata, "unscored_output": output_text[:500]},
+        }
+
     if state != "ran":
         # A hard error, not a metadata flag. The fallback answer is plausible and
         # well-formed, so left to the grader it scores as a pass and the suite
