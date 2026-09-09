@@ -28,6 +28,14 @@ RULES:
   ALWAYS after any `WAIT`/`STOP_TURN` resume at the exact active PDSL
     continuation target; REQUIRED: do not reinterpret the user's reply as
     broad permission for generic autonomous execution.
+  ALWAYS treat a session's declared mode and a gate's declared risk type —
+    the literal type named in that gate's own MENU block — as workflow-owned
+    behaviour, not an interpretation of the user's reply; resolving a gate by
+    that declared type is outside the prohibition above.
+  NEVER treat a runtime-derived eligibility or risk classification, such as
+    an autonomy overlay's per-menu eligibility check, as a declaration; only
+    a literal type named in the gate's own MENU block qualifies for the
+    carve-out above.
   ALWAYS while a workflow, gate, or menu remains active, treat each new user
     message as input to that active continuation, not as permission for
     unrelated execution.
@@ -45,4 +53,13 @@ RULES:
     obligations unless an active rule references them.
   NEVER weaken `ALWAYS`, `NEVER`, `REQUIRE`, `WAIT`, `STOP_TURN`, or
     `INVARIANTS` because nearby prose sounds softer.
+NOTES:
+  No core module declares a gate `TYPE` or resolves a gate from one today —
+  see `architecture/specs/PDSL.md` and `cpt-studio-adr-autonomous-default-and-gate-risk`
+  (ADR-0023). This carve-out only removes the prohibition against such
+  resolution once it exists; it does not itself define or implement how a
+  gate is resolved from its declared type.
+  The identical carve-out is restated for workflow-state law in
+  `runtime/active-workflow-state-law.md`; keep both definitions in sync if
+  this one changes.
 ```
