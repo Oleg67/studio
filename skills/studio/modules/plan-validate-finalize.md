@@ -24,7 +24,7 @@ RULES:
 UNIT PlanPhase4Finalize
 PURPOSE: Self-validate the plan against the checklist and offer next steps (Phase 4).
 WHEN:
-  REQUIRE phase files were produced this run (brief-checkpoint option 1 or 3)
+  REQUIRE phase files were produced this run (PlanProduceChoice option 1 or 3)
 DO:
   LOAD {cf-studio-path}/.core/requirements/plan-checklist.md
   LOAD {cf-studio-path}/.core/skills/studio/modules/plan-native-dispatch.md

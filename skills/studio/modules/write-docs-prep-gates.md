@@ -33,7 +33,7 @@ DO:
   CONTINUE WorkflowPrepBrainstormGate
 RULES:
   ALWAYS use WorkflowPrepBrainstormGate for the shared brainstorm prompt mechanics
-  ALWAYS auto-skip and CONTINUE PlanFirstGate when ORIGINAL_INTENT resolves to a single known file with no cross-cutting references; emit a single-line note "Skipping brainstorm — approach is clear." when auto-skipping
+  ALWAYS auto-skip and SET PLAN_FIRST_CONTINUE = WriteDocsAuthorDispatch, LOAD {cf-studio-path}/.core/skills/studio/modules/write-docs-author-dispatch.md, LOAD {cf-studio-path}/.core/skills/studio/modules/gates/plan-first.md, and CONTINUE PlanFirstGate when ORIGINAL_INTENT resolves to a single known file with no cross-cutting references; emit a single-line note "Skipping brainstorm — approach is clear." when auto-skipping
 NOTES: To reduce turn count, callers may collapse this gate and WriteDocsExploreGate into a single preparation menu offering explore, brainstorm, both, or skip.
 MENU WriteDocsBrainstormMenu
 TITLE: Before writing or reviewing docs, brainstorm ambiguous decisions or framing options with cf-brainstorm — or skip? Skip is the default when the approach is already clear; brainstorm for ambiguous requirements or open framing questions. Reply with a number.

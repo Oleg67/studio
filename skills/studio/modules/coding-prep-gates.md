@@ -10,6 +10,8 @@ DO:
   SET WORKFLOW_PREP_BRAINSTORM_GATE = CodingBrainstormGate
   LOAD {cf-studio-path}/.core/skills/studio/modules/gates/workflow-prep.md
   CONTINUE WorkflowPrepExploreGate
+RULES:
+  ALWAYS auto-skip and CONTINUE CodingBrainstormGate when ORIGINAL_INTENT resolves to a single known file with no cross-cutting references; emit a single-line note "Skipping context discovery — target is clear." when auto-skipping
 MENU CodingExploreMenu
 TITLE: Before writing or reviewing code, discover task-relevant project context (existing conventions, related modules, call sites) with cf-explore — or skip? Skip is the default when the target and its context are already clear; explore for unfamiliar or cross-cutting code. Reply with a number.
 OPTIONS:
@@ -21,11 +23,15 @@ OPTIONS:
 ```pdsl
 UNIT CodingBrainstormGate
 PURPOSE: Offer decision/design exploration via cf-brainstorm as the next step after the explore gate, before any code is authored or reviewed.
+WHEN:
+  REQUIRE ORIGINAL_INTENT != unset
 DO:
   SET WORKFLOW_PREP_BRAINSTORM_MENU = CodingBrainstormMenu
   SET WORKFLOW_PREP_DISPATCH_UNIT = PlanFirstGate
   LOAD {cf-studio-path}/.core/skills/studio/modules/gates/workflow-prep.md
   CONTINUE WorkflowPrepBrainstormGate
+RULES:
+  ALWAYS auto-skip and SET PLAN_FIRST_CONTINUE = CodingDispatch, LOAD {cf-studio-path}/.core/skills/studio/modules/gates/plan-first.md, and CONTINUE PlanFirstGate when ORIGINAL_INTENT resolves to a single known file with no cross-cutting references; emit a single-line note "Skipping brainstorm — approach is clear." when auto-skipping
 MENU CodingBrainstormMenu
 TITLE: Before writing or reviewing code, brainstorm ambiguous decisions or design options with cf-brainstorm — or skip? Skip is the default when the approach is already clear; brainstorm for ambiguous requirements or open design questions. Reply with a number.
 OPTIONS:

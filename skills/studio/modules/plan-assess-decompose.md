@@ -17,7 +17,7 @@ RULES:
 
 ```pdsl
 UNIT PlanPhase2Decompose
-PURPOSE: Choose a lifecycle, decompose into phases, predict per-phase budget, and confirm before any write (Phase 2).
+PURPOSE: Choose a lifecycle, decompose into phases, predict per-phase budget, and present the decomposition for the production choice that authorises the write (Phase 2).
 STATE:
   SET lifecycle: gitignore | cleanup | archive | manual (default unset, scope workflow_run)
 DO:
@@ -30,17 +30,9 @@ DO:
   RUN PlanningChecklistContract
   LOAD {cf-studio-path}/.core/skills/studio/modules/plan-compile.md
   EMIT the decomposition summary — phases, est. lines, budget
-  EMIT_MENU DecompositionConfirmMenu
-  WAIT user.reply
-  STOP_TURN
+  CONTINUE PlanPhase3Compile
 RULES:
-  NEVER write any file before this confirmation, and NEVER hide raw-input chunk estimates in vague totals
+  NEVER write any file during decomposition — the brief package is written only after PlanProduceChoice resolves, and NEVER hide raw-input chunk estimates in vague totals
   ALWAYS normalize decomposed phases against the shared PlanningPhaseContract and PlanningChecklistContract before standalone packaging begins
-MENU DecompositionConfirmMenu
-TITLE: Explicit confirmation required before writing plan.toml + briefs. This writes plan.toml + N brief files under .plans/{task-slug}/; after confirming you choose how to produce phase files. Proceed with this decomposition?
-OPTIONS:
-  1 y | yes -> CONTINUE PlanPhase3Compile
-  2 n | no -> EMIT "Decomposition declined — rework boundaries and re-run cf-plan when ready." and STOP_TURN
-  3 revise — describe what to change about this decomposition -> EMIT "Describe what to change (e.g. split phase 2, merge phases 3 and 4, adjust scope). I will rework and re-show."; WAIT user.reply; STOP_TURN; CONTINUE PlanPhase2Decompose
-  INVALID -> EMIT_MENU DecompositionConfirmMenu
+  ALWAYS emit the decomposition summary before PlanProduceChoice, so the choice that authorises the write is made against the phases it will write
 ```

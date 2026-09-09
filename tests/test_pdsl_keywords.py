@@ -10,6 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from studio.utils import pdsl
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -793,9 +795,11 @@ def test_prompt_runtime_references_use_cf_studio_path() -> None:
 
 
 # Every MENU that does not yet declare a gate risk TYPE, frozen 2026-09-07.
-# An undeclared gate is treated as `blocking` at runtime, so the existing
-# surface is grandfathered and migrates gate by gate -- but the untyped surface
-# must not grow. Anything not in this set has to declare a TYPE.
+# `blocking` is the *intended* contract for an undeclared gate, not what happens
+# today: three shipped paths still resolve one by runtime judgement, so this set
+# freezes the existing untyped inventory rather than recording a fail-closed
+# default. The surface migrates gate by gate and must not grow -- anything not in
+# this set has to declare a TYPE.
 # Shrink this set as menus are typed; never add to it.
 UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "architecture/specs/PDSL.md#13::SubAgentApprovalMenu",
@@ -873,8 +877,6 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "skills/studio/modules/map-intent.md#0::MapIntentMenu",
     "skills/studio/modules/map-next.md#0::MapNextStepsMenu",
     "skills/studio/modules/map-preflight.md#2::MapScopeMenu",
-    "skills/studio/modules/plan-assess-decompose.md#1::DecompositionConfirmMenu",
-    "skills/studio/modules/plan-compile.md#0::BriefCheckpointMenu",
     "skills/studio/modules/plan-compiler-dispatch.md#2::PlanCompilerFailureMenu",
     "skills/studio/modules/plan-discovery.md#1::PlanGateMenu",
     "skills/studio/modules/plan-validate-finalize.md#0::OversizedPhaseRecoveryMenu",
@@ -915,7 +917,9 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
 
 # The untyped surface may only shrink. Raising this is a deliberate, reviewable
 # act; a rename does not need it, because a rename leaves the count unchanged.
-UNTYPED_MENU_BASELINE_CEILING = 113
+# 113 -> 111: DecompositionConfirmMenu and BriefCheckpointMenu collapsed into one
+# menu that declares `TYPE: decision`, so two entries left and none replaced them.
+UNTYPED_MENU_BASELINE_CEILING = 111
 
 
 
@@ -991,13 +995,102 @@ def _menu_type_declarations() -> dict[str, str | None]:
     return declarations
 
 
+#: The paths that auto-resolve a gate by runtime judgement rather than by reading
+#: a declared TYPE. Named here so the claim in UNTYPED_MENU_BASELINE's comment is
+#: pinned to something: if a path is retired or stops judging, the guard below
+#: fails and the comment has to be corrected with it. Sourced from
+#: `architecture/specs/PDSL.md`, which cites the same three.
+RUNTIME_JUDGEMENT_PATHS = {
+    "skills/studio/modules/gates/simple-mode-rules.md": "ALWAYS choose automatically only when",
+    "workflows/brave-new-world.md": "allowing this overlay to answer eligible menus",
+    "skills/studio/modules/subagents/dispatch.md": "SUB_AGENT_GROUP_DECISION = approve-once",
+}
+
+#: The claim has a second half -- that none of those paths *reads* a declaration --
+#: and it is the half that changes first, because binding them to declared types
+#: is what the default-flip does. Matched on the reading vocabulary rather than on
+#: the bare type tokens, since `SUB_AGENT_GROUP_DECISION` would otherwise match
+#: "decision". A proxy, not a proof: a path could read a declaration in wording
+#: this misses.
+DECLARED_TYPE_READ_RE = re.compile(
+    r"declared\s+TYPE|gate\s+risk|TYPE:\s*(?:confirmation|decision|blocking)\b",
+    re.IGNORECASE,
+)
+
+
+def test_the_runtime_judgement_paths_named_in_the_baseline_comment_still_exist() -> None:
+    """Pin the claim that undeclared gates are resolved by judgement, not fail-closed.
+
+    `UNTYPED_MENU_BASELINE`'s comment and this module's docstrings state that
+    `blocking` is the intended contract rather than current behaviour, because
+    shipped paths still auto-resolve an undeclared gate by runtime judgement.
+    That is a factual claim about three specific files, and prose cannot hold it:
+    a path could be retired or bound to declared types and the comment would
+    quietly become false, which is the same overclaim this wording replaced.
+
+    So the count, the paths and both halves of the claim are asserted: each path
+    still carries its auto-resolution rule, and none of them reads a declared
+    type. The second half matters more, because binding these paths to declared
+    types is exactly what the default flip does -- so that is where the comment
+    will go stale first. An earlier version of this guard checked only the first
+    half and passed when a path gained a declared-type read.
+
+    What still gets past it: a path that reads a declaration in wording
+    `DECLARED_TYPE_READ_RE` does not match. The fix when this fails is to correct
+    the comment in the same change, not to edit these constants to match.
+    """
+    assert len(RUNTIME_JUDGEMENT_PATHS) == 3, (
+        f"The comment on UNTYPED_MENU_BASELINE says three paths resolve gates by "
+        f"runtime judgement; this guard names {len(RUNTIME_JUDGEMENT_PATHS)}. Keep "
+        "the two in step."
+    )
+
+    findings: list[str] = []
+    for rel, marker in sorted(RUNTIME_JUDGEMENT_PATHS.items()):
+        path = REPO_ROOT / rel
+        if not path.is_file():
+            findings.append(f"{rel}: no longer exists")
+            continue
+        # Read through the validator's own reader, which normalizes OSError and
+        # UnicodeDecodeError into a reported error: an unreadable path is a
+        # finding about that path, not a crash that hides the other two.
+        text, error = pdsl.read_source_file(path)
+        if error is not None or text is None:
+            findings.append(
+                f"{rel}: cannot be read, so the claim cannot be checked "
+                f"({error.message if error else 'no content'})"
+            )
+            continue
+        if marker not in text:
+            findings.append(f"{rel}: no longer carries {marker!r}")
+        read = DECLARED_TYPE_READ_RE.search(text)
+        if read is not None:
+            findings.append(
+                f"{rel}: now reads a declared type ({read.group(0)!r}), so it may no "
+                "longer decide by runtime judgement"
+            )
+
+    assert not findings, "\n  ".join(
+        [
+            "The runtime-judgement paths the baseline comment relies on have changed:",
+            *findings,
+            "",
+            "If a path was retired or now reads a declared TYPE, update the comment on "
+            "UNTYPED_MENU_BASELINE and the docstring below it -- `blocking` may have "
+            "become the actual behaviour rather than only the intended contract.",
+        ]
+    )
+
+
 def test_the_untyped_menu_surface_does_not_grow() -> None:
     """A newly introduced MENU must declare a gate risk TYPE.
 
-    The tail recorded in UNTYPED_MENU_BASELINE is grandfathered because an
-    undeclared gate is treated as `blocking`, which is the conservative
-    direction. What must not happen is the untyped surface growing, so a MENU
-    that is neither typed nor in the baseline fails here.
+    The tail recorded in UNTYPED_MENU_BASELINE is grandfathered so the surface
+    can migrate one gate at a time. It is *not* grandfathered because undeclared
+    already means `blocking` -- that is the intended contract, and three shipped
+    paths still resolve an undeclared gate by runtime judgement today. This test
+    freezes the existing untyped inventory: what must not happen is that
+    inventory growing, so a MENU neither typed nor in the baseline fails here.
     """
     declarations = _menu_type_declarations()
     untyped_now = {key for key, value in declarations.items() if value is None}
@@ -1028,6 +1121,423 @@ def test_the_untyped_menu_surface_does_not_grow() -> None:
         + "\n  ".join(stale)
         + "\n\nRemove them from the baseline."
     )
+
+
+PREP_GATE_GLOB = "skills/studio/modules/*-prep-gates.md"
+
+# Both modules on the cf-plan decomposition path: the gate lives in one and the
+# unit that must not write before it lives in the other, so a guard reading only
+# one of them cannot see a write moved across the boundary.
+PLAN_DECOMPOSITION_MODULES = (
+    "skills/studio/modules/plan-assess-decompose.md",
+    "skills/studio/modules/plan-compile.md",
+)
+
+# Units that consume a written brief package. An option reaching any of them has
+# to have written it; keying on these rather than on option labels means renaming
+# a label cannot quietly drop an option out of the check.
+BRIEF_PACKAGE_CONSUMERS = (
+    "PlanPhase3Validate",
+    "PlanPhaseCompilerDispatch",
+    "NextActionsOffer",
+)
+
+PLAN_FIRST_ASSIGNMENT_RE = re.compile(r"PLAN_FIRST_CONTINUE\s*=\s*(?P<unit>[A-Za-z_][\w-]*)")
+
+
+#: Sections whose lines are executable actions. PURPOSE, TITLE and NOTES are prose:
+#: a phrase quoted there is documentation, not a transfer of control, and must not
+#: create an obligation for these guards.
+ACTION_SECTIONS = frozenset({"DO", "RULES", "OPTIONS", "INVALID"})
+
+#: `PLAN_FIRST_CONTINUE` targets that name no defined UNIT. Grandfathered like
+#: UNTYPED_MENU_BASELINE, and like it this set may only shrink: a new dangling
+#: target is a defect, and clearing one of these is the fix. Choosing their real
+#: targets is a flow decision rather than a rename, so neither is repointed here.
+#:   CodingDispatch    - 4 sites; workflows/coding.md is now a thin CodingAlias and
+#:                       the test asserting UNIT CodingDispatch exists is xfail.
+#:   WriteDocsDispatch - 1 site, write-docs-intent-routing.md.
+DANGLING_CONTINUATION_TARGETS = frozenset({"CodingDispatch", "WriteDocsDispatch"})
+
+
+#: Sections whose lines are self-contained clauses. A menu option and a rule each
+#: carry their own actions, so an assignment in a *sibling* clause does not bind
+#: them -- one valid option must not vouch for an unbound one next to it. A `DO`
+#: block is sequential instead, so an earlier `SET` in the same block does bind a
+#: later line.
+CLAUSE_SECTIONS = frozenset({"OPTIONS", "INVALID", "RULES"})
+
+
+def _sectioned_lines(
+    path: Path, *, actions_only: bool = False
+) -> list[tuple[str, str, int, str]]:
+    """Return (UNIT/MENU name, section, absolute line number, line) for a prompt file.
+
+    Read through the validator's own block scanner so these guards agree with the
+    checker about what is inside a ```pdsl fence. With ``actions_only`` the result
+    is narrowed to ACTION_SECTIONS, so prose cannot create an obligation.
+    """
+    text, error = pdsl.read_source_file(path)
+    if error or text is None:
+        return []
+    blocks, _ = pdsl.scan_blocks(str(path), text)
+    rows: list[tuple[str, str, int, str]] = []
+    for block in blocks:
+        current = "<no unit>"
+        section = ""
+        for offset, line in enumerate(block.text.splitlines()):
+            stripped = line.strip()
+            header = pdsl.UNIT_OR_MENU_RE.match(stripped)
+            if header:
+                current, section = header.group("name"), ""
+            else:
+                head = pdsl.SECTION_HEAD_RE.match(stripped)
+                if head and head.group("section") in pdsl.SECTION_HEADERS:
+                    section = head.group("section")
+            if actions_only and section not in ACTION_SECTIONS:
+                continue
+            rows.append((current, section, block.line + offset, line))
+    return rows
+
+
+def _binding_scope(rows: list[tuple[str, str, int, str]], index: int) -> str:
+    """Text that may legitimately bind the continuation on ``rows[index]``.
+
+    A clause section binds per line, because sibling options and sibling rules do
+    not vouch for each other. A sequential section binds from the lines that
+    precede it inside the same unit and section.
+    """
+    unit, section, _, line = rows[index]
+    if section in CLAUSE_SECTIONS:
+        return line
+    preceding = [
+        text
+        for other_unit, other_section, _, text in rows[:index]
+        if other_unit == unit and other_section == section
+    ]
+    return "\n".join([*preceding, line])
+
+
+def _defined_unit_names() -> set[str]:
+    """Every `UNIT <Name>` defined in the prompt corpus."""
+    names: set[str] = set()
+    for path in _prompt_files():
+        for _, _, _, line in _sectioned_lines(path):
+            header = pdsl.UNIT_OR_MENU_RE.match(line.strip())
+            if header and header.group(1) == "UNIT":
+                names.add(header.group("name"))
+    return names
+
+
+def test_every_entry_into_plan_first_gate_sets_its_return_unit() -> None:
+    """`PlanFirstGate` may not be entered without a real `PLAN_FIRST_CONTINUE`.
+
+    `gates/plan-first.md:19` states `NEVER run without PLAN_FIRST_CONTINUE set by
+    the caller`, and nothing in the shared `gates/workflow-prep.md` sets it on a
+    caller's behalf. Two auto-skip rules did not: they reached the gate with the
+    variable unset and the module unloaded, so the gate's own `no-plan` option
+    continued to an unset unit -- silently, no reason surfaced, the run just
+    proceeded.
+
+    Binding is per clause, not per unit: a menu option or a rule must carry its
+    own assignment and load, because a valid sibling option must not vouch for an
+    unbound one beside it. A `DO` block binds sequentially instead, so an earlier
+    `SET` in the same block counts and splitting a long clause stays legal.
+    `unset` is rejected because it is the exact state the gate forbids, and the
+    indirect entry via `COMPANION_CONTINUE` is included, because a clause added
+    there fails the same way.
+    """
+    findings: list[str] = []
+    checked = 0
+    defined = _defined_unit_names()
+    for path in _prompt_files():
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        rows = _sectioned_lines(path, actions_only=True)
+
+        for index, (unit, section, line_no, line) in enumerate(rows):
+            direct = "CONTINUE PlanFirstGate" in line
+            indirect = "COMPANION_CONTINUE = PlanFirstGate" in line
+            if not (direct or indirect):
+                continue
+            checked += 1
+            scope = _binding_scope(rows, index)
+            units = {m.group("unit") for m in PLAN_FIRST_ASSIGNMENT_RE.finditer(scope)}
+            real = units - {"unset"}
+            if not units:
+                findings.append(
+                    f"{rel}:{line_no}: no PLAN_FIRST_CONTINUE set in this "
+                    f"{section} clause of {unit}"
+                )
+            elif not real:
+                findings.append(
+                    f"{rel}:{line_no}: PLAN_FIRST_CONTINUE = unset in this "
+                    f"{section} clause of {unit}, which is the state the gate "
+                    "refuses to run under"
+                )
+            if direct and "gates/plan-first.md" not in scope:
+                findings.append(
+                    f"{rel}:{line_no}: continues to PlanFirstGate without LOADing "
+                    f"gates/plan-first.md in this {section} clause of {unit}"
+                )
+            # Rejecting only `unset` would accept a typo: any identifier-shaped
+            # token read as "real". The gate cannot CONTINUE to a unit that does
+            # not exist, so the target is resolved against the corpus.
+            for unit in sorted(real - DANGLING_CONTINUATION_TARGETS):
+                if unit not in defined:
+                    findings.append(
+                        f"{rel}:{line_no}: PLAN_FIRST_CONTINUE = {unit}, which is not a "
+                        "defined UNIT anywhere in the corpus"
+                    )
+
+    # A floor, not the count: consolidating a clause is legitimate and must not
+    # fail here. It exists only so a rename cannot leave this guard inspecting
+    # nothing and still reporting green.
+    assert checked >= 5, (
+        f"Only {checked} clause(s) enter PlanFirstGate; expected at least 5. If the "
+        "gate or the variable was renamed, update this guard -- do not let it pass "
+        "over a corpus it no longer inspects."
+    )
+    assert not findings, "\n  ".join(["Entries into PlanFirstGate are unguarded:"] + findings)
+
+
+def test_prep_gate_modules_apply_the_same_auto_skip_rules() -> None:
+    """Every prep-gate module must skip itself on the same terms.
+
+    `write-docs` and `write-skills` auto-skipped their explore and brainstorm
+    gates when the target was unambiguous; `coding` had no auto-skip rule at all,
+    so the same task would have cost two extra stops purely because it was code.
+    Stated in the conditional because no shipped workflow currently loads any of
+    these three modules -- they are reachable only through `*-intent-routing.md`
+    /`coding-intent-companion.md`, which nothing references -- so the divergence
+    is latent. This guard exists so the three stay aligned until that path is
+    reconnected, at which point the difference becomes observable.
+
+    Discovered by glob, so a fourth prep-gate module added without the rules
+    fails here rather than being noticed in review. Each rule is checked for its
+    continuation target, its note, the dispatch unit its own menu names, and the
+    UNIT it sits in -- target and note alone pin none of the placement, so both
+    rules could sit in the explore unit and leave the brainstorm gate with no
+    auto-skip while every string this test looks for was still present.
+    """
+    modules = sorted(REPO_ROOT.glob(PREP_GATE_GLOB))
+    assert len(modules) >= 3, (
+        f"Found {len(modules)} prep-gate module(s) via {PREP_GATE_GLOB}; expected at "
+        "least 3. If they moved, update the glob."
+    )
+
+    findings: list[str] = []
+    for path in modules:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        action_rows = _sectioned_lines(path, actions_only=True)
+        rules = [
+            (unit, line.strip())
+            for unit, _, _, line in action_rows
+            if "ALWAYS auto-skip" in line
+        ]
+        if len(rules) != 2:
+            findings.append(f"{rel}: {len(rules)} auto-skip rule(s), expected 2")
+            continue
+
+        # The two gates are derived from the module, not named here: the explore
+        # unit is whichever one wires the brainstorm gate, and the brainstorm unit
+        # is the one it names.
+        wiring = [
+            (unit, re.search(r"SET WORKFLOW_PREP_BRAINSTORM_GATE = (?P<gate>\S+)", line))
+            for unit, _, _, line in action_rows
+        ]
+        wiring = [(unit, m) for unit, m in wiring if m is not None]
+        if not wiring:
+            findings.append(f"{rel}: no WORKFLOW_PREP_BRAINSTORM_GATE to continue to")
+            continue
+        explore_unit, brainstorm = wiring[0]
+        brainstorm_unit = brainstorm.group("gate")
+
+        # Target and note alone do not pin placement: both rules could sit in the
+        # explore unit, leaving the brainstorm gate with no auto-skip at all while
+        # every string this test looks for is still present somewhere in the file.
+        expected_unit = {
+            f"CONTINUE {brainstorm_unit}": explore_unit,
+            "CONTINUE PlanFirstGate": brainstorm_unit,
+        }
+
+        expected = {
+            f"CONTINUE {brainstorm_unit}": "Skipping context discovery — target is clear.",
+            "CONTINUE PlanFirstGate": "Skipping brainstorm — approach is clear.",
+        }
+        # A rule may name a dispatch target its own menu does not: a copy-paste
+        # from a sibling module routes that module's skip path into the wrong
+        # dispatch unit, while every shared substring still matches. Derived from
+        # the module itself rather than a table, so it cannot drift out of date.
+        menu_targets = {
+            m.group(1)
+            for _, _, _, line in _sectioned_lines(path, actions_only=True)
+            if "EMIT_MENU" not in line
+            for m in [re.search(r"PLAN_FIRST_CONTINUE\s*=\s*([A-Za-z_][\w-]*)", line)]
+            if m and "->" in line
+        }
+        for _, rule in rules:
+            found = re.search(r"PLAN_FIRST_CONTINUE\s*=\s*([A-Za-z_][\w-]*)", rule)
+            if found and menu_targets and found.group(1) not in menu_targets:
+                findings.append(
+                    f"{rel}: auto-skip rule sets PLAN_FIRST_CONTINUE = {found.group(1)}, "
+                    f"but this module's own menu options set {sorted(menu_targets)}"
+                )
+
+        for target, note in expected.items():
+            matching = [(unit, rule) for unit, rule in rules if target in rule]
+            if len(matching) != 1:
+                findings.append(
+                    f"{rel}: {len(matching)} auto-skip rule(s) continue to {target!r}, expected 1"
+                )
+                continue
+            unit, rule = matching[0]
+            if unit != expected_unit[target]:
+                findings.append(
+                    f"{rel}: the {target!r} auto-skip rule sits in {unit}, expected "
+                    f"{expected_unit[target]} — placement decides which gate skips itself"
+                )
+            if "ORIGINAL_INTENT resolves to a single known file" not in rule:
+                findings.append(f"{rel}: {target!r} rule does not share the condition")
+            if note not in rule:
+                findings.append(f"{rel}: {target!r} rule does not emit {note!r}")
+
+    assert not findings, "\n  ".join(
+        ["Prep-gate auto-skip rules are inconsistent across modules:"] + findings
+    )
+
+
+def test_the_brief_package_is_never_written_before_its_gate_resolves() -> None:
+    """`plan.toml` and the briefs may only be written by an authorised choice.
+
+    The write and the authorisation used to be two stops: a confirmation, then
+    the writes, then a second menu choosing the production mode. They are now one
+    `decision` gate, which only holds while the writes stay behind it.
+
+    Both modules on the path are read, because a write moved into the pre-gate
+    unit would otherwise be invisible; writes are matched on the artifact rather
+    than on one spelling of its path, because PDSL actions are free prose; the
+    producing options are identified by the units they reach, because an option
+    label can be renamed; and only action sections are scanned, so a PURPOSE or
+    NOTES line naming these artifacts cannot fail the build.
+    """
+    findings: list[str] = []
+    writers: set[str] = set()
+
+    for rel in PLAN_DECOMPOSITION_MODULES:
+        rows = _sectioned_lines(REPO_ROOT / rel, actions_only=True)
+        for section, _, line_no, line in rows:
+            if "WRITE" not in line:
+                continue
+            if not ("plan.toml" in line or "brief-" in line):
+                continue
+            if section != "PlanWriteBriefPackage":
+                findings.append(
+                    f"{rel}:{line_no}: {section} writes the brief package; only "
+                    f"PlanWriteBriefPackage may: {line.strip()[:90]}"
+                )
+        for section, _, _, line in rows:
+            if "RUN PlanWriteBriefPackage" in line:
+                writers.add(f"{rel}::{section}")
+
+    if writers != {"skills/studio/modules/plan-compile.md::PlanProduceChoice"}:
+        findings.append(
+            f"PlanWriteBriefPackage is run from {sorted(writers) or ['nowhere']}, "
+            "expected only plan-compile.md::PlanProduceChoice"
+        )
+
+    produced = 0
+    for section, _, line_no, line in _sectioned_lines(
+        REPO_ROOT / "skills/studio/modules/plan-compile.md", actions_only=True
+    ):
+        if section != "PlanProduceChoice" or "->" not in line:
+            continue
+        consumes = any(consumer in line for consumer in BRIEF_PACKAGE_CONSUMERS)
+        writes = "RUN PlanWriteBriefPackage" in line
+        produced += writes
+        if consumes and not writes:
+            findings.append(
+                f"{line_no}: option reaches a brief-package consumer without writing "
+                f"the package: {line.strip()[:90]}"
+            )
+        if writes and not consumes:
+            findings.append(
+                f"{line_no}: option writes the package but reaches no consumer of it: "
+                f"{line.strip()[:90]}"
+            )
+    if produced < 1:
+        findings.append("no option writes the brief package, so the gate guards nothing")
+
+    # A consumer is reached from the same option clause that runs the writer, so
+    # nothing structural stops a partial package being consumed -- what stops it
+    # is that the summary is the consumer's only completeness signal, and that a
+    # failed write stops the turn instead of emitting one. Both are pinned here:
+    # the summary must be the writer's last DO action, so no write follows a
+    # signal that everything is written, and the failure path must terminate.
+    writer_rows = [
+        (section, line)
+        for unit, section, _, line in _sectioned_lines(
+            REPO_ROOT / "skills/studio/modules/plan-compile.md"
+        )
+        if unit == "PlanWriteBriefPackage"
+    ]
+    do_actions = [line.strip() for section, line in writer_rows if section == "DO" and line.strip()]
+    if not do_actions:
+        findings.append("PlanWriteBriefPackage has no DO actions")
+    elif "EMIT the brief package summary" not in do_actions[-1]:
+        findings.append(
+            "PlanWriteBriefPackage's last DO action is "
+            f"{do_actions[-1][:70]!r}, expected the brief package summary — a write "
+            "after the completeness signal would be reported as already done"
+        )
+    on_error = [line.strip() for section, line in writer_rows if section == "ON_ERROR" and line.strip()]
+    if not on_error:
+        findings.append(
+            "PlanWriteBriefPackage has no ON_ERROR clause, so a failed write has no "
+            "defined path and a partial package can reach a consumer"
+        )
+    elif not any("STOP_TURN" in line for line in on_error):
+        findings.append(
+            "PlanWriteBriefPackage's ON_ERROR does not STOP_TURN, so control "
+            "continues into the consumer after a failed write"
+        )
+
+    # Pin the declared type: a `confirmation` would let an autonomous session
+    # authorise the write without asking, which is what this collapse removed.
+    declarations = _menu_type_declarations()
+    key = "skills/studio/modules/plan-compile.md#0::PlanProduceChoice"
+    if declarations.get(key) != "decision":
+        findings.append(
+            f"PlanProduceChoice declares TYPE {declarations.get(key)!r}, expected 'decision'"
+        )
+
+    assert not findings, "\n  ".join(["Brief-package write authorisation broken:"] + findings)
+
+
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("READ_ERROR", "Cannot read source: [Errno 13] Permission denied"),
+        ("DECODE_ERROR", "Cannot decode source as UTF-8: invalid start byte"),
+    ],
+)
+def test_the_runtime_judgement_guard_reports_an_unreadable_path(kind: str, message: str) -> None:
+    """An unreadable path is a finding naming that path, never a raised error.
+
+    The guard reads three files. Calling `read_text` directly meant one
+    unreadable or non-UTF-8 file aborted the whole guard, so the other two went
+    unchecked and the failure said nothing about which path was at fault. Both
+    error shapes the reader normalizes are covered here, because a manual check
+    leaves nothing behind to stop this coming back.
+    """
+    error = pdsl.PdslError(message=message, source_path="x", kind=kind)
+    with mock.patch.object(pdsl, "read_source_file", return_value=(None, error)):
+        with pytest.raises(AssertionError) as raised:
+            test_the_runtime_judgement_paths_named_in_the_baseline_comment_still_exist()
+
+    report = str(raised.value)
+    for rel in RUNTIME_JUDGEMENT_PATHS:
+        assert f"{rel}: cannot be read" in report, f"{rel} missing from:\n{report}"
+    assert message in report, f"the reader's reason is not reported:\n{report}"
 
 
 def _declarations_for(tmp_path: Path, name: str, body: str) -> dict[str, str | None]:
