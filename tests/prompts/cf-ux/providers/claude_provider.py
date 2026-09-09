@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from _sandbox import SandboxError, sandbox
+
+logger = logging.getLogger(__name__)
 
 CLAUDE_BIN = "claude"
 CALL_TIMEOUT_S = 850  # under promptfoo worker timeout (900s)
@@ -60,13 +63,22 @@ _NAME_SEPARATORS = (":", "/")
 #: and not prose.
 _NAME_SHAPE = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
 #: What a *failed* execution looks like in the transcript: `<error>Execute
-#: skill: cf</error>`. The previous guard searched for "skills failed to load",
-#: which the CLI never emits, so it could not fire.
-_SKILL_ERROR_MARK = "Execute skill:"
+#: skill: cf</error>`. Bound to the name, with a boundary, for the same reason
+#: the positive check is: an unrelated skill failing (`Execute skill:
+#: superpowers`) must not fail this one, and neither must answer prose that
+#: quotes the phrase. The previous guard searched for "skills failed to load",
+#: which the CLI never emits, so it could not fire at all.
+_SKILL_ERROR_TEXT = "Execute skill:"
+_SKILL_ERROR_MARK = re.compile(rf"{_SKILL_ERROR_TEXT}\s*{_SKILL_NAME}(?![\w.:/-])")
 #: The terminal event's subtype when the turn ran to completion. Anything else
 #: (`error_max_turns`, `error_during_execution`) leaves `result` holding a
 #: fragment rather than an answer.
 _RESULT_OK = "success"
+
+#: Counting a dropped line into the metadata is not the same as saying so where
+#: a person will see it, and the house rule is that a swallowed exception warns
+#: on stderr rather than only in a return value (`architecture/DESIGN.md`).
+_LOG_UNPARSED_LINE = "cf-ux claude provider: stream line %d would not parse; skipped"
 
 
 def _stream_events(raw: str) -> tuple[list[dict[str, Any]], int]:
@@ -81,7 +93,7 @@ def _stream_events(raw: str) -> tuple[list[dict[str, Any]], int]:
     """
     events: list[dict[str, Any]] = []
     unparsed = 0
-    for line in raw.splitlines():
+    for number, line in enumerate(raw.splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
@@ -89,6 +101,7 @@ def _stream_events(raw: str) -> tuple[list[dict[str, Any]], int]:
             event = json.loads(line)
         except json.JSONDecodeError:
             unparsed += 1
+            logger.warning(_LOG_UNPARSED_LINE, number)
             continue
         if isinstance(event, dict):
             events.append(event)
@@ -178,8 +191,11 @@ def _skill_trace(events: list[dict[str, Any]], raw: str) -> _SkillTrace:
     names = sorted({name for found in named.values() for name in found})
     inputs = sorted({json.dumps(payload, default=str, sort_keys=True) for payload in calls.values()})
 
-    if _SKILL_ERROR_MARK in raw:
-        return _SkillTrace("failed", names, inputs, f"the transcript carries {_SKILL_ERROR_MARK!r}")
+    if _SKILL_ERROR_MARK.search(raw):
+        return _SkillTrace(
+            "failed", names, inputs,
+            f"the transcript reports {_SKILL_ERROR_TEXT} {_SKILL_NAME}",
+        )
     if not calls:
         return _SkillTrace("absent", names, inputs, f"no {_SKILL_TOOL} tool call in the transcript")
 
@@ -275,15 +291,32 @@ def _invoke(prompt: str, cwd: Path, started: float) -> dict:
         # Both causes are named because they look identical here and lead to
         # opposite fixes: a budget ceiling reached mid-turn ends the stream just
         # as an unhonoured `--output-format` does, and only one of them is a bug.
+        #
+        # `events_seen` and `last_event_type` are what tell the two apart without
+        # reading the tail by hand: a stream that was never JSON lines parses to
+        # nothing, while a turn cut off at the ceiling leaves a run of events
+        # ending somewhere mid-turn. `unparsed_lines` distinguishes truncation
+        # mid-line from a stream that simply stopped between lines.
         return {
             "error": (
                 "claude emitted no result event: the turn may have stopped at the "
                 f"--max-budget-usd {MAX_BUDGET_USD} ceiling, or stream-json was not honoured"
             ),
-            "metadata": {**base, "stdout_tail": proc.stdout.strip()[-500:]},
+            "metadata": {
+                **base,
+                "events_seen": len(events),
+                "last_event_type": events[-1].get("type") if events else None,
+                "stdout_tail": proc.stdout.strip()[-500:],
+            },
         }
 
-    output_text = payload.get("result") or ""
+    answer = payload.get("result")
+    is_text = isinstance(answer, str)
+    output_text = answer if is_text else ""
+    # What to show when the answer is withheld from the grader: the text itself,
+    # or a repr of whatever non-text thing arrived instead of one. Kept as a
+    # string so no branch below can slice a dict.
+    withheld = (output_text if is_text else "" if answer is None else repr(answer))[:500]
     trace = _skill_trace(events, proc.stdout)
     state, detail = trace.state, trace.detail
     metadata = {
@@ -304,21 +337,29 @@ def _invoke(prompt: str, cwd: Path, started: float) -> dict:
     # shape should not be able to manufacture failures.
     subtype = payload.get("subtype")
     if payload.get("is_error") or (subtype is not None and subtype != _RESULT_OK):
-        return {
+        result: dict[str, Any] = {
             "error": f"claude did not finish the turn (result subtype {subtype!r})",
-            "metadata": {**metadata, "unscored_output": output_text[:500]},
+            "metadata": {**metadata, "unscored_output": withheld},
         }
-
-    if state != "ran":
+    elif answer is not None and not is_text:
+        # Nothing downstream would notice: promptfoo would hand the rubric a
+        # dict and the rubric would score whatever it made of it. Text is what
+        # this suite grades, so a non-text answer is a shape change to report,
+        # not to render.
+        result = {
+            "error": f"claude returned a non-text result ({type(answer).__name__})",
+            "metadata": {**metadata, "unscored_output": withheld},
+        }
+    elif state != "ran":
         # A hard error, not a metadata flag. The fallback answer is plausible and
         # well-formed, so left to the grader it scores as a pass and the suite
         # reports on an agent that never loaded Studio. A run that did not engage
         # the skill is not a measurement of the skill, and must not be graded as
         # one — this is the part of the fix that keeps the defect from returning
         # the next time an invocation detail changes.
-        result: dict[str, Any] = {
+        result = {
             "error": f"cf skill did not run ({state}): {detail}",
-            "metadata": {**metadata, "unscored_output": output_text[:500]},
+            "metadata": {**metadata, "unscored_output": withheld},
         }
     else:
         result = {"output": output_text, "metadata": metadata}

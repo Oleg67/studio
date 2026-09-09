@@ -83,8 +83,12 @@ or no trace to trust:
 Metadata: `skill_state` (`ran` / `failed` / `absent`), `skills_invoked` (the
 names), `skill_call_inputs` (those inputs verbatim, for when a name did not
 resolve), `unparsed_lines`, and `unscored_output` — the answer that was withheld
-from the grader, kept for diagnosis. Every return, answer or error, carries
-`duration_s` and `sandbox`.
+from the grader, kept for diagnosis. Every return *that reached the CLI*, answer
+or error, carries `duration_s` and `sandbox`; a failure before the sandbox
+exists — setup error, setup timeout — has no sandbox path to name. The
+missing-`result` case adds `events_seen` and `last_event_type`, which is what
+tells a budget ceiling apart from a format regression without reading the tail
+by hand.
 
 Expect errors, not just failures, if the CLI's invocation contract changes
 again. That is the intended behaviour: an error says the suite could not

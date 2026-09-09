@@ -216,6 +216,19 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
         assert "output" not in out
         assert "Execute skill:" in out["error"]
 
+    @pytest.mark.parametrize("rival", ["superpowers", "cf-generate"])
+    def test_another_skill_failing_does_not_fail_the_cf_run(self, run_provider, rival):
+        """`Execute skill:` with no name attached meant one skill's failure
+        condemned another's success — the mirror of the substring problem on the
+        positive side, and it fired before any positive evidence was weighed."""
+        out, _seen = run_provider(_stream(
+            _skill_call(), _skill_result(),
+            _result(f"<error>Execute skill: {rival}</error> but cf answered"),
+        ))
+
+        assert "error" not in out
+        assert out["metadata"]["skill_state"] == "ran"
+
     def test_a_different_skill_running_is_not_the_cf_skill_running(self, run_provider):
         out, _seen = run_provider(
             _stream(_skill_call(skill="superpowers"), _skill_result(), _result()),
@@ -336,6 +349,43 @@ class TestAnUnreadableRunIsNeverScored:
         assert "did not finish the turn" in out["error"]
         assert out["metadata"]["skill_state"] == "ran", "the skill loaded; the turn is what failed"
         assert out["metadata"]["unscored_output"] == "half a gate"
+        assert out["cost"] == 0.01, "a run that hit a limit is the expensive kind; report it"
+
+    def test_a_non_text_result_is_not_handed_to_the_grader(self, run_provider):
+        """Nothing downstream would notice: promptfoo would pass the rubric a
+        dict and the rubric would score whatever it made of it."""
+        out, _seen = run_provider(
+            _stream(_skill_call(), _skill_result(), _result({"answer": "structured"})),
+        )
+
+        assert "output" not in out
+        assert "non-text result (dict)" in out["error"]
+        assert "structured" in out["metadata"]["unscored_output"], "kept for diagnosis"
+
+    def test_a_non_text_result_on_a_short_turn_reports_the_turn(self, run_provider):
+        """Both faults at once. The turn is the outer fact, so it is what the
+        error names — and nothing slices the dict on the way out."""
+        out, _seen = run_provider(_stream(
+            _skill_call(), _skill_result(),
+            _result({"answer": "structured"}, subtype="error_max_turns"),
+        ))
+
+        assert "did not finish the turn" in out["error"]
+        assert "structured" in out["metadata"]["unscored_output"]
+
+    def test_the_missing_result_metadata_tells_the_two_causes_apart(self, run_provider):
+        """Naming both causes in prose still leaves triage reading the tail by
+        hand. A stream that was never JSON lines parses to nothing; a turn cut
+        off at the ceiling leaves events that stop mid-turn."""
+        broken, _seen = run_provider("not json at all\nnor this\n")
+        truncated, _seen2 = run_provider(_stream(_skill_call(), _skill_result()))
+
+        assert broken["metadata"]["events_seen"] == 0
+        assert broken["metadata"]["last_event_type"] is None
+        assert broken["metadata"]["unparsed_lines"] == 2
+        assert truncated["metadata"]["events_seen"] == 2
+        assert truncated["metadata"]["last_event_type"] == "user"
+        assert truncated["metadata"]["unparsed_lines"] == 0
 
     def test_a_dropped_line_is_counted_where_the_verdict_is_read(self, run_provider):
         """A line that will not parse can be a dropped `tool_result`, and the
@@ -351,6 +401,23 @@ class TestAnUnreadableRunIsNeverScored:
         out, _seen = run_provider(transcript)
 
         assert out["metadata"]["unparsed_lines"] == 1
+
+    def test_a_dropped_line_also_warns_where_a_person_will_see_it(self, run_provider, caplog):
+        """A count riding along in a metadata dict is not the same as saying so.
+        The house rule is that a swallowed exception warns rather than only
+        returning a number."""
+        transcript = (
+            json.dumps(_skill_call()) + "\n"
+            + "{ truncated mid-line\n"
+            + json.dumps(_skill_result()) + "\n"
+            + json.dumps(_result()) + "\n"
+        )
+
+        with caplog.at_level("WARNING", logger=claude_provider.logger.name):
+            run_provider(transcript)
+
+        assert [r for r in caplog.records if "would not parse" in r.getMessage()]
+        assert "line 2" in caplog.text, "and says which line it was"
 
     def test_a_timeout_reports_how_long_it_ran_and_where(self, run_provider, tmp_path):
         """850s under the 900s worker deadline is a documented failure mode. It
