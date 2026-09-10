@@ -178,11 +178,52 @@ class TestARunThatLoadedTheSkillIsScored:
 
         out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
 
+        assert out["output"] == "the answer", "the point of the false positive: it gets scored"
+        assert "error" not in out
         assert out["metadata"]["skill_state"] == "ran"
         assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf"]
         assert out["metadata"]["skill_call_inputs"] == [
             '{"command": "superpowers:brainstorming", "mode": "cf"}'
         ], "the raw input shows where the name was found, so a false pass is visible"
+
+    def test_a_namespaced_value_in_an_unrelated_field_counts_the_same_way(self, run_provider):
+        """The same false-positive class through a second mechanism: the value is
+        not literally `cf`, it reduces to it once the namespace is dropped. The
+        comparison is whole-value *after* stripping, which is what lets
+        `plugin:cf` count while `cf-generate` does not."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming", "mode": "plugin:cf",
+            }},
+        ]}}
+
+        out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_state"] == "ran"
+        assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf"]
+
+    def test_a_nested_identifier_is_found_too(self, run_provider):
+        """Stopping at the top level would contradict the trade above rather than
+        implement it: a tool input that nests its identifier one level down is a
+        shape this cannot rule out, and missing it means *every* run errors —
+        the certain false failure, not the rare false pass."""
+        nested = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill",
+             "input": {"options": {"skill": "cf"}}},
+        ]}}
+
+        out, _seen = run_provider(_stream(nested, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_state"] == "ran"
+        assert out["metadata"]["skills_invoked"] == ["cf"]
+
+    def test_an_unambiguous_match_is_not_flagged(self, run_provider):
+        """The flag has to distinguish, or it says nothing."""
+        out, _seen = run_provider(
+            _stream(_skill_call(skill="studio:cf"), _skill_result(), _result()),
+        )
+
+        assert out["metadata"]["skill_match_ambiguous"] is False
 
     def test_a_result_event_with_no_subtype_is_still_an_answer(self, run_provider):
         """Only a subtype that is present and says otherwise means a short turn.
@@ -292,6 +333,27 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
+        assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf-generate"], (
+            "both candidates were parsed and neither matched — not one silently dropped"
+        )
+
+    def test_a_false_positive_match_whose_call_errored_is_still_a_failure(self, run_provider):
+        """The accepted false positive buys a *name* match, not a verdict. The
+        matched call still has to have come back clean, so the interaction of
+        the loose match with the error branch is the one worth pinning."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming", "mode": "cf",
+            }},
+        ]}}
+
+        out, _seen = run_provider(
+            _stream(rival, _skill_result(is_error=True), _result("answered directly")),
+        )
+
+        assert "output" not in out
+        assert "came back as an error" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     def test_argument_text_naming_cf_is_not_the_skill_naming_cf(self, run_provider):
         """The prompt this suite sends is `/cf <request>`, so every scenario's
@@ -448,6 +510,25 @@ class TestAnUnreadableRunIsNeverScored:
         out, _seen = run_provider(transcript)
 
         assert out["metadata"]["unparsed_lines"] == 1
+
+    def test_an_ambiguous_match_is_surfaced_not_merely_inspectable(self, run_provider, caplog):
+        """"Inspectable" only mitigates the false positive if someone inspects.
+        A verdict resting on one of several candidate identifiers is the shape a
+        false pass takes, so it is reported per run — on stderr and in the
+        metadata — rather than left for whoever thinks to diff
+        `skill_call_inputs` afterwards."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming", "mode": "cf",
+            }},
+        ]}}
+
+        with caplog.at_level("WARNING", logger=claude_provider.logger.name):
+            out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_match_ambiguous"] is True
+        assert "may rest on a field that is not the skill name" in caplog.text
+        assert "brainstorming" in caplog.text, "and names the other candidate"
 
     def test_a_dropped_line_also_warns_where_a_person_will_see_it(self, run_provider, caplog):
         """A count riding along in a metadata dict is not the same as saying so.
