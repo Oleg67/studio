@@ -152,6 +152,38 @@ class TestARunThatLoadedTheSkillIsScored:
         assert out["metadata"]["skill_state"] == "ran"
         assert out["metadata"]["skills_invoked"] == ["cf"]
 
+    def test_a_bare_cf_in_an_unrelated_field_still_counts(self, run_provider):
+        """A known false positive, pinned rather than closed.
+
+        Which key holds the skill name is not contractual, so every
+        identifier-shaped value is a candidate — and a rival skill invoked with
+        some field whose *whole* value is `cf` therefore reads as this skill
+        running. Prose does not do this (the test above), but a single token in
+        an unrelated field does.
+
+        Narrowing to a fixed set of name keys would close this and open a worse
+        hole: guess the key wrong and *every* run errors, because the name would
+        never be found where it actually lives. This way round the failure is a
+        rare false pass; that way round it is a certain false failure. Erring
+        toward recall is what makes the harness work without knowing the key,
+        and `skill_call_inputs` keeps the raw input so the verdict stays
+        inspectable. If the key is ever pinned down, this test is where the
+        trade gets renegotiated.
+        """
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming", "mode": "cf",
+            }},
+        ]}}
+
+        out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_state"] == "ran"
+        assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf"]
+        assert out["metadata"]["skill_call_inputs"] == [
+            '{"command": "superpowers:brainstorming", "mode": "cf"}'
+        ], "the raw input shows where the name was found, so a false pass is visible"
+
     def test_a_result_event_with_no_subtype_is_still_an_answer(self, run_provider):
         """Only a subtype that is present and says otherwise means a short turn.
         An unfamiliar event shape must not be able to manufacture failures."""
@@ -242,6 +274,21 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
         out, _seen = run_provider(
             _stream(_skill_call(skill="cf-generate"), _skill_result(), _result()),
         )
+
+        assert "output" not in out
+        assert "none of them named 'cf'" in out["error"]
+
+    def test_a_single_token_that_is_not_cf_does_not_count_either(self, run_provider):
+        """The trade pinned above is not "any short token wins". The comparison
+        stays whole-value in every field, so a sibling name sitting in the same
+        unrelated position does not match."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "command": "superpowers:brainstorming", "mode": "cf-generate",
+            }},
+        ]}}
+
+        out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
