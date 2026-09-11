@@ -305,6 +305,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "did not run (failed)" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     def test_the_real_failure_signature_is_recognised(self, run_provider):
         """The observed failure is `<error>Execute skill: cf</error>`. The previous
@@ -316,6 +317,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "Execute skill:" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     @pytest.mark.parametrize("rival", ["superpowers", "cf-generate"])
     def test_another_skill_failing_does_not_fail_the_cf_run(self, run_provider, rival):
@@ -337,6 +339,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
         assert out["metadata"]["skills_invoked"] == ["superpowers"], "and it says which did run"
 
     def test_a_skill_whose_name_merely_begins_with_cf_is_not_the_cf_skill(self, run_provider):
@@ -346,6 +349,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     def test_a_single_token_that_is_not_cf_does_not_count_either(self, run_provider):
         """The trade pinned above is not "any short token wins". The comparison
@@ -361,6 +365,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "none of them named 'cf'" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
         assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf-generate"], (
             "both candidates were parsed and neither matched — not one silently dropped"
         )
@@ -415,6 +420,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "came back as an error" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     def test_a_cf_call_with_no_result_at_all_is_not_a_confirmed_run(self, run_provider):
         """Absence of a result is not a non-error result. A trace cut off after
@@ -424,6 +430,7 @@ class TestARunThatNeverLoadedTheSkillIsNotScored:
 
         assert "output" not in out
         assert "no result in the transcript" in out["error"]
+        assert out["metadata"]["skill_state"] == "failed"
 
     def test_a_repeated_call_id_collapses_to_the_last_one(self, run_provider):
         """The id is the only binding between a call and its result, so a
