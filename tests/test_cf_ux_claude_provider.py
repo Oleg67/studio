@@ -202,14 +202,24 @@ class TestARunThatLoadedTheSkillIsScored:
         assert out["metadata"]["skill_state"] == "ran"
         assert out["metadata"]["skills_invoked"] == ["brainstorming", "cf"]
 
-    def test_a_nested_identifier_is_found_too(self, run_provider):
+    @pytest.mark.parametrize("shape", [
+        pytest.param({"options": {"skill": "cf"}}, id="one-level"),
+        pytest.param({"o": {"p": {"skill": "cf"}}}, id="two-levels"),
+        pytest.param({"args": [{"skill": "cf"}]}, id="list-of-dicts"),
+        pytest.param({"a": [{"b": {"skill": "cf"}}]}, id="dict-in-list-in-dict"),
+        pytest.param({"a": [["cf"]]}, id="nested-lists"),
+    ])
+    def test_a_nested_identifier_is_found_at_any_depth(self, run_provider, shape):
         """Stopping at the top level would contradict the trade above rather than
-        implement it: a tool input that nests its identifier one level down is a
-        shape this cannot rule out, and missing it means *every* run errors —
-        the certain false failure, not the rare false pass."""
+        implement it: a tool input that nests its identifier is a shape this
+        cannot rule out, and missing it means *every* run errors — the certain
+        false failure, not the rare false pass.
+
+        Parametrized past depth one because "any depth" is the claim; a single
+        level would leave a regression below it uncaught.
+        """
         nested = {"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": "t1", "name": "Skill",
-             "input": {"options": {"skill": "cf"}}},
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": shape},
         ]}}
 
         out, _seen = run_provider(_stream(nested, _skill_result(), _result()))
@@ -217,13 +227,31 @@ class TestARunThatLoadedTheSkillIsScored:
         assert out["metadata"]["skill_state"] == "ran"
         assert out["metadata"]["skills_invoked"] == ["cf"]
 
-    def test_an_unambiguous_match_is_not_flagged(self, run_provider):
-        """The flag has to distinguish, or it says nothing."""
+    @pytest.mark.parametrize("payload", ["cf", ["cf"], ["other", {"skill": "cf"}]])
+    def test_an_input_that_is_not_a_dict_is_scanned_rather_than_refused(
+        self, run_provider, payload,
+    ):
+        """A boundary the earlier version refused outright (`if not
+        isinstance(payload, dict): return []`). Scanning it follows from the same
+        reasoning as the depth walk: a bare string or list input is a shape that
+        cannot be ruled out, and refusing it means the name is never found and
+        every run errors. Called out because it is a behaviour change, not a
+        side effect."""
+        odd = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": payload},
+        ]}}
+
+        out, _seen = run_provider(_stream(odd, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_state"] == "ran"
+
+    def test_a_sole_candidate_leaves_the_other_candidates_empty(self, run_provider):
+        """The field has to distinguish, or it says nothing."""
         out, _seen = run_provider(
             _stream(_skill_call(skill="studio:cf"), _skill_result(), _result()),
         )
 
-        assert out["metadata"]["skill_match_ambiguous"] is False
+        assert out["metadata"]["skill_match_other_candidates"] == []
 
     def test_a_result_event_with_no_subtype_is_still_an_answer(self, run_provider):
         """Only a subtype that is present and says otherwise means a short turn.
@@ -511,11 +539,11 @@ class TestAnUnreadableRunIsNeverScored:
 
         assert out["metadata"]["unparsed_lines"] == 1
 
-    def test_an_ambiguous_match_is_surfaced_not_merely_inspectable(self, run_provider, caplog):
+    def test_the_other_candidates_are_surfaced_not_merely_inspectable(self, run_provider, caplog):
         """"Inspectable" only mitigates the false positive if someone inspects.
-        A verdict resting on one of several candidate identifiers is the shape a
-        false pass takes, so it is reported per run — on stderr and in the
-        metadata — rather than left for whoever thinks to diff
+        A verdict reached from an input naming more than one identifier is the
+        shape a false pass takes, so it is reported per run — on stderr and in
+        the metadata — rather than left for whoever thinks to diff
         `skill_call_inputs` afterwards."""
         rival = {"type": "assistant", "message": {"content": [
             {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
@@ -526,9 +554,44 @@ class TestAnUnreadableRunIsNeverScored:
         with caplog.at_level("WARNING", logger=claude_provider.logger.name):
             out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
 
-        assert out["metadata"]["skill_match_ambiguous"] is True
+        assert out["metadata"]["skill_match_other_candidates"] == ["brainstorming"]
         assert "may rest on a field that is not the skill name" in caplog.text
         assert "brainstorming" in caplog.text, "and names the other candidate"
+
+    def test_the_other_candidates_are_deduplicated_and_ordered(self, run_provider, caplog):
+        """This list reaches a message a person reads, and the traversal is a
+        stack — so left raw it repeats a value that appears twice and orders the
+        rest by an implementation detail. Two runs of the same transcript would
+        then produce different prose for the same finding."""
+        rival = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill", "input": {
+                "a": "zebra", "b": "alpha", "c": "cf",
+                "d": {"e": "zebra"}, "f": ["alpha", "middle"],
+            }},
+        ]}}
+
+        with caplog.at_level("WARNING", logger=claude_provider.logger.name):
+            out, _seen = run_provider(_stream(rival, _skill_result(), _result()))
+
+        assert out["metadata"]["skill_match_other_candidates"] == [
+            "alpha", "middle", "zebra",
+        ], "each named once, in an order that does not depend on the walk"
+        assert "['alpha', 'middle', 'zebra']" in caplog.text
+
+    def test_a_second_identifier_beside_a_genuine_call_is_reported_too(self, run_provider):
+        """The field is an over-approximation and says so: it cannot tell a
+        wrong-field match from a correct call that merely carries a second
+        identifier, because telling them apart needs the very knowledge whose
+        absence created the trade. Reported, not judged — `ran` still stands."""
+        genuine = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Skill",
+             "input": {"command": "cf", "mode": "auto"}},
+        ]}}
+
+        out, _seen = run_provider(_stream(genuine, _skill_result(), _result()))
+
+        assert out["output"] == "the answer", "a flag, not a verdict"
+        assert out["metadata"]["skill_match_other_candidates"] == ["auto"]
 
     def test_a_dropped_line_also_warns_where_a_person_will_see_it(self, run_provider, caplog):
         """A count riding along in a metadata dict is not the same as saying so.
