@@ -7,10 +7,12 @@ decision_id correlation that chains one decision's events.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -1252,3 +1254,420 @@ def test_the_cap_boundary_is_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         out = dl._capped("x" * length)
         assert len(out) <= cap, (length, len(out))
         assert out.endswith(dl._TRUNCATION_MARKER) is truncated, (length, out[-20:])
+
+
+class TestASwappedBackupIsNotAcceptedAsThePredecessor:
+    """The name proves a rotation happened; it does not prove *this* file was it.
+
+    `_rotated_segment_belongs` compared `backup.name` alone, so any file later placed
+    at that path was accepted as the claimed predecessor and joined into the trail —
+    the same silent-fabrication failure the claim check was built to prevent, one
+    level down.
+    """
+
+    def _rotated_pair(self, tmp_path: Path) -> tuple[Path, Path]:
+        log = tmp_path / "decisions.jsonl"
+        backup = log.with_name(log.name + ".1")
+        backup.write_text('{"event":"older","payload":{}}\n', encoding="utf-8")
+        dl._write_rotation_link(log, backup)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write('{"event":"live","payload":{}}\n')
+        return log, backup
+
+    def test_the_genuine_segment_is_still_joined(self, tmp_path: Path) -> None:
+        log, _ = self._rotated_pair(tmp_path)
+        assert [e["event"] for e in dl.read_events(path=log)] == \
+            ["older", "rotate", "live"]
+
+    def test_a_different_file_with_the_same_name_is_excluded(
+            self, tmp_path: Path, caplog) -> None:
+        log, backup = self._rotated_pair(tmp_path)
+        backup.write_text('{"event":"substituted","payload":{}}\n', encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+            events = [e["event"] for e in dl.read_events(path=log)]
+        assert "substituted" not in events, events
+        assert any("does not match" in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+    def test_a_same_length_substitution_is_still_caught(self, tmp_path: Path) -> None:
+        """Size alone is weak, which is why the segment's content is digested too.
+
+        Stale wording, caught in review: this said "the first line is digested",
+        which was the superseded design. A reader could conclude that records after
+        the first go unverified — the opposite of what the sibling test below proves.
+        """
+        log, backup = self._rotated_pair(tmp_path)
+        original = backup.read_text(encoding="utf-8")
+        swapped = original.replace("older", "newer")
+        assert len(swapped) == len(original), "the fixture no longer tests equal length"
+        backup.write_text(swapped, encoding="utf-8")
+        assert "newer" not in [e["event"] for e in dl.read_events(path=log)]
+
+    def test_a_link_written_before_fingerprints_existed_is_still_honoured(
+            self, tmp_path: Path) -> None:
+        """Rejecting those would drop history that is very probably genuine."""
+        log = tmp_path / "decisions.jsonl"
+        log.with_name(log.name + ".1").write_text('{"event":"older"}\n', encoding="utf-8")
+        log.write_text(
+            '{"event":"rotate","payload":{"segment":"decisions.jsonl.1"}}\n'
+            '{"event":"live"}\n', encoding="utf-8")
+        assert [e["event"] for e in dl.read_events(path=log)] == \
+            ["older", "rotate", "live"]
+
+
+class TestTheFingerprintCoversTheWholeSegment:
+    """Four holes the first version of this fix left, each found in its own review."""
+
+    def _linked(self, tmp_path: Path, name: str = "decisions.jsonl") -> tuple[Path, Path]:
+        log = tmp_path / name
+        backup = log.with_name(log.name + ".1")
+        backup.write_text('{"event":"older","payload":{}}\n{"event":"second","payload":{}}\n',
+                          encoding="utf-8")
+        dl._write_rotation_link(log, backup)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write('{"event":"live","payload":{}}\n')
+        return log, backup
+
+    def test_a_change_to_a_later_record_is_caught(self, tmp_path: Path) -> None:
+        """First line and length both preserved — the case a head digest cannot see."""
+        log, backup = self._linked(tmp_path)
+        original = backup.read_text(encoding="utf-8")
+        tampered = original.replace('"second"', '"SECOND"')
+        assert len(tampered) == len(original), "the fixture no longer preserves length"
+        assert tampered.split("\n")[0] == original.split("\n")[0], "first line changed"
+        backup.write_text(tampered, encoding="utf-8")
+        assert "older" not in [e["event"] for e in dl.read_events(path=log)]
+
+    def test_an_unreadable_fingerprint_excludes_rather_than_admits(
+            self, tmp_path: Path, caplog) -> None:
+        """A claimed fingerprint that cannot be checked is not a match.
+
+        The first version returned True here, conflating "none was recorded" with "one
+        was recorded and cannot be read" — so an unverifiable segment joined anyway.
+        """
+        if not hasattr(os, "geteuid") or os.geteuid() == 0:
+            pytest.skip("needs a non-root POSIX uid for mode bits to gate the read")
+        log, backup = self._linked(tmp_path)
+        backup.chmod(0o000)
+        try:
+            with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+                events = [e["event"] for e in dl.read_events(path=log)]
+        finally:
+            backup.chmod(0o644)
+        assert "older" not in events, events
+        # `stat()` succeeds on a mode-000 file while the read does not, so the identity
+        # comes back *partial* — the size without the digest — and the comparison
+        # rejects it rather than the empty-identity branch firing. Either way the segment
+        # is excluded and a warning says why; asserting one specific message pinned the
+        # wrong path.
+        # The read itself now fails first, so the message is about the read rather than
+        # about a partial fingerprint: the backup is read once and checked against those
+        # bytes, which is what closed the window between the two. Asserted on what the
+        # line has to tell an operator — that the bytes did not arrive, and that the
+        # segment is therefore out of this read — not on its exact phrasing.
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("could not be read" in m for m in messages), messages
+        assert any("excluded from this read" in m for m in messages), messages
+
+    def test_a_hostile_name_can_still_claim_its_own_backup(self, tmp_path: Path) -> None:
+        """The link stores the capped name, so the comparison must cap too.
+
+        Capping the name to stop an encode crash made the stored value differ from the
+        raw one compared against it, so a rotation with a surrogate in its name could
+        never claim its genuine backup and the reader dropped valid history.
+        """
+        log, _ = self._linked(tmp_path, name="decisions\udcff.jsonl")
+        assert [e["event"] for e in dl.read_events(path=log)] == \
+            ["older", "second", "rotate", "live"]
+
+    def test_no_filesystem_warning_anywhere_renders_a_raw_exception(self) -> None:
+        """CWE-532: an OSError's own text carries the absolute path, and any bytes in it.
+
+        Swept across the module rather than over the one function that had the defect.
+        Pinning it to `_segment_identity` meant that moving the read into a shared helper
+        moved the sink out from under the test, which is exactly how the next one gets
+        added unnoticed.
+
+        Bound by the AST, not by the spelling: the first version grepped for the name
+        `exc`, so a handler that called its exception anything else walked straight past
+        it. Here every `except ... as <name>` contributes its own name, whatever it is,
+        and any log call that passes that name without `_describe` is the finding.
+        """
+        tree = ast.parse(Path(dl.__file__).read_text(encoding="utf-8"))
+        offenders = []
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler) or not handler.name:
+                continue
+            caught = handler.name
+            for call in ast.walk(handler):
+                if not isinstance(call, ast.Call):
+                    continue
+                func = call.func
+                if not (isinstance(func, ast.Attribute)
+                        and isinstance(func.value, ast.Name) and func.value.id == "logger"):
+                    continue
+                for arg in call.args:
+                    if isinstance(arg, ast.Name) and arg.id == caught:
+                        offenders.append(f"line {call.lineno}: logger.{func.attr}(..., {caught})")
+        assert not offenders, \
+            f"an exception reaches a log record unredacted: {offenders}"
+
+
+def test_an_entirely_unreadable_identity_excludes_the_segment(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """The branch the filesystem cases do not reach, exercised directly.
+
+    The backup is now read once and fingerprinted from those bytes, so a filesystem
+    failure is caught by the read itself. The empty-identity branch remains for the case
+    where the fingerprint of bytes in hand comes back empty, and it is the one that used
+    to return `True` and admit an unverified segment. Patching the fingerprinter is the
+    only way to reach it.
+    """
+    log = tmp_path / "decisions.jsonl"
+    backup = log.with_name(log.name + ".1")
+    backup.write_text('{"event":"older","payload":{}}\n', encoding="utf-8")
+    dl._write_rotation_link(log, backup)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"event":"live","payload":{}}\n')
+
+    monkeypatch.setattr(dl, "_identity_of", lambda data: {})
+    with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+        events = [e["event"] for e in dl.read_events(path=log)]
+
+    assert "older" not in events, "an unverifiable segment was joined"
+    assert any("could not be read" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+
+class TestAPartialFingerprintIsNeverTrusted:
+    """`stat()` and the read fail independently, so a partial identity is the norm.
+
+    Mode bits gate the read and not the stat, so the ordinary shape of an unreadable
+    segment is "size known, contents not". Recording that as a fingerprint is worse
+    than recording none: it reads as verification and an equal-size replacement
+    satisfies it.
+    """
+
+    def test_a_failed_hash_records_no_identity_at_all(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        log = tmp_path / "decisions.jsonl"
+        backup = log.with_name(log.name + ".1")
+        backup.write_text('{"event":"older"}\n', encoding="utf-8")
+
+        real_open = Path.open
+
+        def _open(self, *args, **kwargs):
+            if self == backup and "b" in (args[0] if args else kwargs.get("mode", "")):
+                raise PermissionError("hash cannot read this")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _open)
+        identity = dl._segment_identity(backup)
+        assert identity == {}, f"a partial identity was recorded: {identity}"
+
+    def test_a_one_field_claim_is_excluded_not_half_matched(
+            self, tmp_path: Path, caplog) -> None:
+        """Written by a rotation whose hash failed — not a legacy claim, and unverifiable."""
+        log = tmp_path / "decisions.jsonl"
+        backup = log.with_name(log.name + ".1")
+        backup.write_text('{"event":"older"}\n', encoding="utf-8")
+        size = backup.stat().st_size
+        log.write_text(
+            '{"event":"rotate","payload":{"segment":"decisions.jsonl.1",'
+            f'"segment_bytes":{size}}}}}\n'
+            '{"event":"live"}\n', encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+            events = [e["event"] for e in dl.read_events(path=log)]
+        assert "older" not in events, events
+        assert any("incomplete fingerprint" in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+    def test_the_recovery_path_survives_an_exception_that_cannot_describe_itself(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`str(exc)` runs before any transform, so a hostile `__str__` escaped `record`."""
+        class Hostile(OSError):
+            def __str__(self) -> str:
+                raise RuntimeError("this exception will not describe itself")
+
+        monkeypatch.setenv("CFS_DECISION_LOG", str(tmp_path / "d.jsonl"))
+        monkeypatch.setattr(dl, "_append_locked",
+                            lambda *a, **k: (_ for _ in ()).throw(Hostile("boom")))
+        monkeypatch.setattr(dl, "_FAILURE_WARNED", False, raising=False)
+        assert dl.record("gate", {"k": "v"}) is False, "the failure escaped record()"
+
+
+def test_the_backup_is_verified_against_the_bytes_that_are_used(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No window between checking the segment and consuming it.
+
+    Validation used to open the backup, fingerprint it, close it, and the read then
+    reopened it by path. A replacement landing in that window was consumed silently,
+    and the advisory lock does not close it: `flock` serialises this module's own
+    callers, not an external `mv`. The bytes are read once and the fingerprint is
+    computed from those same bytes.
+
+    Simulated by swapping the file the instant its fingerprint is taken — under the old
+    shape the swapped content was read; now the verified bytes are the returned ones.
+    """
+    log = tmp_path / "decisions.jsonl"
+    backup = log.with_name(log.name + ".1")
+    backup.write_text('{"event":"genuine"}\n', encoding="utf-8")
+    dl._write_rotation_link(log, backup)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"event":"live"}\n')
+
+    real = dl._identity_of
+
+    def _swap_then_fingerprint(data: bytes):
+        backup.write_text('{"event":"substituted"}\n', encoding="utf-8")
+        return real(data)
+
+    monkeypatch.setattr(dl, "_identity_of", _swap_then_fingerprint)
+    events = [e["event"] for e in dl.read_events(path=log)]
+    assert "substituted" not in events, events
+    assert events == ["genuine", "rotate", "live"], events
+
+
+def test_a_segment_larger_than_any_rotation_is_not_hashed(
+        tmp_path: Path, caplog) -> None:
+    """The work is bounded before any read, and both paths hold a lock while doing it.
+
+    The writer fingerprints under its own `LOCK_EX` at rotation and the reader under
+    its own on the way in, so an unbounded hash is a lock held for as long as the file
+    is large. A segment past the rotation threshold cannot be one this log produced.
+    """
+    log = tmp_path / "decisions.jsonl"
+    backup = log.with_name(log.name + ".1")
+    backup.write_bytes(b"x" * (dl._MAX_SEGMENT_BYTES + 1))
+    log.write_text(
+        '{"event":"rotate","payload":{"segment":"decisions.jsonl.1"}}\n'
+        '{"event":"live"}\n', encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+        events = [e["event"] for e in dl.read_events(path=log)]
+    assert events == ["rotate", "live"], events
+    assert any("larger than any segment" in r.getMessage() for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+
+
+class TestTheWriteSideDegradesVisibly:
+    """The rotation's own fingerprint failure, and the silence of the legacy path."""
+
+    def test_a_write_time_fingerprint_failure_warns_and_writes_a_bare_link(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+        """The rotation still happened, so the link is still written — without a claim.
+
+        `_segment_identity` returning nothing is the shape of a segment that cannot be
+        read at rotation time. The link must still name the segment, since the rotation
+        is a fact, and it must carry no fingerprint rather than a partial one.
+        """
+        log = tmp_path / "decisions.jsonl"
+        backup = log.with_name(log.name + ".1")
+        backup.write_text('{"event":"older"}\n', encoding="utf-8")
+        monkeypatch.setattr(dl, "_segment_identity", lambda segment: {})
+        with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+            dl._write_rotation_link(log, backup)
+        written = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+        assert written["event"] == "rotate"
+        assert written["payload"]["segment"] == backup.name
+        assert "segment_bytes" not in written["payload"], written["payload"]
+        assert "segment_sha256" not in written["payload"], written["payload"]
+
+    def test_honouring_a_link_without_a_fingerprint_is_silent(
+            self, tmp_path: Path, caplog) -> None:
+        """A legacy claim is the ordinary case, not an anomaly; warning on it is noise."""
+        log = tmp_path / "decisions.jsonl"
+        log.with_name(log.name + ".1").write_text('{"event":"older"}\n', encoding="utf-8")
+        log.write_text(
+            '{"event":"rotate","payload":{"segment":"decisions.jsonl.1"}}\n'
+            '{"event":"live"}\n', encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+            events = [e["event"] for e in dl.read_events(path=log)]
+        assert events == ["older", "rotate", "live"]
+        assert not caplog.records, [r.getMessage() for r in caplog.records]
+
+    def test_a_real_rotation_records_both_fingerprint_fields(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """End to end through the writer's own rotation, asserting the link's content.
+
+        Every other test builds the link by hand. This one drives
+        `record → _append_locked → _rotate_if_large → os.replace → _write_rotation_link`
+        and then reads the result back, so the natural chain is exercised once.
+        """
+        log = tmp_path / "decisions.jsonl"
+        monkeypatch.setenv("CFS_DECISION_LOG", str(log))
+        monkeypatch.setattr(dl, "_MAX_BYTES", 200)
+        for i in range(6):
+            assert dl.record_gate("plan-resolved", f"Gate{i}", "decision", path=log) is True
+
+        backup = log.with_name(log.name + ".1")
+        assert backup.is_file(), "the writer never rotated"
+        link = next(json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()
+                    if '"rotate"' in line)
+        assert link["payload"]["segment"] == backup.name
+        assert link["payload"]["segment_bytes"] == backup.stat().st_size
+        assert len(link["payload"]["segment_sha256"]) == 64, link["payload"]
+        # and the trail reads across the boundary the link created
+        gates = [e["payload"]["gate"] for e in dl.read_events(path=log)
+                 if e["event"] == "gate"]
+        assert "Gate5" in gates, gates                 # the live segment
+        assert len(gates) > 1, gates                   # and at least one from the backup
+
+
+class TestTheSegmentBoundIsExactAndEnforcedByTheRead:
+    """Where the bound sits, and that `stat()` is not what enforces it."""
+
+    def _linked(self, tmp_path: Path, payload: bytes) -> tuple[Path, Path]:
+        log = tmp_path / "decisions.jsonl"
+        backup = log.with_name(log.name + ".1")
+        backup.write_bytes(payload)
+        dl._write_rotation_link(log, backup)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write('{"event":"live"}\n')
+        return log, backup
+
+    def test_a_segment_exactly_at_the_bound_is_still_fingerprinted(
+            self, tmp_path: Path) -> None:
+        """`> _MAX_SEGMENT_BYTES` makes the bound inclusive; only cap+1 was covered.
+
+        A rotated segment can legitimately reach the bound exactly — it is the rotation
+        threshold plus one event — so rejecting at the bound would exclude a genuine
+        segment, and only the far side of the boundary was being tested.
+        """
+        payload = b'{"event":"older"}\n'.ljust(dl._MAX_SEGMENT_BYTES, b" ")
+        assert len(payload) == dl._MAX_SEGMENT_BYTES
+        identity = dl._segment_identity(self._linked(tmp_path, payload)[1])
+        assert identity, "a segment exactly at the bound was refused"
+        assert identity["segment_bytes"] == dl._MAX_SEGMENT_BYTES
+
+    def test_a_segment_one_byte_over_is_refused(self, tmp_path: Path) -> None:
+        payload = b'{"event":"older"}\n'.ljust(dl._MAX_SEGMENT_BYTES + 1, b" ")
+        assert dl._segment_identity(self._linked(tmp_path, payload)[1]) == {}
+
+    def test_the_read_stops_even_when_stat_understates_the_size(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+        """`stat()` and `open()` are two observations of one path.
+
+        A replacement landing between them makes the first a lie, so a size check alone
+        would let an arbitrarily large file be hashed while a lock is held. The read
+        itself is what stops, one byte past the bound.
+        """
+        log, backup = self._linked(tmp_path, b'{"event":"older"}\n')
+        oversized = b"x" * (dl._MAX_SEGMENT_BYTES + 4096)
+        backup.write_bytes(oversized)
+
+        real_stat = Path.stat
+
+        def _understate(self, *args, **kwargs):
+            result = real_stat(self, *args, **kwargs)
+            if self == backup:
+                class _Small:
+                    st_size = 10
+                return _Small()
+            return result
+
+        monkeypatch.setattr(Path, "stat", _understate)
+        with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+            identity = dl._segment_identity(backup)
+        assert identity == {}, "an oversized segment was hashed on a stale size"
+        assert any("grew past the segment bound" in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
