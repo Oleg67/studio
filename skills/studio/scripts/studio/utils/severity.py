@@ -157,6 +157,33 @@ DEFAULT_SEVERITY: Dict[str, str] = {
 # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-default-table
 
 
+def _assert_table_covers_registry() -> None:
+    """Fail at import if the table and ``error_codes`` have drifted apart.
+
+    The docstring above promises exhaustiveness; a test alone cannot keep that
+    promise, because production never runs the tests. A code added to the
+    registry without a default would otherwise fall back to ``error`` silently
+    — correct in direction, but unreviewed — and an entry left behind after a
+    code was removed would pin a default nothing can ever emit.
+    """
+    # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exhaustive-guard
+    registry = {
+        value for name, value in vars(EC).items()
+        if name.isupper() and isinstance(value, str)
+    }
+    missing = sorted(registry - set(DEFAULT_SEVERITY))
+    orphaned = sorted(set(DEFAULT_SEVERITY) - registry)
+    if missing or orphaned:
+        raise RuntimeError(
+            "DEFAULT_SEVERITY is out of step with error_codes: "
+            f"missing={missing} orphaned={orphaned}"
+        )
+    # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exhaustive-guard
+
+
+_assert_table_covers_registry()
+
+
 def reject_caller_severity(extra: Dict[str, object]) -> None:
     """Refuse a caller-supplied ``severity``; the table is the only source.
 

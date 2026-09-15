@@ -22,6 +22,7 @@ from ..utils.constraints import (
 )
 from ..utils import error_codes as EC
 from ..utils.document import read_text_safe
+from ..utils.fixing import enrich_issues
 
 logger = logging.getLogger(__name__)
 
@@ -968,6 +969,12 @@ def run_self_check_from_meta(  # pylint: disable=too-many-locals
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-for-each-kit
 
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
+    # Enrich here, at the one point every self-check finding passes through, so the
+    # per-code reasons reach this command's own output and not only `validate`'s.
+    # `path` is kept: the kit-validation renderer and its duplicate filter read it.
+    for item in results:
+        for bucket in ("errors", "warnings"):
+            enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
     out = {
         "status": overall_status,
         "project_root": project_root.as_posix(),

@@ -286,6 +286,7 @@ per rule, per artifact kind and per constraint entry without touching a single c
 3. [x] - `p1` - Resolve a code's default severity - `inst-severity-resolve-default`
 4. [x] - `p1` - **IF** the code is absent or unknown to the table, **RETURN** `error` — an unrecognised rule must not be silently non-blocking - `inst-severity-unknown-is-error`
 5. [x] - `p1` - **IF** a caller supplied its own severity, refuse it — severity is derived from the code and no call site may override the declared default - `inst-severity-reject-override`
+6. [x] - `p1` - **IF** the table and the error-code registry disagree at import, refuse to load — a promise of exhaustiveness that only a test enforces is not kept in production - `inst-severity-exhaustive-guard`
 
 **Supporting**:
 - [x] - `p1` - Imports and module setup for the severity policy - `inst-severity-imports`

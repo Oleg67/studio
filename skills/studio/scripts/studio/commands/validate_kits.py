@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ..utils import decision_log
 from ..utils import error_codes as EC
 from ..utils.constraints import error as constraints_error
+from ..utils.fixing import enrich_issues
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-flow-kit-validate-cli:p1:inst-validate-kits-imports
 
@@ -591,7 +592,18 @@ def _build_validate_kits_result(
     kit_reports: List[Dict[str, object]],
     all_errors: List[Dict[str, object]],
     self_check_report: Dict[str, object],
+    project_root: Optional[Path] = None,
 ) -> Tuple[int, Dict[str, Any]]:
+    # Both entry points converge here, so this is where every kit-level finding and
+    # every binding warning gets its per-code reasons. Self-check findings arrive
+    # already enriched; enrichment is idempotent, so re-touching them is harmless.
+    # `path` is kept: `_show_error` and the duplicate filter in
+    # `_collect_self_check_failures` both read it.
+    enrich_issues(all_errors, project_root=project_root, strip_path=False)
+    for item in self_check_report.get("results", []) or []:
+        if isinstance(item, dict):
+            for bucket in ("errors", "warnings"):
+                enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
     overall_status = "PASS" if not all_errors else "FAIL"
     result: Dict[str, Any] = {
         "status": overall_status,
@@ -697,6 +709,7 @@ def run_validate_kits(
         kit_reports=kit_reports,
         all_errors=all_errors,
         self_check_report=self_check_report,
+        project_root=project_root,
     )
 
 
@@ -836,6 +849,7 @@ def _validate_kit_by_path(kit_path: Path, *, verbose: bool = False) -> Tuple[int
         kit_reports=[kit_report],
         all_errors=all_errors,
         self_check_report=self_check_report,
+        project_root=kit_dir.parent,
     )
 
 
