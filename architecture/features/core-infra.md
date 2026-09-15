@@ -33,6 +33,7 @@
   - [Context Loading](#context-loading)
   - [Mirror Override](#mirror-override)
   - [Decision Log](#decision-log)
+  - [Assert an Armed Reversal](#assert-an-armed-reversal)
 - [4. States (CDSL)](#4-states-cdsl)
   - [Project Installation State](#project-installation-state)
 - [5. Definitions of Done](#5-definitions-of-done)
@@ -745,6 +746,21 @@ Enables users to install Studio globally, initialize it in any project with sens
   - [x] - `p1` - Determine which of the four not-recorded causes applies — opted out, an undeterminable opt-out state, no log location outside a project, or a failed write — so the reported reason is the real one rather than the nearest of two - `inst-log-gate-cmd-reason`
   - [x] - `p1` - Render the outcome as one line that names *why* nothing was recorded — logging off, an unwritable log, or a refused ruling — since a formatter that returns its text instead of printing exits in silence; a refusal decided before the writer is reached states the logging state on a second line, because its reason says nothing about it and one identical line was printed whether logging was on, off or undeterminable - `inst-log-gate-cmd-format`
 - [x] - `p1` - Human-friendly formatter for `cfs usage-report` output - `inst-usage-report-cmd-format`
+
+### Assert an Armed Reversal
+
+- [x] `p1` - **ID**: `cpt-studio-algo-core-infra-armed-reversal`
+
+**Input**: A project root. **Deliberately nothing about the action being guarded.**
+
+**Output**: Whether a reversal mechanism is armed, which one, and — when none is — a reason naming every mechanism that would have satisfied it
+
+**Steps**:
+1. [x] - `p1` - Name the three mechanisms in the order they are tried — worktree, branch, snapshot — where the order is not a preference but a strength ranking, each strictly weaker than the one before, so the first that answers is the strongest available; "try them in any order" is how the weakest silently becomes the default - `inst-reversal-vocab`
+2. [x] - `p1` - Return whether a way back exists, which mechanism provides it, and the consequence a caller acts on, keeping the fact and the consequence as separate readings - `inst-reversal-outcome`
+3. [x] - `p1` - Ask git through the repository's existing bounded query rather than a second subprocess of this module's own, since that helper already carries the timeout, the never-raises contract and the filesystem codec a ref needs, and a duplicate implementation is how such a fix gets lost. Keep apart the two halves of "no answer" — a valid negative and a tool failure — because they are different things to tell an operator even though both refuse - `inst-reversal-git`
+4. [x] - `p1` - Name every mechanism in every refusal: an operator told "no reversal is armed" learns that something stopped and nothing about what to do, while one told about a worktree, a branch and a snapshot has a list to act on, and the first two usually take seconds - `inst-reversal-refusal`
+5. [x] - `p1` - Assert, never judge: take no description of the action, so the check cannot be tempted into deciding whether an action *looks* undoable — the behaviour this replaces, which classifies an option's visible action path. Treat unknown as refusal in every case, because a failed probe fires exactly when the environment is unusual and reading it as permission would arm nothing while allowing everything. Report rather than gate, leaving the caller to decide what a refusal means - `inst-reversal-assert`
 
 ## 4. States (CDSL)
 

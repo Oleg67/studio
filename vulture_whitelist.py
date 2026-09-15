@@ -196,3 +196,17 @@ finding_json_schema  # noqa: B018
 # The algo itself is declared in architecture/features/traceability-validation.md (### CPT Reference Scan).
 from studio.utils.cpt_reference_scan import graph_for  # noqa: E402
 graph_for  # noqa: B018
+
+# armed_reversal — the whole module, which nothing imports yet and that is the point.
+# It asserts a reversal mechanism is armed before an autonomous edit; the caller that will
+# consult it is the PDSL side of the same task, and the autonomy paths that exist today
+# select menu options rather than editing files, so there is currently nothing for it to
+# guard. Built before the consumer deliberately: putting the check in place before
+# autonomous editing ships is the only order in which it is cheap.
+# REMOVAL TRIGGER — delete these entries once a dispatch or eligibility module consults it
+# (grep `armed_reversal` outside its own module and tests). The algorithm is declared in
+# architecture/features/core-infra.md (### Assert an Armed Reversal).
+from studio.utils.armed_reversal import ReversalCheck, armed_reversal  # noqa: E402
+armed_reversal  # noqa: B018
+ReversalCheck.mechanism  # noqa: B018
+ReversalCheck.refused  # noqa: B018
