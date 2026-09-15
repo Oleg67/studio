@@ -26,6 +26,33 @@ from . import error_codes as EC
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-define-reasons
 _REASONS: Dict[str, List[str]] = {
+    # @cpt-begin:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-jit-reasons
+    # JIT-retrieval readiness signals, and the two non-TOC warnings alongside them
+    EC.TOC_HEADING_DUPLICATE: [
+        "Two sections were given the same heading text, so retrieval cannot address them separately",
+        "A section was copied and its heading was never adjusted",
+    ],
+    EC.TOC_HEADING_DEPTH_JUMP: [
+        "An intermediate heading level was skipped, leaving a gap in the section tree",
+        "A heading was demoted or promoted without adjusting the ones around it",
+    ],
+    EC.TOC_SECTION_TOO_LONG: [
+        "A section grew past the point where retrieving it returns more than the answer",
+        "Several topics accumulated under one heading instead of getting their own",
+    ],
+    EC.TOC_MISSING_DESCRIPTION: [
+        "The document has no short description under its top heading for retrieval to rank on",
+    ],
+    EC.CODEBASE_ENTRY_EMPTY: [
+        "Registered path `{path}` does not exist, or was moved without updating the registry",
+        "The entry's extension filter matches nothing under `{path}`",
+    ],
+    EC.FILE_TOO_LARGE: [
+        "`{path}` is past the size ceiling and was skipped rather than scanned",
+        "A generated or vendored file was registered as source",
+    ],
+    # @cpt-end:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-jit-reasons
+
     # Structure — task / checkbox consistency
     EC.CDSL_STEP_UNCHECKED: [
         "CDSL child step `{id}` was not marked as done after completing the work",
@@ -715,6 +742,58 @@ def _prompt_for_toc_and_warnings(ctx: _FixPromptContext) -> Optional[str]:
 # @cpt-end:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-toc
 
 
+# @cpt-begin:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-jit-readiness
+def _prompt_for_jit_readiness(ctx: _FixPromptContext) -> Optional[str]:
+    """Prompts for the JIT-retrieval readiness warnings and the two scope warnings that
+    shipped beside them.
+
+    Split out of :func:`_prompt_for_toc_and_warnings`, which reached twelve returns with
+    these added. A mapping rather than another if-chain: only two of the six say
+    anything about the issue beyond its location, so making the other four data keeps
+    the branch count to what actually branches.
+    """
+    path_s = ctx.loc.rsplit(':', 1)[0] if ':' in ctx.loc else ctx.loc
+    if ctx.code == EC.TOC_HEADING_DUPLICATE:
+        heading = str(ctx.issue.get("heading_text") or "")
+        first = ctx.issue.get("first_seen_line")
+        where = f" (first seen at line {first})" if first else ""
+        return (
+            f"Open `{ctx.loc}`: heading `{heading}` repeats an earlier one{where}. "
+            f"Retrieval addresses a section by its heading, so two identical headings "
+            f"cannot be told apart -- make this one distinct."
+        )
+    if ctx.code == EC.TOC_HEADING_DEPTH_JUMP:
+        frm, to = ctx.issue.get("from_level"), ctx.issue.get("to_level")
+        jump = f" (h{frm} -> h{to})" if frm and to else ""
+        return (
+            f"Open `{ctx.loc}`: heading depth jumps{jump}, skipping a level. "
+            f"Insert the intermediate heading, or lift this one, so the section tree "
+            f"a retriever walks has no gaps."
+        )
+    fixed = {
+        EC.TOC_SECTION_TOO_LONG: (
+            f"Open `{ctx.loc}`: this section is long enough that retrieving it returns "
+            f"far more than the answer. Split it under narrower sub-headings."
+        ),
+        EC.TOC_MISSING_DESCRIPTION: (
+            f"Add a short description under the top heading of `{path_s}`: retrieval "
+            f"ranks a document on it before any section is read."
+        ),
+        EC.CODEBASE_ENTRY_EMPTY: (
+            f"Registered codebase entry `{path_s}` resolves to no files. Fix the path or "
+            f"its extensions in the artifact registry, or remove the entry -- an entry "
+            f"that matches nothing reports full coverage over an empty scope."
+        ),
+        EC.FILE_TOO_LARGE: (
+            f"`{path_s}` is past the size ceiling and was skipped rather than scanned, so "
+            f"it counts toward nothing. Split it, or raise the ceiling deliberately if it "
+            f"is meant to be this big."
+        ),
+    }
+    return fixed.get(ctx.code)
+# @cpt-end:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-jit-readiness
+
+
 # @cpt-begin:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-cdsl-structure
 def _prompt_for_cdsl_structure(ctx: _FixPromptContext) -> Optional[str]:
     if ctx.code == EC.CDSL_DUPLICATE_INST_ID:
@@ -764,6 +843,7 @@ def _build_fixing_prompt(issue: Dict[str, object], project_root: Optional[Path] 
         _prompt_for_cross_ref_coverage,
         _prompt_for_code_traceability,
         _prompt_for_toc_and_warnings,
+        _prompt_for_jit_readiness,
         _prompt_for_cdsl_structure,
     ]
     for builder in builders:
