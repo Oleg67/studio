@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..utils import decision_log
+from ..utils import error_codes as EC
 from ..utils.constraints import error as constraints_error
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-flow-kit-validate-cli:p1:inst-validate-kits-imports
@@ -108,6 +109,7 @@ def _missing_bound_artifact_warnings(
                 "Constraints declare artifact kind but no manifest resource "
                 "binding is available for template/example self-check"
             ),
+            code=EC.KIT_TEMPLATE_BINDING_MISSING,
             path=None,
             line=1,
             kit_id=str(kit_id),
@@ -464,6 +466,7 @@ def _missing_resource_binding_errors(
             constraints_error(
                 "resources",
                 f"Resource '{res_id}' path not found: {res_path_str}",
+                code=EC.KIT_RESOURCE_PATH_NOT_FOUND,
                 path=str(abs_path),
                 line=1,
                 kit=kit_id,
@@ -920,6 +923,7 @@ def _new_path_kit_report(
             constraints_error(
                 "constraints",
                 "Invalid constraints",
+                code=EC.CONSTRAINTS_INVALID,
                 path=constraints_error_path,
                 line=1,
                 errors=list(kc_errs),
@@ -962,6 +966,7 @@ def _apply_path_model_info(
     err = constraints_error(
         "resources",
         str(model_error),
+        code=EC.KIT_MODEL_INVALID,
         path=kit_dir,
         line=1,
         kit=slug,

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from . import document
 from . import error_codes as EC
+from .severity import default_severity
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ def error(
     }
     if code:
         out["code"] = code
+    out["severity"] = default_severity(code)
     out["location"] = f"{path_s}:{int(line)}" if (path_s and not path_s.startswith("<")) else path_s
     extra = {k: v for k, v in extra.items() if v is not None}
     out.update(extra)

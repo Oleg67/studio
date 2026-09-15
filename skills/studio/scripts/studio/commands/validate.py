@@ -1615,7 +1615,7 @@ def _emit_issue_extras(issue: dict) -> bool:
 
     handled_keys = {
         "type", "message", "code", "line", "path", "location",
-        "reasons", "fixing_prompt",
+        "reasons", "fixing_prompt", "severity",
     }
     for key, value in issue.items():
         if key in handled_keys or value is None or not value or value == []:

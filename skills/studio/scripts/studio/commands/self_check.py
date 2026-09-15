@@ -146,6 +146,11 @@ def _append_missing_definition_placeholder(
         "Template missing ID placeholder for defined kind"
         if required else
         "Template missing optional ID placeholder for defined kind",
+        code=(
+            EC.TEMPLATE_DEF_PLACEHOLDER_MISSING
+            if required
+            else EC.TEMPLATE_DEF_PLACEHOLDER_MISSING_OPTIONAL
+        ),
         path=template_path,
         line=1,
         kit_id=kit_id,
@@ -176,6 +181,7 @@ def _append_missing_template_id_issue(
     issues["errors"].append(constraints_error(
         "template",
         "ID kind has no template in constraints.toml",
+        code=EC.TEMPLATE_ID_KIND_NO_TEMPLATE,
         path=template_path,
         line=1,
         kit_id=kit_id,
@@ -252,6 +258,7 @@ def _check_defined_id_placeholders(
             issues["errors"].append(constraints_error(
                 "template",
                 "ID placeholder not under required headings",
+                code=EC.TEMPLATE_DEF_PLACEHOLDER_WRONG_HEADINGS,
                 path=template_path,
                 line=line_no,
                 kit_id=kit_id,
@@ -387,6 +394,11 @@ def _append_missing_reference_issue(
             if required
             else "Template missing optional reference placeholder"
         ),
+        code=(
+            EC.TEMPLATE_REF_PLACEHOLDER_MISSING
+            if required
+            else EC.TEMPLATE_REF_PLACEHOLDER_MISSING_OPTIONAL
+        ),
         path=template_path,
         line=1,
         kit_id=kit_id,
@@ -470,6 +482,7 @@ def _required_reference_heading_issue(  # pylint: disable=too-many-arguments
     return constraints_error(
         "template",
         "Required reference placeholder not under required headings",
+        code=EC.TEMPLATE_REF_PLACEHOLDER_WRONG_HEADINGS,
         path=template_path,
         line=error_line,
         kit_id=kit_id,
@@ -523,6 +536,7 @@ def _check_template_constraints_consistency(
         issues["errors"].append(constraints_error(
             "template",
             "Template file could not be read",
+            code=EC.TEMPLATE_READ_ERROR,
             path=template_path,
             line=1,
             kit_id=str(kit_id),
@@ -699,6 +713,7 @@ def _append_constraints_load_failure(
         "errors": [constraints_error(
             "constraints",
             "Invalid constraints.toml",
+            code=EC.CONSTRAINTS_INVALID,
             path=(constraints_path or (kit_base / "constraints.toml")),
             line=1,
             errors=list(constraint_errors),
