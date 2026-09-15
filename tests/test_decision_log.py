@@ -1671,3 +1671,359 @@ class TestTheSegmentBoundIsExactAndEnforcedByTheRead:
         assert identity == {}, "an oversized segment was hashed on a stale size"
         assert any("grew past the segment bound" in r.getMessage() for r in caplog.records), \
             [r.getMessage() for r in caplog.records]
+
+
+class TestAnEventTooLargeCannotHideASegment:
+    """The "plus one event" in `_MAX_SEGMENT_BYTES` has to be something the writer enforces.
+
+    The bound is documented as the rotation threshold plus one event, and the reader
+    refuses anything larger on the grounds that this log did not produce it. Nothing made
+    the second half true: `record()` truncates nothing, and six of the seven typed
+    wrappers forward their arguments uncapped. One oversized event therefore pushed a
+    genuine segment past the bound, and the substitution check then excluded this log's
+    own history — the failure that check exists to prevent, reached from the other side.
+    """
+
+    def _fill_to_one_byte_under_the_threshold(self, log: Path) -> int:
+        """Land the log on exactly `_MAX_BYTES - 1`, the worst case the bound allows.
+
+        Padded to the byte rather than left a filler line short. The segment a rotation
+        produces is `(_MAX_BYTES - 1) + one event + its newline`, so this is the size at
+        which the event cap has no slack — anywhere below it, an over-long event can be
+        absorbed and the test would pass without the cap doing anything.
+        """
+        filler = '{"event":"older","schema":1,"payload":{"x":"%s"}}\n' % ("y" * 900)
+        written = 0
+        with log.open("w", encoding="utf-8") as handle:
+            while written + len(filler) < dl._MAX_BYTES - 1:
+                handle.write(filler)
+                written += len(filler)
+            remaining = dl._MAX_BYTES - 1 - written
+            pad = '{"event":"older","schema":1,"payload":{"x":"%s"}}\n'
+            handle.write(pad % ("y" * (remaining - (len(pad % "") ))))
+            written = dl._MAX_BYTES - 1
+        assert log.stat().st_size == dl._MAX_BYTES - 1, log.stat().st_size
+        return written
+
+    def test_a_rotated_segment_survives_an_oversized_event(self, tmp_path: Path) -> None:
+        """The reproduction from the report, asserted on the events rather than the size."""
+        log = tmp_path / "decisions.jsonl"
+        self._fill_to_one_byte_under_the_threshold(log)
+        dl.record("read", path=log, payload={"method": "m", "source": "x" * 70000})
+        dl.record("live", path=log, payload={})
+
+        backup = log.with_name(log.name + ".1")
+        assert backup.is_file(), "the oversized event did not trigger the rotation"
+        events = [event["event"] for event in dl.read_events(path=log)]
+        assert "older" in events, (
+            "a segment this log wrote itself was excluded from its own history; "
+            f"backup={backup.stat().st_size} bound={dl._MAX_SEGMENT_BYTES}"
+        )
+
+    def test_the_segment_a_rotation_produces_stays_within_the_bound(self, tmp_path: Path) -> None:
+        """The arithmetic, not just its consequence.
+
+        `_MAX_SEGMENT_BYTES` is `_MAX_BYTES + 64 KiB`, and a rotation happens *before* the
+        append that crossed the threshold — so the largest segment this log can produce is
+        one byte under the threshold plus one whole event. Asserting the size directly
+        says which of the two numbers is wrong when this fails.
+        """
+        log = tmp_path / "decisions.jsonl"
+        self._fill_to_one_byte_under_the_threshold(log)
+        dl.record("read", path=log, payload={"method": "m", "source": "x" * 70000})
+        dl.record("live", path=log, payload={})
+
+        backup = log.with_name(log.name + ".1")
+        assert backup.stat().st_size <= dl._MAX_SEGMENT_BYTES, (
+            f"a rotation produced a segment the reader will refuse: "
+            f"{backup.stat().st_size} > {dl._MAX_SEGMENT_BYTES}"
+        )
+
+    def test_the_bounds_are_the_sizes_they_are_documented_to_be(self) -> None:
+        """Pinned against literals, because every other test here derives from them.
+
+        The cases below are built from `_MAX_EVENT_BYTES` and checked against
+        `_MAX_SEGMENT_BYTES`, so shrinking both together keeps them all green while the
+        documented sizes quietly stop being true. A constant a test draws its cases from
+        has to be pinned to a literal somewhere, or it is testing itself.
+        """
+        assert dl._MAX_BYTES == 5 * 1024 * 1024, dl._MAX_BYTES
+        assert dl._MAX_EVENT_BYTES == 64 * 1024, dl._MAX_EVENT_BYTES
+        assert dl._MAX_SEGMENT_BYTES == 5 * 1024 * 1024 + 64 * 1024, dl._MAX_SEGMENT_BYTES
+
+    def test_the_two_bounds_agree_on_what_one_event_may_be(self) -> None:
+        """The arithmetic the segment bound rests on, asserted as a number.
+
+        A rotation happens at the threshold, so the largest segment this log can produce
+        is one byte under it plus one whole event and its newline. That stays inside
+        `_MAX_SEGMENT_BYTES` exactly while `_MAX_BYTES + _MAX_EVENT_BYTES` does.
+
+        Stated here rather than inferred from a fixture. The scenario tests below cannot
+        reach it: an over-long event is replaced by a short marker, so raising the event
+        cap leaves every one of them green while making a legitimate segment unreadable.
+        """
+        largest_segment = (dl._MAX_BYTES - 1) + dl._MAX_EVENT_BYTES + len("\n")
+        assert largest_segment <= dl._MAX_SEGMENT_BYTES, (
+            f"an event of {dl._MAX_EVENT_BYTES} bytes on a log of {dl._MAX_BYTES - 1} "
+            f"produces a {largest_segment}-byte segment, past the reader's "
+            f"{dl._MAX_SEGMENT_BYTES}-byte bound"
+        )
+
+    def test_no_event_is_ever_written_longer_than_the_cap(self, tmp_path: Path) -> None:
+        """The other half: the cap has to hold for what `record()` actually writes.
+
+        Asserted on the bytes in the file, not on a hand-built record. An earlier version
+        of this test measured `_bounded_event` on a dict it built itself and then called
+        `record()`, which builds its own with a real timestamp — so the assertion and the
+        action were about two different events, and a one-byte-too-large cap passed.
+        """
+        log = tmp_path / "decisions.jsonl"
+        for payload in ({"method": "m", "source": "x" * 70000},
+                        {f"{'k' * 200}{n}": "v" * 400 for n in range(500)},
+                        {f"key{n}": "v" * 900 for n in range(200)},
+                        {"nested": {"deep": ["y" * 90000]}}):
+            dl.record("read", path=log, payload=payload)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 4, lines
+        for line in lines:
+            assert len(line.encode("utf-8")) <= dl._MAX_EVENT_BYTES, len(line.encode("utf-8"))
+
+    def test_an_event_too_large_leaves_a_marker_rather_than_a_hole(
+            self, tmp_path: Path) -> None:
+        """Silence here would be the same defect one level down.
+
+        The trail exists to be audited, so a record that could not be written has to say
+        so in the place it would have occupied — dropping it leaves a gap indistinguishable
+        from a decision never taken.
+        """
+        log = tmp_path / "decisions.jsonl"
+        dl.record("read", path=log, payload={"method": "m", "source": "x" * 70000})
+        events = list(dl.read_events(path=log))
+        assert [event["event"] for event in events] == ["read"], events
+        payload = events[0]["payload"]
+        assert payload["truncated"] is True, payload
+        assert payload["original_bytes"] > dl._MAX_EVENT_BYTES, payload
+        assert "source" in payload["dropped_keys"], payload
+
+    def _record_of(self, source: str) -> dict:
+        """A fixed record shape, so only the payload varies between the two sides."""
+        return {"schema": dl.SCHEMA_VERSION, "ts": "2026-09-15T00:00:00.000000+00:00",
+                "run_id": "r" * 8, "decision_id": "", "event": "read",
+                "command": "", "payload": {"source": source}}
+
+    def test_an_event_of_exactly_the_cap_is_written_through_unchanged(self) -> None:
+        """`<=` makes the cap inclusive, and only the far side of it was covered.
+
+        An event may legitimately reach the cap exactly — that is the largest one the
+        segment arithmetic is built around — so truncating at the bound would replace a
+        recordable event with a marker and lose a payload for nothing. Asserted on
+        `_bounded_event` directly, which is the unit that decides this.
+        """
+        overhead = len(dl._bounded_event(self._record_of("")).encode("utf-8"))
+        line = dl._bounded_event(self._record_of("x" * (dl._MAX_EVENT_BYTES - overhead)))
+        assert len(line.encode("utf-8")) == dl._MAX_EVENT_BYTES, len(line.encode("utf-8"))
+        assert "truncated" not in json.loads(line)["payload"], "an event at the cap was cut"
+
+    def test_an_event_one_byte_over_the_cap_is_marked(self) -> None:
+        overhead = len(dl._bounded_event(self._record_of("")).encode("utf-8"))
+        line = dl._bounded_event(self._record_of("x" * (dl._MAX_EVENT_BYTES - overhead + 1)))
+        assert json.loads(line)["payload"]["truncated"] is True, line[:200]
+
+    def test_a_record_whose_own_explanation_does_not_fit_still_fits(self) -> None:
+        """The marker needs a floor of its own: key names alone can exceed the bound.
+
+        `dropped_keys` lists what was cut, and a payload of many long keys makes that list
+        larger than the cap it exists to respect — so the marker would be truncated by
+        nothing and written over-long.
+        """
+        record_obj = self._record_of("")
+        record_obj["payload"] = {f"{'k' * 900}{n}": "v" for n in range(200)}
+        line = dl._bounded_event(record_obj)
+        assert len(line.encode("utf-8")) <= dl._MAX_EVENT_BYTES, len(line.encode("utf-8"))
+        assert json.loads(line)["payload"]["truncated"] is True, line[:200]
+
+    def test_str_is_only_reached_for_keys_that_cannot_fail_it(self) -> None:
+        """Why the marker does not guard `str(key)`, written down so it stays true.
+
+        Listing the dropped keys calls `str()` on author-controlled keys, which looks like
+        a way for one bad payload to raise out of a function whose caller promises never
+        to. It is not reachable: serialisation happens first and rejects any key type
+        outside this set, and `str()` cannot fail on any member of it.
+
+        A guard was written here and then removed rather than shipped — defending a case
+        that cannot occur reads as evidence that it can.
+        """
+        for key in (1, 1.5, True, None, "plain"):
+            assert str(key), key
+        line = dl._bounded_event({"schema": 1, "ts": "t", "run_id": "r", "decision_id": "",
+                                  "event": "read", "command": "",
+                                  "payload": {1: "a", 2.5: "b", None: "c"}})
+        # `True` is deliberately not in that payload: `True == 1` in Python, so a literal
+        # containing both collapses to one key and the case would silently not be tested.
+        assert json.loads(line)["payload"] == {"1": "a", "2.5": "b", "null": "c"}, line
+
+    def test_the_keys_a_marker_lists_are_named_the_way_the_record_names_them(self) -> None:
+        """Raised in review: the marker said `None` and `True` where the log says `null`/`true`.
+
+        This one *reaches the truncation branch* — an earlier version of the test above
+        serialised to about a hundred bytes, so it exercised the ordinary path while
+        claiming to verify the marker. An auditor greps the marker for a key name; a name
+        the record would never have written fails at exactly the job the marker has.
+        """
+        line = dl._bounded_event({"schema": 1, "ts": "t", "run_id": "r", "decision_id": "",
+                                  "event": "read", "command": "",
+                                  "payload": {None: "a", True: "b", 2.5: "c",
+                                              "big": "x" * 70000}})
+        payload = json.loads(line)["payload"]
+        assert payload["truncated"] is True, "this did not reach the truncation branch"
+        assert set(payload["dropped_keys"]) == {"null", "true", "2.5", "big"}, payload
+
+    def test_the_marker_keeps_the_fields_that_identify_the_event(self) -> None:
+        """`schema`, `ts` and `run_id` are how a reader places a cut record in the trail.
+
+        Untested: the marker copied them through a comprehension nothing asserted, so
+        dropping one would have left a record that says a write was cut without saying
+        which run, when, or under which schema.
+        """
+        line = dl._bounded_event({"schema": 99, "ts": "2026-09-15T00:00:00+00:00",
+                                  "run_id": "run-abc", "decision_id": "dec-1",
+                                  "event": "read", "command": "cmd",
+                                  "payload": {"big": "x" * 70000}})
+        kept = json.loads(line)
+        assert kept["schema"] == 99, kept
+        assert kept["ts"] == "2026-09-15T00:00:00+00:00", kept
+        assert kept["run_id"] == "run-abc", kept
+        assert kept["decision_id"] == "dec-1", kept
+        assert kept["event"] == "read", kept
+
+    @pytest.mark.parametrize("filler,label", [
+        ("\u00e9", "2-byte"), ("\u4e2d", "3-byte"), ("\U0001f600", "4-byte"),
+    ])
+    def test_the_cap_counts_bytes_not_characters(self, filler: str, label: str) -> None:
+        """Every other boundary fixture here is ASCII, where the two counts are equal.
+
+        So swapping `_utf8_len` for `len` would pass all of them while letting an event of
+        65,536 characters — up to four times that in bytes — through the cap and past the
+        segment bound. Raised in review, and it is the encoding half of the same boundary
+        the rest of this class pins.
+        """
+        record_obj = {"schema": 1, "ts": "t", "run_id": "r", "decision_id": "",
+                      "event": "read", "command": "",
+                      "payload": {"source": filler * 30_000}}
+        line = dl._bounded_event(record_obj)
+        assert len(line.encode("utf-8")) <= dl._MAX_EVENT_BYTES, (label, len(line.encode("utf-8")))
+
+    def test_one_unserialisable_payload_costs_the_whole_run_its_trail(
+            self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Known, pre-existing, and not fixed here — pinned so the fix has a starting point.
+
+        `record`'s catch-all latches telemetry off for the rest of the run, which is right
+        for a target it has learned is unwritable and wrong for one bad payload, which says
+        nothing about the target. One event with an unusable key therefore silences every
+        later event too.
+
+        Asserted as it behaves today rather than as it should, so that changing it fails
+        here and the change is deliberate.
+        """
+        log = tmp_path / "decisions.jsonl"
+        # `monkeypatch`, not an assignment with a `finally`: the module-level latch is
+        # global state, and a hand-rolled restore leaves it set for every later test in
+        # the session if the assertion raises before the `finally` is reached in a way
+        # the fixture handles for free.
+        monkeypatch.setattr(dl, "_FAILURE_WARNED", False)
+        assert dl.record("before", path=log, payload={"k": "v"}) is True
+        assert dl.record("bad", path=log, payload={("tuple",): "v"}) is False
+        assert dl.record("after", path=log, payload={"k": "v"}) is False, (
+            "the latch no longer swallows later events — if that is deliberate, "
+            "this test records the old behaviour and should be updated with the fix"
+        )
+        assert [e["event"] for e in dl.read_events(path=log)] == ["before"]
+
+    def test_every_typed_wrapper_is_covered_by_the_choke_point(self) -> None:
+        """The count in the docstring, checked against the module rather than trusted.
+
+        It said seven wrappers with six uncapped, taken from the report that raised the
+        defect — which listed six and omitted `record_dispatch`. There are eight, seven
+        of them uncapped, and the number was repeated three times before anyone counted.
+
+        What actually matters is the second assertion: every typed wrapper reaches
+        `record`, so the bound in `record` covers all of them however many there are.
+        """
+        tree = ast.parse(Path(dl.__file__).read_text(encoding="utf-8"))
+        wrappers = {node.name: ast.unparse(node) for node in tree.body
+                    if isinstance(node, ast.FunctionDef) and node.name.startswith("record_")}
+        assert len(wrappers) == 8, sorted(wrappers)
+        for name, body in wrappers.items():
+            assert "record(" in body.replace(f"{name}(", ""), (
+                f"{name} does not go through `record`, so the event bound does not cover it"
+            )
+        capping = {name for name, body in wrappers.items() if "_gate_payload(" in body}
+        assert capping == {"record_gate"}, (
+            f"the set of wrappers that cap their own fields has changed: {capping}"
+        )
+
+    def test_the_marker_bounds_every_field_it_keeps_not_just_the_payload(self) -> None:
+        """Raised in review, and the claim it falsified was mine.
+
+        The marker keeps the fields that identify the event — `decision_id`, `event`,
+        `command` — and all three are caller-supplied. Capping only `dropped_keys` left a
+        200 KB `command` producing a 200 KB marker: the bound broken by the very record
+        that exists to report the bound being broken.
+
+        The floor written for this covered the reported field rather than the class of
+        field, which is the generalisation the playbook's B10 asks for and I did not make.
+        """
+        record_obj = {"schema": dl.SCHEMA_VERSION, "ts": "2026-09-15T00:00:00+00:00",
+                      "run_id": "r" * 8, "decision_id": "d" * 100_000,
+                      "event": "e" * 100_000, "command": "c" * 200_000,
+                      "payload": {"source": "x" * 70_000}}
+        line = dl._bounded_event(record_obj)
+        assert len(line.encode("utf-8")) <= dl._MAX_EVENT_BYTES, len(line.encode("utf-8"))
+        payload = json.loads(line)["payload"]
+        assert payload["truncated"] is True, payload
+        # and each kept field is individually bounded, not merely small by luck
+        kept = json.loads(line)
+        for field in ("decision_id", "event", "command"):
+            assert len(kept[field]) <= dl._GATE_TEXT_CAP, (field, len(kept[field]))
+
+    def test_one_event_is_one_byte_of_newline_on_every_platform(self) -> None:
+        """Raised in review: text mode makes the segment arithmetic platform-dependent.
+
+        `_MAX_SEGMENT_BYTES` is the threshold plus one event plus its newline. In text
+        mode Windows writes `\\r\\n` for `\\n`, so a full-size event lands one byte past the
+        bound there and a segment this log wrote becomes unreadable — the original defect,
+        on a platform nobody tests on.
+
+        Every append site is opened with an explicit `newline="\\n"`, which also keeps one
+        log byte-identical across platforms. That matters here beyond the arithmetic: the
+        segments are fingerprinted by SHA-256.
+        """
+        src = Path(dl.__file__).read_text(encoding="utf-8")
+        appends = re.findall(r'\.open\("a"[^)]*\)', src)
+        assert appends, "no append sites found — this guard has lost its subject"
+        for call in appends:
+            assert 'newline="\\n"' in call, (
+                f"an append site leaves newline translation on, so one event is two bytes "
+                f"of newline on Windows and the segment bound is off by one per event: {call}"
+            )
+
+    def test_every_line_this_module_writes_goes_through_the_bound(self) -> None:
+        """B10: the bound is a property of the log, not of one writer.
+
+        `record` is not the only thing that appends a line — `_write_rotation_link` writes
+        the `rotate` event that opens each new live segment. It was bounded incidentally,
+        every field capped by hand, which is a property a reader has to re-derive and a
+        future field can quietly break. The segment arithmetic assumes it of *every* line.
+        """
+        tree = ast.parse(Path(dl.__file__).read_text(encoding="utf-8"))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name == "_bounded_event":
+                continue
+            body = ast.unparse(node)
+            if ".write(" in body and "json.dumps(" in body:
+                offenders.append(node.name)
+        assert not offenders, (
+            f"these write a line built with a bare json.dumps, bypassing the event "
+            f"bound: {offenders}"
+        )

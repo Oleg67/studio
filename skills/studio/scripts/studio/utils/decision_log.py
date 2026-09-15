@@ -112,6 +112,18 @@ _MAX_BYTES = 5 * 1024 * 1024
 #: a file that cannot be claimed anyway.
 _MAX_SEGMENT_BYTES = _MAX_BYTES + 64 * 1024
 
+#: The largest one serialised event may be, and the "one event" the line above assumes.
+#: The writes are opened with ``newline="\n"`` so this arithmetic holds everywhere: in text
+#: mode Windows translates ``\n`` to ``\r\n``, which makes every event one byte longer than
+#: the bound assumes and puts a full-size event one byte past the segment bound. It also
+#: keeps one log byte-identical across platforms, which a fingerprinted audit trail needs.
+#: Rotation happens at the threshold, so the biggest segment this log can produce is one
+#: byte under it plus one whole event and its newline: `(_MAX_BYTES - 1) + L + 1`. That
+#: is within `_MAX_SEGMENT_BYTES` exactly when `L <= 64 KiB`, which is why the two
+#: constants share a number — the bound below is not a second opinion about size, it is
+#: this one restated for the reader.
+_MAX_EVENT_BYTES = 64 * 1024
+
 #: Fixed for the life of the process, so every event of one invocation shares it.
 _RUN_ID = uuid.uuid4().hex[:12]
 
@@ -269,6 +281,96 @@ def _redact(value: Any) -> Any:
     return value
 # @cpt-end:cpt-studio-algo-core-infra-decision-log:p1:inst-log-redact
 
+# @cpt-begin:cpt-studio-algo-core-infra-decision-log:p1:inst-log-event-bound
+def _utf8_len(text: str) -> int:
+    """The byte length the file will hold, measured so a lone surrogate cannot raise.
+
+    ``surrogatepass`` rather than the strict codec the write uses. Author-controlled text
+    arrives through ``surrogateescape``, so a raw byte becomes a lone surrogate; raising
+    while measuring would reach `record`'s catch-all, which latches telemetry off for the
+    whole run — turning one unmeasurable event into no trail at all. The write still
+    refuses such a line, exactly as it did before this existed.
+    """
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def _json_key(key: Any) -> str:
+    """A payload key named the way the record would have named it.
+
+    `str()` is the obvious choice and the wrong one: `json.dumps` coerces mapping keys by
+    its own rules, so `None` becomes `"null"` and `True` becomes `"true"` while `str()`
+    gives `"None"` and `"True"`. The marker exists to tell an auditor what the event held,
+    and a name that does not match what the log would have written fails at exactly that.
+
+    Derived by running the same coercion rather than restating its table, so the two cannot
+    disagree. Only key types `json.dumps` accepts reach here -- anything else fails the
+    serialisation above before this is called.
+    """
+    return next(iter(json.loads(json.dumps({key: 0}))))
+
+
+def _bounded_event(record_obj: Dict[str, Any]) -> str:
+    """One event's JSON line, never longer than ``_MAX_EVENT_BYTES``.
+
+    Here rather than at the call sites. Eight typed wrappers reach this module and only
+    the gate path caps its fields -- through `_gate_payload`, not in `record_gate` itself
+    -- which is precisely how an uncapped 70 KiB `source` field pushed a genuine segment
+    past the reader's bound and had this log's own history refused as a substitution. A
+    choke point every wrapper already passes through covers the seven that do not cap
+    today and the ninth nobody has written yet.
+
+    Eight and seven, counted rather than carried: the report that raised this listed six
+    uncapped wrappers and omitted `record_dispatch`, and the count was repeated from it
+    three times before anyone counted.
+
+    On the serialised line, not per field: an event of many small fields still adds up,
+    and it is the line that lands in the file.
+
+    An event too large to record leaves a marker saying so. Dropping it silently would
+    put a hole in the trail where a record used to be, which is the same defect one level
+    down — the trail must say a record was cut, not go quiet.
+
+    No warning, unlike every other place this module gives something up. Those warn
+    because the trail itself cannot say what happened: a segment excluded from a read
+    leaves no trace inside the log. Here it can and does, in the record's own place in
+    the order, and a command that logs large payloads would otherwise warn on every
+    event it writes.
+
+    """
+    line = json.dumps(record_obj, ensure_ascii=False, default=str)
+    if _utf8_len(line) <= _MAX_EVENT_BYTES:
+        return line
+    # Keep what identifies the event and drop only what made it too big. A reader looking
+    # for this decision still finds it, in its place in the order, saying what is missing.
+    # Capped, not merely carried. `command`, `event` and `decision_id` are caller-supplied,
+    # so a 200 KB `command` produced a 200 KB marker -- the bound broken by the record that
+    # exists to report the bound being broken. The floor below covered `dropped_keys` only,
+    # which is the reported field rather than the class of field (B10). `schema`, `ts` and
+    # `run_id` are engine-generated and fixed-width.
+    kept: Dict[str, Any] = {key: record_obj.get(key) for key in ("schema", "ts", "run_id")}
+    kept.update({key: _capped(str(record_obj.get(key, "")))
+                 for key in ("decision_id", "event", "command")})
+    original_bytes = _utf8_len(line)
+    kept["payload"] = {
+        "truncated": True,
+        "original_bytes": original_bytes,
+        "dropped_keys": sorted(_capped(_json_key(key))
+                               for key in (record_obj.get("payload") or {})),
+    }
+    marked = json.dumps(kept, ensure_ascii=False, default=str)
+    if _utf8_len(marked) <= _MAX_EVENT_BYTES:
+        return marked
+    # The key names alone can exceed the bound, so the marker needs its own floor: a
+    # record whose own explanation does not fit still has to fit.
+    kept["payload"] = {"truncated": True,
+                       "original_bytes": original_bytes,
+                       "dropped_keys": "omitted: the key names alone exceed the bound"}
+    return json.dumps(kept, ensure_ascii=False, default=str)
+
+
+# @cpt-end:cpt-studio-algo-core-infra-decision-log:p1:inst-log-event-bound
+
+
 
 # ---------------------------------------------------------------------------
 # Writing
@@ -337,8 +439,9 @@ def _read_bounded(segment: Path, consequence: str) -> Optional[bytes]:
     either one would be telling half its callers something untrue.
 
     The cheap ``stat()`` stays as a first filter: it avoids opening a file that is
-    already known to be too large, and costs nine microseconds against the read's
-    milliseconds.
+    already known to be too large, at a small fraction of the read it saves. An earlier
+    version of this sentence put figures on that ratio and both were wrong -- the numbers
+    were never measured, so they are gone rather than restated.
 
     The whole segment is held at once rather than streamed. That is what makes the
     bound meaningful — the ceiling is the rotation threshold, ~5 MiB, so the peak is
@@ -465,7 +568,11 @@ def _write_rotation_link(path: Path, backup: Path) -> None:
     records its own rotation rather than hiding it.
     """
     try:
-        line = json.dumps({
+        # Through the same choke point as every other line. This one is bounded already --
+        # the only variable field is a `_capped` filename -- but "bounded because each
+        # field happens to be capped" is a property a reader has to re-derive, and the
+        # segment bound assumes it of *every* line, not of the ones `record` wrote (B10).
+        line = _bounded_event({
             "schema": SCHEMA_VERSION,
             "ts": datetime.now(timezone.utc).isoformat(),
             "run_id": _RUN_ID,
@@ -479,8 +586,8 @@ def _write_rotation_link(path: Path, backup: Path) -> None:
             # already rotated the file, leaving the backup permanently unclaimed and so
             # unreadable by the very check this link exists to satisfy.
             "payload": {"segment": _capped(backup.name), **_segment_identity(backup)},
-        }, ensure_ascii=False, default=str)
-        with path.open("a", encoding="utf-8") as handle:
+        })
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line + "\n")
     except (OSError, ValueError) as exc:
         # A rotation whose link is unwritten costs the old segment its place in a
@@ -538,13 +645,13 @@ def _append_locked(target: Path, line: str) -> None:
         fcntl = None
     if fcntl is None:
         _rotate_if_large(target)
-        with target.open("a", encoding="utf-8") as handle:
+        with target.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line + "\n")
         return
     with open(target.with_name(target.name + ".lock"), "a", encoding="utf-8") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         _rotate_if_large(target)
-        with target.open("a", encoding="utf-8") as handle:
+        with target.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line + "\n")
         # The exclusive lock is released when lock_fh closes.
 
@@ -587,7 +694,7 @@ def record(
             "command": _redact(command),
             "payload": _redact(payload or {}),
         }
-        line = json.dumps(record_obj, ensure_ascii=False, default=str)
+        line = _bounded_event(record_obj)
         target.parent.mkdir(parents=True, exist_ok=True)
         _append_locked(target, line)
         if is_new:
