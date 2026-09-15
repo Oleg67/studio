@@ -233,11 +233,48 @@ def test_severity_is_stamped_not_defaulted_by_keyword():
 
 
 # ---------------------------------------------------------------------------
+# The stamped severity reaches the human report
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("is_error,code,expected", [
+    (True, EC.HEADING_MISSING, "error"),
+    (False, EC.TOC_STALE, "warning"),
+])
+def test_human_output_renders_the_stamped_severity(capsys, is_error, code, expected):
+    """A stamped severity that never reaches the reader is not reported.
+
+    ``severity`` was briefly listed in the human formatter's ``handled_keys``
+    without anything rendering it, which suppressed it from validate output
+    entirely — the worst of both, since the key looked handled. Pin it.
+    """
+    from studio.commands.validate import _format_issue
+    from studio.utils.ui import set_json_mode
+
+    set_json_mode(False)
+    try:
+        _format_issue(
+            constraints_error("toc", "m", path=Path("a.md"), line=3, code=code),
+            is_error=is_error,
+        )
+    finally:
+        set_json_mode(True)
+
+    assert f"severity: {expected}" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
 # The repo-wide invariant
 # ---------------------------------------------------------------------------
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+#: Generous enough that only a genuine hang trips it — a full validate of this
+#: repository runs in well under a second. Without it a deadlocked child would
+#: block the run forever, and CI would report a timeout on the whole job rather
+#: than on the test that caused it.
+_VALIDATE_TIMEOUT_SECONDS = 300
 
 
 @pytest.fixture(scope="module")
@@ -252,14 +289,23 @@ def repo_validate_report() -> Dict[str, object]:
     import subprocess  # local: only this fixture shells out
     import sys
 
-    proc = subprocess.run(
-        [sys.executable, "skills/studio/scripts/studio.py", "validate", "--json", "--verbose"],
-        cwd=_repo_root(), capture_output=True, text=True, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "skills/studio/scripts/studio.py", "validate", "--json", "--verbose"],
+            cwd=_repo_root(), capture_output=True, text=True, check=False,
+            timeout=_VALIDATE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(
+            f"validate did not finish within {_VALIDATE_TIMEOUT_SECONDS}s — treat as a hang, "
+            f"not a slow machine; it normally completes in under a second. "
+            f"stderr tail: {(exc.stderr or b'')[-400:]!r}"
+        ) from exc
     assert proc.stdout.strip(), f"validate produced no stdout (exit {proc.returncode}): {proc.stderr[:400]}"
     return json.loads(proc.stdout)
 
 
+@pytest.mark.integration
 def test_list_membership_equals_stamped_severity_over_this_repo(repo_validate_report):
     """The invariant the whole model rests on, measured on real output."""
     report = repo_validate_report
@@ -274,6 +320,7 @@ def test_list_membership_equals_stamped_severity_over_this_repo(repo_validate_re
     assert not mismatches, mismatches
 
 
+@pytest.mark.integration
 def test_every_finding_this_repo_emits_carries_a_code(repo_validate_report):
     report = repo_validate_report
     findings = (report.get("errors") or []) + (report.get("warnings") or [])

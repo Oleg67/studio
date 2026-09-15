@@ -54,9 +54,14 @@ VALIDATION_SEVERITIES = (ERROR, WARNING, OFF)
 DEFAULT_SEVERITY: Dict[str, str] = {
     # --- warning by default: reproduces today's routing exactly -------------
     # Each entry below corresponds to a call site that appends to ``warnings``.
-    # The CDSL missing-token trio is a deliberate, tracked backlog concession
-    # (see ``_validate_cdsl_step`` in utils/constraints.py), not a judgement
-    # that those rules are advisory in principle.
+    #
+    # Four of them come from ``_validate_cdsl_step`` (utils/constraints.py) and
+    # are a deliberate, tracked backlog concession rather than a judgement that
+    # the rules are advisory in principle. They are two distinct groups, both
+    # intentional here:
+    #   - the missing-token trio, CDSL.md S.3 / S.4 / S.5, one per absent token;
+    #   - CDSL_INCOMPLETE_STEP_LINE, CDSL.md CO.4, emitted once *alongside* the
+    #     trio when any token is missing — not a member of it.
     EC.CDSL_MISSING_CHECKBOX:                   WARNING,
     EC.CDSL_MISSING_PHASE_TOKEN:                WARNING,
     EC.CDSL_MISSING_INST_ID:                    WARNING,
