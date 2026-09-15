@@ -157,6 +157,23 @@ DEFAULT_SEVERITY: Dict[str, str] = {
 # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-default-table
 
 
+def reject_caller_severity(extra: Dict[str, object]) -> None:
+    """Refuse a caller-supplied ``severity``; the table is the only source.
+
+    Both finding builders stamp severity and then splat ``**extra`` over the
+    result, so a call site passing ``severity=`` would silently win over the
+    declared default. No call site does today — this raises so none can start
+    without being told, which is the whole guarantee this module exists to make.
+    """
+    # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-reject-override
+    if "severity" in extra:
+        raise TypeError(
+            "severity is derived from the finding's code, not passed by the caller: "
+            f"remove severity={extra['severity']!r} and rely on DEFAULT_SEVERITY"
+        )
+    # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-reject-override
+
+
 def default_severity(code: Optional[str]) -> str:
     """Return the declared default severity for ``code``.
 

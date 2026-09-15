@@ -233,6 +233,129 @@ def test_severity_is_stamped_not_defaulted_by_keyword():
 
 
 # ---------------------------------------------------------------------------
+# The table is the only source of severity
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("builder", [constraints_error, code_error], ids=["constraints", "codebase"])
+@pytest.mark.parametrize("supplied", ["off", "warning", "error"])
+def test_a_caller_cannot_override_the_stamped_severity(builder, supplied):
+    """`**extra` is splatted over the finding after the stamp, so a call site
+    passing `severity=` would silently beat the table. No call site does; this
+    makes sure none can start to without being told."""
+    with pytest.raises(TypeError, match="derived from the finding's code"):
+        builder("toc", "m", path=Path("a.md"), code=EC.TOC_STALE, severity=supplied)
+
+
+def test_other_extras_still_pass_through():
+    """The guard must reject exactly one key, not harden the builder generally."""
+    finding = constraints_error(
+        "template", "m", path=Path("a.md"), code=EC.TEMPLATE_READ_ERROR,
+        kit_id="sdlc", artifact_kind="PRD",
+    )
+    assert finding["kit_id"] == "sdlc"
+    assert finding["artifact_kind"] == "PRD"
+    assert finding["severity"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Each newly coded branch emits its code, at its declared severity
+#
+# Deterministic and self-contained: these call the emitting helpers directly
+# with synthetic inputs, so they neither depend on this repository's own
+# content nor shell out. Each fails if its call site loses the `code=` kwarg or
+# names the wrong constant.
+# ---------------------------------------------------------------------------
+
+def test_missing_kit_resource_path_is_coded_and_an_error(tmp_path):
+    from studio.commands.validate_kits import _missing_resource_binding_errors
+
+    errors = _missing_resource_binding_errors("sdlc", {"prd-template": str(tmp_path / "nope.md")})
+    assert [(e["code"], e["severity"]) for e in errors] == [
+        (EC.KIT_RESOURCE_PATH_NOT_FOUND, "error")
+    ]
+
+
+def test_unbindable_artifact_kind_is_coded_and_advisory():
+    """The one advisory member of the newly coded set.
+
+    validate-kits reports this with status PASS and warning_count 1, so an
+    `error` default here would turn a passing kit check into a failing one.
+    """
+    from studio.commands.validate_kits import _missing_bound_artifact_warnings
+
+    results = _missing_bound_artifact_warnings(kit_id="sdlc", known_kinds={"PRD"}, artifacts={})
+    warning = results[0]["warnings"][0]
+    assert (warning["code"], warning["severity"]) == (EC.KIT_TEMPLATE_BINDING_MISSING, "warning")
+    assert results[0]["status"] == "PASS"
+
+
+def test_unloadable_constraints_is_coded_and_an_error(tmp_path):
+    from studio.commands.self_check import _append_constraints_load_failure
+
+    results: List[dict] = []
+    _append_constraints_load_failure(
+        results, kit_id="sdlc", kit_base=tmp_path,
+        constraints_path=None, constraint_errors=["bad table"],
+    )
+    finding = results[0]["errors"][0]
+    assert (finding["code"], finding["severity"]) == (EC.CONSTRAINTS_INVALID, "error")
+
+
+def test_id_kind_without_a_template_is_coded_and_an_error(tmp_path):
+    from studio.commands.self_check import _append_missing_template_id_issue
+
+    issues: Dict[str, List[dict]] = {"errors": [], "warnings": []}
+    _append_missing_template_id_issue(
+        issues, template_path=tmp_path / "t.md", kit_id="sdlc", kind_u="PRD", id_kind="fr",
+    )
+    finding = issues["errors"][0]
+    assert (finding["code"], finding["severity"]) == (EC.TEMPLATE_ID_KIND_NO_TEMPLATE, "error")
+
+
+@pytest.mark.parametrize("required,expected_code,expected_severity,expected_list", [
+    (True, EC.TEMPLATE_DEF_PLACEHOLDER_MISSING, "error", "errors"),
+    (False, EC.TEMPLATE_DEF_PLACEHOLDER_MISSING_OPTIONAL, "warning", "warnings"),
+])
+def test_missing_definition_placeholder_splits_by_required(
+    tmp_path, required, expected_code, expected_severity, expected_list
+):
+    """The two-code split, exercised at its real call site.
+
+    This is the branch that previously emitted one codeless finding routed by
+    `required`; the code must track the flag, or severity silently depends on
+    call-site control flow again.
+    """
+    from studio.commands.self_check import _append_missing_definition_placeholder
+
+    issues: Dict[str, List[dict]] = {"errors": [], "warnings": []}
+    _append_missing_definition_placeholder(
+        issues, required=required, template_path=tmp_path / "t.md",
+        kit_id="sdlc", kind_u="PRD", id_kind="fr", template_id="cpt-{system}-fr-{slug}",
+    )
+    finding = issues[expected_list][0]
+    assert (finding["code"], finding["severity"]) == (expected_code, expected_severity)
+
+
+@pytest.mark.parametrize("required,expected_code,expected_severity", [
+    (True, EC.TEMPLATE_REF_PLACEHOLDER_MISSING, "error"),
+    (False, EC.TEMPLATE_REF_PLACEHOLDER_MISSING_OPTIONAL, "warning"),
+])
+def test_missing_reference_placeholder_splits_by_required(
+    tmp_path, required, expected_code, expected_severity
+):
+    from studio.commands.self_check import _append_missing_reference_issue
+
+    target = "errors" if required else "warnings"
+    issues: Dict[str, List[dict]] = {"errors": [], "warnings": []}
+    _append_missing_reference_issue(
+        issues, target, required=required, template_path=tmp_path / "t.md",
+        kit_id="sdlc", kind_u="PRD", id_kind="fr", template_id="cpt-{system}-fr-{slug}",
+    )
+    finding = issues[target][0]
+    assert (finding["code"], finding["severity"]) == (expected_code, expected_severity)
+
+
+# ---------------------------------------------------------------------------
 # The stamped severity reaches the human report
 # ---------------------------------------------------------------------------
 

@@ -285,6 +285,7 @@ per rule, per artifact kind and per constraint entry without touching a single c
 2. [x] - `p1` - Declare a default severity for every code in the error-code registry, reproducing today's routing exactly - `inst-severity-default-table`
 3. [x] - `p1` - Resolve a code's default severity - `inst-severity-resolve-default`
 4. [x] - `p1` - **IF** the code is absent or unknown to the table, **RETURN** `error` — an unrecognised rule must not be silently non-blocking - `inst-severity-unknown-is-error`
+5. [x] - `p1` - **IF** a caller supplied its own severity, refuse it — severity is derived from the code and no call site may override the declared default - `inst-severity-reject-override`
 
 **Supporting**:
 - [x] - `p1` - Imports and module setup for the severity policy - `inst-severity-imports`

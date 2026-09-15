@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import error_codes as EC
-from .severity import default_severity
+from .severity import default_severity, reject_caller_severity
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,7 @@ def error(
     if code:
         out["code"] = code
     out["severity"] = default_severity(code)
+    reject_caller_severity(extra)
     path_s = str(path)
     out["path"] = path_s
     out["location"] = f"{path_s}:{int(line)}" if (path_s and not path_s.startswith("<")) else path_s
