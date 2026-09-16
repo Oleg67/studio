@@ -14,7 +14,9 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..utils import decision_log
+from ..utils import error_codes as EC
 from ..utils.constraints import error as constraints_error
+from ..utils.fixing import enrich_issues
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-flow-kit-validate-cli:p1:inst-validate-kits-imports
 
@@ -108,6 +110,7 @@ def _missing_bound_artifact_warnings(
                 "Constraints declare artifact kind but no manifest resource "
                 "binding is available for template/example self-check"
             ),
+            code=EC.KIT_TEMPLATE_BINDING_MISSING,
             path=None,
             line=1,
             kit_id=str(kit_id),
@@ -464,6 +467,7 @@ def _missing_resource_binding_errors(
             constraints_error(
                 "resources",
                 f"Resource '{res_id}' path not found: {res_path_str}",
+                code=EC.KIT_RESOURCE_PATH_NOT_FOUND,
                 path=str(abs_path),
                 line=1,
                 kit=kit_id,
@@ -581,6 +585,31 @@ def _collect_self_check_failures(
 
 
 # @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-build-result
+def _enrich_kit_validation_findings(
+    all_errors: List[Dict[str, object]],
+    self_check_report: Dict[str, object],
+    project_root: Optional[Path],
+) -> None:
+    """Attach per-code reasons to kit-level findings and binding warnings, in place.
+
+    Both entry points converge on `_build_validate_kits_result`, so this is where
+    the findings that never pass through self-check get their reasons. Self-check
+    findings arrive already enriched and are touched a second time here; that is
+    safe because enrichment is idempotent — a property pinned by
+    `test_enrichment_is_idempotent_across_the_self_check_then_kits_double_pass`,
+    not assumed. `path` is kept: `_show_error` and the duplicate filter in
+    `_collect_self_check_failures` both read it.
+    """
+    enrich_issues(all_errors, project_root=project_root, strip_path=False)
+    for item in self_check_report.get("results", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for bucket in ("errors", "warnings"):
+            enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
+# @cpt-end:cpt-studio-algo-kit-validate:p1:inst-build-result
+
+
+# @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-build-result
 # @cpt-begin:cpt-studio-algo-kit-validate-by-path:p1:inst-build-result
 def _build_validate_kits_result(
     *,
@@ -588,7 +617,9 @@ def _build_validate_kits_result(
     kit_reports: List[Dict[str, object]],
     all_errors: List[Dict[str, object]],
     self_check_report: Dict[str, object],
+    project_root: Optional[Path] = None,
 ) -> Tuple[int, Dict[str, Any]]:
+    _enrich_kit_validation_findings(all_errors, self_check_report, project_root)
     overall_status = "PASS" if not all_errors else "FAIL"
     result: Dict[str, Any] = {
         "status": overall_status,
@@ -694,6 +725,7 @@ def run_validate_kits(
         kit_reports=kit_reports,
         all_errors=all_errors,
         self_check_report=self_check_report,
+        project_root=project_root,
     )
 
 
@@ -833,6 +865,7 @@ def _validate_kit_by_path(kit_path: Path, *, verbose: bool = False) -> Tuple[int
         kit_reports=[kit_report],
         all_errors=all_errors,
         self_check_report=self_check_report,
+        project_root=kit_dir.parent,
     )
 
 
@@ -920,6 +953,7 @@ def _new_path_kit_report(
             constraints_error(
                 "constraints",
                 "Invalid constraints",
+                code=EC.CONSTRAINTS_INVALID,
                 path=constraints_error_path,
                 line=1,
                 errors=list(kc_errs),
@@ -962,6 +996,7 @@ def _apply_path_model_info(
     err = constraints_error(
         "resources",
         str(model_error),
+        code=EC.KIT_MODEL_INVALID,
         path=kit_dir,
         line=1,
         kit=slug,
