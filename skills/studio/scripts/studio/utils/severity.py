@@ -55,8 +55,9 @@ DEFAULT_SEVERITY: Dict[str, str] = {
     # --- warning by default: reproduces today's routing exactly -------------
     # Each entry below corresponds to a call site that appends to ``warnings``.
     #
-    # Four of them come from ``_validate_cdsl_step`` (utils/constraints.py) and
-    # are a deliberate, tracked backlog concession rather than a judgement that
+    # Four of them come from ``_validate_cdsl_step_candidate``
+    # (utils/constraints.py:1340) and are a deliberate, tracked backlog
+    # concession rather than a judgement that
     # the rules are advisory in principle. They are two distinct groups, both
     # intentional here:
     #   - the missing-token trio, CDSL.md S.3 / S.4 / S.5, one per absent token;
@@ -167,12 +168,23 @@ def _assert_table_covers_registry() -> None:
     code was removed would pin a default nothing can ever emit.
     """
     # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exhaustive-guard
-    registry = {
-        value for name, value in vars(EC).items()
+    # Carry the attribute name, not just the value: `missing=['1.0']` gives a
+    # reader nothing, while `SCHEMA_VERSION = '1.0'` says at a glance that the
+    # constant is not a rule code and belongs elsewhere — which is the whole
+    # difference between diagnosing this and "fixing" it with a bogus default.
+    # Pairs rather than a dict, so two constants sharing a value both appear.
+    registry_pairs = [
+        (name, value) for name, value in vars(EC).items()
         if name.isupper() and isinstance(value, str)
-    }
-    missing = sorted(registry - set(DEFAULT_SEVERITY))
-    orphaned = sorted(set(DEFAULT_SEVERITY) - registry)
+    ]
+    missing = sorted(
+        f"{name} = {value!r}"
+        for name, value in registry_pairs
+        if value not in DEFAULT_SEVERITY
+    )
+    # Orphans have no attribute name by definition — that is what makes them
+    # orphans — so the value is the whole identity and is listed bare.
+    orphaned = sorted(set(DEFAULT_SEVERITY) - {value for _, value in registry_pairs})
     if missing or orphaned:
         raise RuntimeError(
             "DEFAULT_SEVERITY is out of step with error_codes: "

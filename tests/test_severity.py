@@ -173,9 +173,15 @@ def test_the_module_refuses_to_import_when_the_registry_gains_an_unlisted_code(m
 
     monkeypatch.setattr(EC, "PROBE_CODE_WITHOUT_A_DEFAULT", "probe-code-without-a-default", raising=False)
     try:
+        # The attribute name must appear, not only the value: a bare
+        # `missing=['1.0']` would leave a reader unable to tell a non-rule-code
+        # constant from a rule code whose default was forgotten.
         with pytest.raises(
             RuntimeError,
-            match="missing=\\['probe-code-without-a-default'\\].*does not belong in that module",
+            match=(
+                "missing=\\[\"PROBE_CODE_WITHOUT_A_DEFAULT = 'probe-code-without-a-default'\"\\]"
+                ".*does not belong in that module"
+            ),
         ):
             importlib.reload(sev)
     finally:
