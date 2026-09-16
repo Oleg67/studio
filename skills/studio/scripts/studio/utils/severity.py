@@ -23,7 +23,8 @@ rather than the label itself.
 """
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-imports
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import error_codes as EC
 # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-imports
@@ -82,6 +83,10 @@ DEFAULT_SEVERITY: Dict[str, str] = {
     # Advisory today: a kind whose template/examples cannot be bound is reported
     # with status PASS and warning_count 1 by validate-kits.
     EC.KIT_TEMPLATE_BINDING_MISSING:            WARNING,
+    # A `[validation]` key this engine does not know. Warning, so that a kit
+    # written for a newer engine stays installable on an older one — but never
+    # silence, or the kit author keeps believing a policy is in force.
+    EC.CONSTRAINTS_UNKNOWN_KEY:                 WARNING,
 
     # --- error by default ---------------------------------------------------
     EC.TEMPLATE_DEF_PLACEHOLDER_MISSING:        ERROR,
@@ -232,3 +237,458 @@ def default_severity(code: Optional[str]) -> str:
     # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-unknown-is-error
     return ERROR
     # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-unknown-is-error
+
+
+# ---------------------------------------------------------------------------
+# Configured policy: the layers above the built-in default
+# ---------------------------------------------------------------------------
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-strictness
+#: Severity ordered by how much it blocks. Comparing on this is what lets a
+#: raise be told from a lowering, which is the whole basis of the locking rule.
+_STRICTNESS: Dict[str, int] = {OFF: 0, WARNING: 1, ERROR: 2}
+
+#: Where a resolved severity came from, most specific first. Reported verbatim
+#: by ``--explain-severity``, so these are part of the CLI contract.
+SOURCE_ENTRY = "entry"
+SOURCE_PROJECT_KIND = "project-kind"
+SOURCE_PROJECT = "project"
+SOURCE_KIT_KIND = "kit-kind"
+SOURCE_KIT = "kit"
+SOURCE_DEFAULT = "default"
+
+
+def is_stricter(candidate: str, than: str) -> bool:
+    """Return whether ``candidate`` blocks more than ``than``."""
+    return _STRICTNESS.get(candidate, 2) > _STRICTNESS.get(than, 2)
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-strictness
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-parse-value
+def parse_severity_value(value: object, where: str, errors: List[str]) -> Optional[str]:
+    """Parse one configured severity, recording a message when it is not one.
+
+    An unrecognised value fails the load rather than falling back. The
+    opposite reflex — treat the unfamiliar as "no opinion" and carry on — is
+    right when the unknown merely *describes* an outcome, and wrong here,
+    because this value *disables checking*: a typo would silently switch a rule
+    off and the run would still report success.
+    """
+    if not isinstance(value, str):
+        errors.append(f"{where} must be a string, one of {', '.join(VALIDATION_SEVERITIES)}")
+        return None
+    normalized = value.strip().lower()
+    if normalized not in VALIDATION_SEVERITIES:
+        errors.append(
+            f"{where} is {value!r}, which is not a severity; "
+            f"expected one of {', '.join(VALIDATION_SEVERITIES)}"
+        )
+        return None
+    return normalized
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-parse-value
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-policy-model
+@dataclass(frozen=True)
+class SeverityTables:
+    """One layer of configured severity: whole-scope, and per artifact kind.
+
+    ``unknown_keys`` records keys found under ``[validation]`` that this
+    version does not understand. They are carried rather than dropped so
+    ``validate-kits`` can report them: the kind parser's habit of silently
+    ignoring what it does not recognise is how a misspelled rule name turns
+    into a rule nobody is enforcing and nobody is told about.
+    """
+
+    by_code: Dict[str, str] = field(default_factory=dict)
+    by_kind: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    fail_on_warnings: bool = False
+    unknown_keys: Tuple[str, ...] = ()
+
+    def is_empty(self) -> bool:
+        """Return whether this layer configures nothing at all."""
+        return not self.by_code and not self.by_kind
+
+
+@dataclass(frozen=True)
+class EntrySeverity:
+    """A severity declared on one constraint entry, and whether it is locked."""
+
+    severity: Optional[str] = None
+    locked: bool = False
+
+
+@dataclass(frozen=True)
+class SeverityDecision:
+    """The effective severity for one rule, and the account of how it got there."""
+
+    severity: str
+    source: str
+    #: Set when a project layer lowered the kit-side value, to what it lowered from.
+    lowered_from: Optional[str] = None
+    #: Set when a project layer tried to lower a locked entry and was refused.
+    refused_from: Optional[str] = None
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-policy-model
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-policy-resolve
+@dataclass(frozen=True)
+class SeverityPolicy:
+    """Resolved severity for any (code, kind, entry), across every layer.
+
+    Two layers, not six: everything the *kit* declares (entry, per-kind, whole
+    kit, built-in default) settles first into one kit-side value, and then the
+    *project* layer is admitted against it under the raise/lower rule. Reading
+    it as six layers of plain specificity cannot be right — the entry is the
+    most specific declaration of all, so a project could never override one,
+    and ``locked`` would have nothing to mean.
+    """
+
+    kit: SeverityTables = field(default_factory=SeverityTables)
+    project: SeverityTables = field(default_factory=SeverityTables)
+    #: kind -> entry id (heading id or ID kind) -> declared severity and lock.
+    entries: Dict[str, Dict[str, EntrySeverity]] = field(default_factory=dict)
+
+    @property
+    def fail_on_warnings(self) -> bool:
+        """Return whether warnings alone should fail the run."""
+        return bool(self.project.fail_on_warnings)
+
+    def is_configured(self) -> bool:
+        """Return whether any layer configures a severity."""
+        return bool(
+            not self.kit.is_empty()
+            or not self.project.is_empty()
+            or any(self.entries.values())
+        )
+
+    def _entry(self, kind: Optional[str], entry_id: Optional[str]) -> EntrySeverity:
+        if not kind or not entry_id:
+            return EntrySeverity()
+        return self.entries.get(str(kind).strip().upper(), {}).get(str(entry_id), EntrySeverity())
+
+    def _kit_side(
+        self,
+        code: Optional[str],
+        kind: Optional[str],
+        entry: EntrySeverity,
+    ) -> Tuple[str, str]:
+        """Settle the kit's own opinion: entry, then per-kind, then kit, then default."""
+        if entry.severity:
+            return entry.severity, SOURCE_ENTRY
+        normalized_kind = str(kind).strip().upper() if kind else ""
+        if code and normalized_kind:
+            per_kind = self.kit.by_kind.get(normalized_kind, {}).get(code)
+            if per_kind:
+                return per_kind, SOURCE_KIT_KIND
+        if code:
+            whole_kit = self.kit.by_code.get(code)
+            if whole_kit:
+                return whole_kit, SOURCE_KIT
+        return default_severity(code), SOURCE_DEFAULT
+
+    def _project_side(self, code: Optional[str], kind: Optional[str]) -> Tuple[Optional[str], str]:
+        normalized_kind = str(kind).strip().upper() if kind else ""
+        if code and normalized_kind:
+            per_kind = self.project.by_kind.get(normalized_kind, {}).get(code)
+            if per_kind:
+                return per_kind, SOURCE_PROJECT_KIND
+        if code:
+            whole_project = self.project.by_code.get(code)
+            if whole_project:
+                return whole_project, SOURCE_PROJECT
+        return None, SOURCE_PROJECT
+
+    def resolve(
+        self,
+        code: Optional[str],
+        kind: Optional[str] = None,
+        entry_id: Optional[str] = None,
+    ) -> SeverityDecision:
+        """Return the effective severity for one rule and the layer that set it."""
+        entry = self._entry(kind, entry_id)
+        kit_value, kit_source = self._kit_side(code, kind, entry)
+        project_value, project_source = self._project_side(code, kind)
+        if project_value is None or project_value == kit_value:
+            return SeverityDecision(severity=kit_value, source=kit_source)
+        # @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-raise-lower
+        if is_stricter(project_value, kit_value):
+            # Raising is always allowed: a project may hold itself to more than
+            # the kit asks for without the kit's permission.
+            return SeverityDecision(severity=project_value, source=project_source)
+        if entry.locked:
+            return SeverityDecision(
+                severity=kit_value,
+                source=kit_source,
+                refused_from=project_value,
+            )
+        return SeverityDecision(
+            severity=project_value,
+            source=project_source,
+            lowered_from=kit_value,
+        )
+        # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-raise-lower
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-policy-resolve
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-declared-overrides
+def declared_overrides(policy: SeverityPolicy) -> List[Dict[str, object]]:
+    """List every project setting that lowers a rule, or was refused for trying.
+
+    Derived from the *configuration*, not from what happened to be emitted. A
+    rule lowered to ``off`` produces no finding at all, and that is precisely
+    the case a reader most needs to see named; an occurrence-based list would
+    be silent about exactly the setting that silenced everything else.
+    """
+    rows: List[Dict[str, object]] = []
+    for kind, code in _configured_project_pairs(policy):
+        decision = policy.resolve(code, kind)
+        if decision.lowered_from is None:
+            continue
+        rows.append(override_row(code, kind, None, decision))
+    # Sorted by what a reader scans for, not by dict order: goldens hide an
+    # ordering bug behind whatever insertion order the config happened to have.
+    rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"])))
+    return rows
+
+
+def _configured_project_pairs(policy: SeverityPolicy) -> List[Tuple[Optional[str], str]]:
+    pairs: List[Tuple[Optional[str], str]] = [(None, code) for code in sorted(policy.project.by_code)]
+    for kind in sorted(policy.project.by_kind):
+        pairs.extend((kind, code) for code in sorted(policy.project.by_kind[kind]))
+    return pairs
+
+
+def override_row(
+    code: Optional[str],
+    kind: Optional[str],
+    entry_id: Optional[str],
+    decision: SeverityDecision,
+) -> Dict[str, object]:
+    """Render one lowering or refusal for the report and for ``--explain-severity``."""
+    return {
+        "code": code,
+        "kind": kind,
+        "entry": entry_id,
+        "from": decision.lowered_from or decision.severity,
+        "to": decision.refused_from or decision.severity,
+        "applied": decision.refused_from is None,
+        "source": decision.source,
+    }
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-declared-overrides
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-apply
+@dataclass
+class PolicyOutcome:
+    """Findings after policy, partitioned by the severity they now carry."""
+
+    errors: List[Dict[str, object]] = field(default_factory=list)
+    warnings: List[Dict[str, object]] = field(default_factory=list)
+    suppressed: int = 0
+    #: Lowerings the kit refused, as they were met. Refusals are reported from
+    #: what actually happened rather than from the configuration, because a
+    #: locked entry only refuses the rules that entry owns, and which rules
+    #: those are is not something the tables can be asked ahead of time.
+    refusals: List[Dict[str, object]] = field(default_factory=list)
+
+
+def _finding_entry_id(finding: Dict[str, object]) -> Optional[str]:
+    """Return the constraint entry a finding belongs to, if it names one."""
+    for key in ("heading_id", "id_kind"):
+        value = finding.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def apply_policy(
+    policy: Optional[SeverityPolicy],
+    findings: Iterable[Dict[str, object]],
+    *,
+    kind: Optional[str] = None,
+) -> PolicyOutcome:
+    """Restamp findings from ``policy``, drop the suppressed, repartition the rest.
+
+    Re-running this over an already-applied list is a no-op: resolution is a
+    function of the finding's own code, kind and entry, and a suppressed
+    finding is gone rather than marked, so nothing can be counted twice. That
+    is what lets the artifact pass apply the kind it knows and the command
+    level sweep up everything else without either having to know about the
+    other.
+    """
+    outcome = PolicyOutcome()
+    seen_refusals: Set[Tuple[object, ...]] = set()
+    for finding in findings:
+        code = finding.get("code")
+        finding_kind = finding.get("artifact_kind") or kind
+        if policy is None:
+            severity = str(finding.get("severity") or default_severity(
+                code if isinstance(code, str) else None))
+        else:
+            entry_id = _finding_entry_id(finding)
+            normalized_code = code if isinstance(code, str) else None
+            normalized_kind = str(finding_kind) if finding_kind else None
+            decision = policy.resolve(normalized_code, normalized_kind, entry_id)
+            severity = decision.severity
+            if decision.refused_from is not None:
+                key = (normalized_code, normalized_kind, entry_id)
+                if key not in seen_refusals:
+                    seen_refusals.add(key)
+                    outcome.refusals.append(
+                        override_row(normalized_code, normalized_kind, entry_id, decision))
+        if severity == OFF:
+            outcome.suppressed += 1
+            continue
+        finding["severity"] = severity
+        if severity == WARNING:
+            outcome.warnings.append(finding)
+        else:
+            outcome.errors.append(finding)
+    return outcome
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-apply
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exit-code
+@dataclass(frozen=True)
+class RunVerdict:
+    """The one verdict shared by ``validate``, ``validate-kits`` and ``validate-toc``."""
+
+    status: str
+    exit_code: int
+    #: Present only when warnings alone decided the outcome, so a reader can
+    #: tell a genuine failure from a `--fail-on-warnings` run at a glance.
+    failed_on: Optional[str] = None
+
+
+def run_verdict(
+    error_count: int,
+    warning_count: int,
+    *,
+    fail_on_warnings: bool = False,
+    pass_status: str = "PASS",
+    fail_status: str = "FAIL",
+    warn_status: Optional[str] = None,
+) -> RunVerdict:
+    """Decide status and exit code from the counts alone.
+
+    Without ``fail_on_warnings`` the exit code is a function of the error count
+    and nothing else — that is the invariant the whole severity model rests on,
+    and the reason it is decided in one place rather than three.
+    """
+    if error_count:
+        return RunVerdict(status=fail_status, exit_code=2)
+    if warning_count and fail_on_warnings:
+        return RunVerdict(status=fail_status, exit_code=2, failed_on="warnings")
+    if warning_count and warn_status:
+        return RunVerdict(status=warn_status, exit_code=0)
+    return RunVerdict(status=pass_status, exit_code=0)
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exit-code
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-parse-tables
+#: Keys understood under a ``[validation]`` table. Anything else is reported.
+_KIT_VALIDATION_KEYS = frozenset({"severity"})
+_PROJECT_VALIDATION_KEYS = frozenset({"severity", "fail_on_warnings"})
+
+
+def _parse_severity_table(
+    raw: object,
+    where: str,
+    errors: List[str],
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+    """Split one ``[...severity]`` table into per-code and per-kind entries.
+
+    A string value names a rule code; a table value names an artifact kind.
+    """
+    by_code: Dict[str, str] = {}
+    by_kind: Dict[str, Dict[str, str]] = {}
+    if raw is None:
+        return by_code, by_kind
+    if not isinstance(raw, dict):
+        errors.append(f"{where} must be a table of rule codes")
+        return by_code, by_kind
+    for key, value in raw.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        if isinstance(value, dict):
+            nested_code, nested_kind = _parse_severity_table(value, f"{where}.{name}", errors)
+            if nested_kind:
+                errors.append(f"{where}.{name} may not nest another artifact kind")
+                continue
+            if nested_code:
+                by_kind.setdefault(name.upper(), {}).update(nested_code)
+            continue
+        parsed = parse_severity_value(value, f"{where}.{name}", errors)
+        if parsed is not None:
+            by_code[name] = parsed
+    return by_code, by_kind
+
+
+def _parse_validation_table(
+    raw: object,
+    where: str,
+    known_keys: Set[str],
+    errors: List[str],
+) -> SeverityTables:
+    if raw is None:
+        return SeverityTables()
+    if not isinstance(raw, dict):
+        errors.append(f"{where} must be a table")
+        return SeverityTables()
+    unknown = tuple(sorted(str(key) for key in raw if str(key) not in known_keys))
+    by_code, by_kind = _parse_severity_table(raw.get("severity"), f"{where}.severity", errors)
+    fail_on_warnings = False
+    if "fail_on_warnings" in known_keys and "fail_on_warnings" in raw:
+        value = raw.get("fail_on_warnings")
+        if isinstance(value, bool):
+            fail_on_warnings = value
+        else:
+            errors.append(f"{where}.fail_on_warnings must be boolean")
+    return SeverityTables(
+        by_code=by_code,
+        by_kind=by_kind,
+        fail_on_warnings=fail_on_warnings,
+        unknown_keys=unknown,
+    )
+
+
+def parse_kit_validation(raw: object, errors: List[str]) -> SeverityTables:
+    """Parse a kit's top-level ``[validation]`` table from ``constraints.toml``."""
+    return _parse_validation_table(raw, "[validation]", set(_KIT_VALIDATION_KEYS), errors)
+
+
+def parse_project_validation(raw: object, errors: List[str]) -> SeverityTables:
+    """Parse a project's ``[validation]`` table from ``core.toml``."""
+    return _parse_validation_table(raw, "[validation]", set(_PROJECT_VALIDATION_KEYS), errors)
+
+
+def merge_severity_tables(layers: Sequence[SeverityTables]) -> SeverityTables:
+    """Merge kit layers strictest-wins, matching how ``required`` already merges.
+
+    Two kits bound into one project are both authorities; taking the stricter
+    of their opinions is the only merge that cannot quietly relax a rule one of
+    them meant to enforce.
+    """
+    by_code: Dict[str, str] = {}
+    by_kind: Dict[str, Dict[str, str]] = {}
+    unknown: List[str] = []
+    for layer in layers:
+        for code, severity in layer.by_code.items():
+            existing = by_code.get(code)
+            if existing is None or is_stricter(severity, existing):
+                by_code[code] = severity
+        for kind, table in layer.by_kind.items():
+            target = by_kind.setdefault(kind, {})
+            for code, severity in table.items():
+                existing = target.get(code)
+                if existing is None or is_stricter(severity, existing):
+                    target[code] = severity
+        unknown.extend(layer.unknown_keys)
+    return SeverityTables(
+        by_code=by_code,
+        by_kind=by_kind,
+        unknown_keys=tuple(sorted(set(unknown))),
+    )
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-parse-tables

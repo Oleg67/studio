@@ -17,6 +17,7 @@ from ..utils import decision_log
 from ..utils import error_codes as EC
 from ..utils.constraints import error as constraints_error
 from ..utils.fixing import enrich_issues
+from ..utils.severity import run_verdict
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-flow-kit-validate-cli:p1:inst-validate-kits-imports
 
@@ -130,6 +131,78 @@ def _missing_bound_artifact_warnings(
         })
     return results
     # @cpt-end:cpt-studio-algo-kit-validate:p1:inst-manifest-bound-artifact-map
+
+
+# @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
+def _append_unknown_validation_key_warnings(
+    self_check_report: Dict[str, object],
+    loaded_kits: Optional[Dict[str, Any]],
+) -> None:
+    """Add one advisory result per kit that declares a `[validation]` key we ignore.
+
+    Placed on the shared result builder rather than on the manifest-bound
+    path, so that a kit registered by plain path is checked too — the setting
+    is in its constraints file either way.
+    """
+    results: List[Dict[str, object]] = []
+    for kit_id, loaded_kit in sorted((loaded_kits or {}).items()):
+        results.extend(_unknown_validation_key_warnings(str(kit_id), loaded_kit))
+    if not results:
+        return
+    existing = self_check_report.get("results")
+    if isinstance(existing, list):
+        existing.extend(results)
+    else:
+        self_check_report["results"] = results
+
+
+def _unknown_validation_key_warnings(kit_id: str, loaded_kit: Any) -> List[Dict[str, object]]:
+    """Report keys under ``[validation]`` this engine does not understand.
+
+    The kind parser's habit is to read the keys it knows and drop the rest, so
+    a misspelled ``severty`` table becomes a policy the kit author believes is
+    in force and the engine has never seen. Reporting it as a warning rather
+    than an error keeps a kit written for a newer engine installable on an
+    older one, which is the same forward-compatibility bargain the manifest
+    already makes for unknown kit keys.
+    """
+    constraints = getattr(loaded_kit, "constraints", None)
+    unknown: List[Tuple[str, str]] = [
+        ("[validation]", key)
+        for key in getattr(getattr(constraints, "validation", None), "unknown_keys", ()) or ()
+    ]
+    for kind, kind_constraints in (getattr(constraints, "by_kind", {}) or {}).items():
+        unknown.extend(
+            (f"[artifacts.{kind}.validation]", key)
+            for key in getattr(getattr(kind_constraints, "validation", None), "unknown_keys", ()) or ()
+        )
+    if not unknown:
+        return []
+    warnings = [
+        constraints_error(
+            "constraints",
+            f"Unrecognised key '{key}' under {table} in constraints.toml; it configures nothing",
+            code=EC.CONSTRAINTS_UNKNOWN_KEY,
+            path=None,
+            line=1,
+            kit_id=str(kit_id),
+            table=table,
+            key=key,
+        )
+        for table, key in sorted(unknown)
+    ]
+    return [{
+        "kit": str(kit_id),
+        "kind": None,
+        "example_path": None,
+        "example_paths": [],
+        "examples_checked": 0,
+        "status": "PASS",
+        "error_count": 0,
+        "warning_count": len(warnings),
+        "warnings": warnings,
+    }]
+# @cpt-end:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
 
 
 # @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-manifest-bound-artifact-map
@@ -609,6 +682,17 @@ def _enrich_kit_validation_findings(
 # @cpt-end:cpt-studio-algo-kit-validate:p1:inst-build-result
 
 
+# @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-count-warnings
+def _count_kit_validation_warnings(self_check_report: Dict[str, object]) -> int:
+    """Sum the per-kit warnings that only ever appeared nested inside the results."""
+    total = 0
+    for item in self_check_report.get("results", []) or []:
+        if isinstance(item, dict):
+            total += len(item.get("warnings") or [])
+    return total
+# @cpt-end:cpt-studio-algo-kit-validate:p1:inst-count-warnings
+
+
 # @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-build-result
 # @cpt-begin:cpt-studio-algo-kit-validate-by-path:p1:inst-build-result
 def _build_validate_kits_result(
@@ -618,13 +702,21 @@ def _build_validate_kits_result(
     all_errors: List[Dict[str, object]],
     self_check_report: Dict[str, object],
     project_root: Optional[Path] = None,
+    loaded_kits: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, Dict[str, Any]]:
+    _append_unknown_validation_key_warnings(self_check_report, loaded_kits)
     _enrich_kit_validation_findings(all_errors, self_check_report, project_root)
-    overall_status = "PASS" if not all_errors else "FAIL"
+    warning_count = _count_kit_validation_warnings(self_check_report)
+    verdict = run_verdict(len(all_errors), warning_count)
+    overall_status = verdict.status
     result: Dict[str, Any] = {
         "status": overall_status,
         "kits_validated": len(kit_reports),
         "error_count": len(all_errors),
+        # Per-kit warnings lived inside `self_check_results[]` and nowhere
+        # else, so a caller reading the top level could not tell a kit with
+        # eleven advisory findings from one with none.
+        "warning_count": warning_count,
     }
     if self_check_report:
         result["templates_checked"] = self_check_report.get("templates_checked", 0)
@@ -644,7 +736,7 @@ def _build_validate_kits_result(
     # Telemetry: authoritative final kit-validation verdict, correlated via the run's id.
     decision_log.record_validation(
         "validate-kits", overall_status, findings=len(all_errors))
-    return (0 if overall_status == "PASS" else 2), result
+    return verdict.exit_code, result
     # @cpt-end:cpt-studio-algo-kit-validate-by-path:p1:inst-build-result
     # @cpt-end:cpt-studio-algo-kit-validate:p1:inst-build-result
 
@@ -726,7 +818,18 @@ def run_validate_kits(
         all_errors=all_errors,
         self_check_report=self_check_report,
         project_root=project_root,
+        loaded_kits=_filtered_loaded_kits(ctx, kit_filter),
     )
+
+
+# @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
+def _filtered_loaded_kits(ctx: Any, kit_filter: Optional[str]) -> Dict[str, Any]:
+    """Return the loaded kits this run is actually reporting on."""
+    kits = getattr(ctx, "kits", None) or {}
+    if kit_filter:
+        return {kit_id: kit for kit_id, kit in kits.items() if str(kit_id) == str(kit_filter)}
+    return dict(kits)
+# @cpt-end:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
 
 
 # @cpt-flow:cpt-studio-flow-kit-validate-cli:p1
@@ -866,6 +969,7 @@ def _validate_kit_by_path(kit_path: Path, *, verbose: bool = False) -> Tuple[int
         all_errors=all_errors,
         self_check_report=self_check_report,
         project_root=kit_dir.parent,
+        loaded_kits={validation.slug: SimpleNamespace(constraints=validation.constraints)},
     )
 
 

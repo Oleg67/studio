@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List
 
 from ..utils import error_codes as EC
+from ..utils.severity import run_verdict
 from ..utils.toc import DEFAULT_MAX_SECTION_LINES, add_toc_max_level_argument, validate_toc
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-imports
@@ -90,6 +91,11 @@ def cmd_validate_toc(argv: List[str]) -> int:
         action="store_true",
         help="Include full error details in output",
     )
+    p.add_argument(
+        "--fail-on-warnings",
+        action="store_true",
+        help="Fail the run when there are warnings but no errors (exit 2)",
+    )
     args = p.parse_args(argv)
     # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-parse-args
 
@@ -110,25 +116,30 @@ def cmd_validate_toc(argv: List[str]) -> int:
     # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-foreach-file
 
     # @cpt-begin:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-return
-    overall = "PASS"
-    if total_errors:
-        overall = "FAIL"
-    elif total_warnings:
-        overall = "WARN"
+    # The same verdict helper the other two commands use. `validate-toc` keeps
+    # its third status: it is the one command whose WARN nothing keys off, and
+    # `--fail-on-warnings` reaches it through the same parameter rather than
+    # through a second copy of the rule.
+    verdict = run_verdict(
+        total_errors,
+        total_warnings,
+        fail_on_warnings=bool(getattr(args, "fail_on_warnings", False)),
+        warn_status="WARN",
+    )
 
-    output = {
-        "status": overall,
+    output: dict = {
+        "status": verdict.status,
         "files_validated": len(results),
         "error_count": total_errors,
         "warning_count": total_warnings,
         "results": results,
     }
+    if verdict.failed_on:
+        output["failed_on"] = verdict.failed_on
 
     ui.result(output, human_fn=_human_validate_toc)
 
-    if total_errors:
-        return 2
-    return 0
+    return verdict.exit_code
     # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-return
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-format

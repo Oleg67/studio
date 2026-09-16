@@ -4,7 +4,7 @@
 import argparse
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -13,12 +13,21 @@ from ..utils import error_codes as EC
 from ..utils.codebase import CodeFile, cross_validate_code, error as code_issue, resolve_entry_code_files
 from ..utils.constraints import (
     ArtifactRecord,
+    build_severity_policy,
     cross_validate_artifacts,
     error as constraints_error,
     validate_artifact_file,
 )
 from ..utils.document import scan_cdsl_instructions, scan_cpt_ids
 from ..utils.fixing import enrich_issues
+from ..utils.severity import (
+    SeverityPolicy,
+    apply_policy,
+    declared_overrides,
+    override_row,
+    parse_project_validation,
+    run_verdict,
+)
 from ..utils.ui import ui
 # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-imports
 
@@ -41,6 +50,7 @@ class _ValidateSession:
     registered_systems: Set[str]
     known_kinds: Set[str]
     ctx_errors: List[Dict[str, object]]
+    policy: SeverityPolicy = field(default_factory=SeverityPolicy)
     artifacts_to_validate: List[Tuple[Path, Path, str, str, str]] = field(default_factory=list)
     # Reported alongside the scanned count: a file total without the number
     # excluded does not say whether the scope was what the reader assumed.
@@ -53,6 +63,10 @@ class _ValidateResults:
 
     all_errors: List[Dict[str, object]] = field(default_factory=list)
     all_warnings: List[Dict[str, object]] = field(default_factory=list)
+    #: Findings a rule set to `off` removed. Counted so a suppressed rule is
+    #: never simply invisible — a silent run and a silenced one look the same.
+    suppressed_count: int = 0
+    refusals: List[Dict[str, object]] = field(default_factory=list)
     artifact_reports: List[Dict[str, object]] = field(default_factory=list)
     artifact_report_by_path: Dict[str, Dict[str, object]] = field(default_factory=dict)
     artifact_records: List[ArtifactRecord] = field(default_factory=list)
@@ -249,6 +263,26 @@ def _parse_validate_args(argv: List[str]) -> argparse.Namespace:
             "(uses that source's adapter context)"
         ),
     )
+    parser.add_argument(
+        "--fail-on-warnings",
+        action="store_true",
+        help="Fail the run when there are warnings but no errors (exit 2)",
+    )
+    parser.add_argument(
+        "--explain-severity",
+        action="store_true",
+        help="Report the effective severity of each rule and the layer that set it, then exit",
+    )
+    parser.add_argument(
+        "--kind",
+        default=None,
+        help="Restrict --explain-severity to one artifact kind",
+    )
+    parser.add_argument(
+        "--rule",
+        default=None,
+        help="Restrict --explain-severity to one rule code",
+    )
     return parser.parse_args(argv)
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-cli-setup
 
@@ -329,6 +363,14 @@ def _build_validate_session(args: argparse.Namespace) -> Tuple[Optional[_Validat
 
     known_kinds = ctx.get_known_id_kinds()
     _extend_known_kinds(ctx, known_kinds)
+    policy, policy_errors = _build_severity_policy(ctx, project_root, args)
+    if policy_errors:
+        ui.result({
+            "status": "ERROR",
+            "message": "validation severity configuration is invalid",
+            "errors": policy_errors,
+        })
+        return None, 1
     return _ValidateSession(
         args=args,
         ctx=ctx,
@@ -342,9 +384,48 @@ def _build_validate_session(args: argparse.Namespace) -> Tuple[Optional[_Validat
         ),
         known_kinds=known_kinds,
         ctx_errors=ctx_errors,
+        policy=policy,
     ), None
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-session
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-load-context
+
+
+# @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-build-policy
+def _build_severity_policy(
+    ctx: object,
+    project_root: Path,
+    args: argparse.Namespace,
+) -> Tuple[SeverityPolicy, List[str]]:
+    """Assemble the severity policy from every loaded kit and the project config.
+
+    An invalid setting fails the run rather than being skipped. A severity that
+    cannot be parsed is not a value with no opinion — it is a rule whose
+    enforcement nobody can predict, and continuing would report a verdict on a
+    policy that was never actually in force.
+    """
+    from ..utils.files import load_project_config
+
+    errors: List[str] = []
+    kit_constraints = [
+        kit.constraints for kit in (getattr(ctx, "kits", None) or {}).values()
+        if getattr(kit, "constraints", None) is not None
+    ]
+    project_config = load_project_config(project_root) or {}
+    project = parse_project_validation(project_config.get("validation"), errors)
+    if project.unknown_keys:
+        errors.append(
+            "[validation] in core.toml has unrecognised keys: "
+            f"{', '.join(project.unknown_keys)}"
+        )
+    if errors:
+        return SeverityPolicy(), errors
+    if getattr(args, "fail_on_warnings", False):
+        # A flag may only raise. Lowering stays in reviewable configuration,
+        # where it is diffed and visible, rather than in whatever a caller
+        # happened to type.
+        project = replace(project, fail_on_warnings=True)
+    return build_severity_policy(kit_constraints, project), []
+# @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-build-policy
 
 
 def _emit_validate_output(data: Dict[str, object], *, output_path: Optional[str], human: bool, pretty: bool) -> None:
@@ -562,7 +643,10 @@ def _validate_one_artifact(
         registered_systems=session.registered_systems,
         constraints_path=constraints_path,
         kit_id=str(kit_id),
+        policy=session.policy,
     )
+    results.suppressed_count += int(report.get("suppressed") or 0)
+    results.refusals.extend(report.get("refusals") or [])
     artifact_report = _build_artifact_report(
         artifact_path=artifact_path,
         artifact_type=artifact_type,
@@ -669,16 +753,16 @@ def _run_initial_artifact_validation(session: _ValidateSession) -> Tuple[_Valida
         return results, None
     enrich_issues(results.all_errors, project_root=session.project_root)
     enrich_issues(results.all_warnings, project_root=session.project_root)
-    out = {
+    out: Dict[str, object] = {
         "status": "FAIL",
         "project_root": session.project_root.as_posix(),
         "artifact_count": len(session.artifacts_to_validate),
         "error_count": len(results.all_errors),
         "warning_count": len(results.all_warnings),
         "errors": results.all_errors,
+        "warnings": results.all_warnings,
     }
-    if results.all_warnings:
-        out["warnings"] = results.all_warnings
+    _attach_policy_report(out, session, results)
     _emit_validate_output(out, output_path=session.args.output, human=True, pretty=True)
     return results, 2
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-artifact-report
@@ -1160,22 +1244,126 @@ def _apply_reference_coverage_for_definition(
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-reference-coverage
 
 
+# @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-explain-severity
+def _explained_kinds(session: _ValidateSession) -> List[Optional[str]]:
+    """List the artifact kinds to explain, or ``[None]`` for the unscoped view."""
+    if session.args.kind:
+        return [str(session.args.kind).strip().upper()]
+    kinds = {
+        str(kind).strip().upper()
+        for kit in (getattr(session.ctx, "kits", None) or {}).values()
+        for kind in ((getattr(kit, "constraints", None).by_kind or {})
+                     if getattr(kit, "constraints", None) is not None else {})
+    }
+    return sorted(kinds) or [None]
+
+
+def _emit_severity_explanation(session: _ValidateSession) -> int:
+    """Report the effective severity of every rule, and the layer that set it."""
+    rule_filter = str(session.args.rule).strip() if session.args.rule else None
+    codes = sorted({
+        value for name, value in vars(EC).items()
+        if name.isupper() and isinstance(value, str)
+    })
+    if rule_filter:
+        codes = [code for code in codes if code == rule_filter]
+        if not codes:
+            ui.result({
+                "status": "ERROR",
+                "message": f"no such rule code: {session.args.rule}",
+            })
+            return 1
+    rows: List[Dict[str, object]] = []
+    for kind in _explained_kinds(session):
+        for code in codes:
+            decision = session.policy.resolve(code, kind)
+            rows.append({
+                "code": code,
+                "kind": kind,
+                "severity": decision.severity,
+                "source": decision.source,
+                **({"refused": override_row(code, kind, None, decision)}
+                   if decision.refused_from else {}),
+            })
+    # Sorted by (kind, code) so two runs over one configuration read the same
+    # way, and a diff of the output means what it appears to mean.
+    rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"])))
+    ui.result({
+        "status": "PASS",
+        "configured": session.policy.is_configured(),
+        "fail_on_warnings": session.policy.fail_on_warnings,
+        "rules": rows,
+        "severity_overrides": declared_overrides(session.policy),
+    })
+    return 0
+# @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-explain-severity
+
+
+# @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-apply-policy
+def _apply_run_policy(session: _ValidateSession, results: _ValidateResults) -> None:
+    """Settle severity for every finding the per-artifact pass did not."""
+    outcome = apply_policy(session.policy, list(results.all_errors) + list(results.all_warnings))
+    results.all_errors = outcome.errors
+    results.all_warnings = outcome.warnings
+    results.suppressed_count += outcome.suppressed
+    results.refusals.extend(outcome.refusals)
+
+
+def _attach_policy_report(
+    report: Dict[str, object],
+    session: _ValidateSession,
+    results: _ValidateResults,
+) -> None:
+    """Name what the policy changed, whenever it changed anything.
+
+    Emitted without waiting to be asked. `--explain-severity` answers a
+    question, and the reader who most needs to know a rule was switched off is
+    the one who does not know to ask.
+    """
+    if results.suppressed_count:
+        report["suppressed_count"] = results.suppressed_count
+    overrides = declared_overrides(session.policy) + _sorted_refusals(results.refusals)
+    if overrides:
+        report["severity_overrides"] = overrides
+
+
+def _sorted_refusals(refusals: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    return sorted(
+        refusals,
+        key=lambda row: (str(row.get("kind") or ""), str(row.get("code") or ""), str(row.get("entry") or "")),
+    )
+# @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-apply-policy
+
+
 def _emit_final_validate_report(session: _ValidateSession, results: _ValidateResults) -> int:
     """Enrich issues and emit the final validate report."""
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-return-report
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-output
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-enrich-errors
+    # Everything the per-artifact pass did not already settle: cross-artifact
+    # findings, code traceability, reference coverage, context errors. Findings
+    # that carry their own `artifact_kind` resolve against it; the rest resolve
+    # unscoped. Re-running this over the already-settled ones changes nothing.
+    _apply_run_policy(session, results)
     _enrich_target_artifact_paths(results.all_errors, meta=session.meta, project_root=session.project_root)
     enrich_issues(results.all_errors, project_root=session.project_root)
     enrich_issues(results.all_warnings, project_root=session.project_root)
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-enrich-errors
-    overall_status = "PASS" if not results.all_errors else "FAIL"
+    verdict = run_verdict(
+        len(results.all_errors),
+        len(results.all_warnings),
+        fail_on_warnings=session.policy.fail_on_warnings,
+    )
+    overall_status = verdict.status
     report: Dict[str, object] = {
         "status": overall_status,
         "artifacts_validated": len(results.artifact_reports),
         "error_count": len(results.all_errors),
         "warning_count": len(results.all_warnings),
     }
+    if verdict.failed_on:
+        report["failed_on"] = verdict.failed_on
+    _attach_policy_report(report, session, results)
     if not session.args.skip_code and not session.args.artifact:
         report["code_files_scanned"] = len(results.code_files_scanned)
         # A scanned total without the number excluded does not say whether
@@ -1197,14 +1385,14 @@ def _emit_final_validate_report(session: _ValidateSession, results: _ValidateRes
             "Deterministic validation passed. Now perform semantic validation: "
             "review content quality against checklist.md criteria."
         )
-    if session.args.verbose:
-        report["errors"] = results.all_errors
-        report["warnings"] = results.all_warnings
-    elif overall_status != "PASS":
-        report["errors"] = results.all_errors
-        if results.all_warnings:
-            report["warnings"] = results.all_warnings
-    else:
+    # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-emit-warnings
+    # Both lists, always. A passing non-verbose run used to withhold `warnings`
+    # entirely, so the only consumer that could see a warning was one that had
+    # already been told to expect a failure.
+    report["errors"] = results.all_errors
+    report["warnings"] = results.all_warnings
+    # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-emit-warnings
+    if overall_status == "PASS" and not session.args.verbose:
         failed_artifacts = [item for item in results.artifact_reports if item.get("status") == "FAIL"]
         if failed_artifacts:
             report["failed_artifacts"] = [
@@ -1222,7 +1410,7 @@ def _emit_final_validate_report(session: _ValidateSession, results: _ValidateRes
         human=True,
         pretty=bool(session.args.verbose) or (overall_status != "PASS"),
     )
-    return 0 if overall_status == "PASS" else 2
+    return verdict.exit_code
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-output
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-return-report
 
@@ -1240,6 +1428,8 @@ def cmd_validate(argv: List[str]) -> int:
     session, exit_code = _build_validate_session(_parse_validate_args(argv))
     if exit_code is not None or session is None:
         return 1 if exit_code is None else exit_code
+    if session.args.explain_severity:
+        return _emit_severity_explanation(session)
     exit_code = _resolve_artifacts_to_validate(session)
     if exit_code is not None:
         return exit_code
@@ -1516,6 +1706,14 @@ def _human_validate(data: dict) -> None:
     ui.detail("Artifacts", str(n_art))
     ui.detail("Errors", str(n_err))
     ui.detail("Warnings", str(n_warn))
+    # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-human-suppressed
+    # Named at the terminal, not only in JSON. `--explain-severity` answers a
+    # question; a run with fourteen rules switched off otherwise looks exactly
+    # like a run with none to the reader who never thought to ask.
+    if data.get("suppressed_count"):
+        ui.detail("Suppressed", f"{data['suppressed_count']} (rules set to off)")
+    _show_severity_overrides(data.get("severity_overrides") or [])
+    # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-human-suppressed
 
     if data.get("code_files_scanned") is not None:
         excluded = data.get("code_files_excluded") or 0
@@ -1543,15 +1741,40 @@ def _human_validate(data: dict) -> None:
             ui.substep(f"  ... and {len(warnings) - 15} more warning(s)")
 
     ui.blank()
+    _show_validate_verdict(data, status=status, n_err=n_err, n_warn=n_warn)
+    ui.blank()
+
+
+def _show_validate_verdict(data: dict, *, status: str, n_err: int, n_warn: int) -> None:
+    """Print the one-line verdict, naming warnings when warnings decided it."""
     if status == "PASS":
         ui.success("All checks passed.")
         if data.get("next_step"):
             ui.hint(str(data["next_step"]))
-    elif status == "FAIL":
-        ui.error(f"Validation failed — {n_err} error(s).")
-    else:
+        return
+    if status != "FAIL":
         ui.info(f"Status: {status}")
-    ui.blank()
+        return
+    if data.get("failed_on") == "warnings":
+        ui.error(f"Validation failed on warnings — {n_warn} warning(s), 0 errors.")
+    else:
+        ui.error(f"Validation failed — {n_err} error(s).")
+
+
+# @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-human-suppressed
+def _show_severity_overrides(overrides: List[Dict[str, object]]) -> None:
+    """List rules the project lowered, and any the kit refused to let it lower."""
+    if not overrides:
+        return
+    for row in overrides[:10]:
+        scope = str(row.get("kind") or "all kinds")
+        entry = f" entry {row['entry']}" if row.get("entry") else ""
+        change = f"{row.get('from')} -> {row.get('to')}"
+        verb = "lowered" if row.get("applied") else "REFUSED (locked)"
+        ui.detail(f"  {row.get('code')} [{scope}]{entry}", f"{change} {verb}")
+    if len(overrides) > 10:
+        ui.substep(f"  ... and {len(overrides) - 10} more severity override(s)")
+# @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-human-suppressed
 
 def _issue_location(issue: dict) -> str:
     """Extract display location from an issue dict, relative to cwd."""

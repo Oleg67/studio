@@ -321,6 +321,12 @@ cfs validate [--artifact PATH] [--system SYSTEM] [--kind KIND] [--strict]
 }
 ```
 
+Both `errors` and `warnings` are emitted on every run, passing or failing. When a rule is set to `off`, the findings it removed are counted under `suppressed_count`; when a project lowers a rule, or a `locked` entry refuses a lowering, each is listed under `severity_overrides`. `--fail-on-warnings` (or `fail_on_warnings = true` in `core.toml`) turns a warning-only run into `status: FAIL`, exit 2, with `failed_on: "warnings"`.
+
+**Flags**: `--artifact`, `--skip-code`, `--verbose`, `--output`, `--local-only`, `--source`, `--fail-on-warnings`, `--explain-severity [--kind K] [--rule R]`.
+
+`--explain-severity` reports the effective severity of each rule and the layer that set it (`entry`, `project-kind`, `project`, `kit-kind`, `kit`, `default`), then exits 0 without validating anything.
+
 **Exit**: 0=PASS, 2=FAIL.
 
 ---
@@ -693,6 +699,9 @@ cfs validate-kits [path] [--kit KIT] [--verbose]
 3. Validate each template against constraints (heading contract, ID placeholders, cross-artifact references).
 4. Validate each example artifact against its template structure and constraints.
 5. Report per-kit, per-kind PASS/FAIL with error details.
+6. Report unrecognised keys under any `[validation]` table as `constraints-unknown-key` warnings, rather than dropping them the way the kind parser drops unknown keys.
+
+A top-level `warning_count` sums the per-kit warnings that previously appeared only nested inside `self_check_results[]`, so a caller reading the top level can tell a kit with advisory findings from one with none.
 
 > **Note**: `validate-kits` is also invoked automatically at the end of `cfs update`. If it fails, the update status becomes WARN and the validation report is included in the update output.
 

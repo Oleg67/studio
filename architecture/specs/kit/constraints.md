@@ -24,6 +24,7 @@ drivers:
   - [ID Constraints](#id-constraints)
   - [Reference Rules](#reference-rules)
 - [Validation Semantics](#validation-semantics)
+  - [Severity](#severity)
   - [Heading Validation](#heading-validation)
   - [ID Validation](#id-validation)
   - [Cross-Artifact Validation](#cross-artifact-validation)
@@ -124,6 +125,9 @@ Each `[[artifacts.<KIND>.headings]]` entry defines a constraint for one heading 
 | `numbered` | boolean or omit | omit | `true` = required, `false` = prohibited, omit = allowed |
 | `pattern` | string (regex) | — | Applied to heading title text (excluding `#` markers and numbering prefix) |
 | `description` | string | — | Human-readable description of section intent |
+| `severity` | `error` / `warning` / `off` | code default | Severity for the rules this entry owns |
+| `locked` | boolean | `false` | When true, a project may raise this entry's rules but not lower them |
+| `prev` / `next` | string | auto | Neighbouring heading constraint ids. Auto-linked from declaration order; used in message text only — ordering is not enforced from them |
 
 **Boolean convention**: `true` = required, `false` = prohibited, omit = optional/allowed.
 
@@ -140,6 +144,8 @@ Each `[artifacts.<KIND>.identifiers.<kind>]` table defines validation rules for 
 | `priority` | boolean or omit | omit | `true` = priority marker required, `false` = prohibited, omit = allowed |
 | `to_code` | boolean | `false` | Whether this ID kind must be traceable to code |
 | `headings` | array of strings | — | Heading constraint IDs where this ID kind must be defined |
+| `severity` | `error` / `warning` / `off` | code default | Severity for the rules this ID-kind entry owns |
+| `locked` | boolean | `false` | When true, a project may raise this entry's rules but not lower them |
 
 ### Reference Rules
 
@@ -157,6 +163,37 @@ Each `[artifacts.<KIND>.identifiers.<kind>.ref.<TARGET>]` sub-table defines cros
 ---
 
 ## Validation Semantics
+
+### Severity
+
+Every finding carries a `severity` of `error`, `warning` or `off`. `error` gates the run, `warning` is reported without gating, and `off` suppresses the finding — counted in the report's `suppressed_count`, never simply dropped.
+
+A kit declares severity in three places, most specific first:
+
+```toml
+[validation.severity]                      # whole kit, per rule code
+"toc-missing" = "warning"
+
+[artifacts.PRD.validation.severity]        # one artifact kind, per rule code
+"heading-number-not-consecutive" = "off"
+
+[[artifacts.PRD.headings]]                 # one constraint entry
+id = "prd-metrics"
+severity = "warning"
+locked = true
+```
+
+The root `[validation]` table is lifted out before the `artifacts` unwrap. In the legacy unwrapped layout the artifact kinds are root keys, so a `[validation]` table left in place would be read as an artifact kind named `VALIDATION` and fail the file to load.
+
+**Resolution is two layers, not six.** The kit's own opinion settles first by specificity — constraint entry, then per-kind table, then whole-kit table, then the built-in default for the code. The project's `core.toml` `[validation]` table is then admitted against that value: a stricter project value always wins; a weaker one wins only if the governing entry is not `locked`, and is reported under `severity_overrides`; a weaker value against a `locked` entry is refused and the refusal is reported.
+
+Reading it as six layers of plain specificity cannot be right: the constraint entry is the most specific declaration of all, so a project could never override one and `locked` would have nothing to mean.
+
+**Unknown values and unknown keys differ.** A `severity` value outside the vocabulary fails the load — it would otherwise disable a check while the run still reported success. An unknown *key* under a `[validation]` table is reported by `validate-kits` as a `constraints-unknown-key` warning and the rest of the file loads, so a kit written for a newer engine remains installable on an older one.
+
+**Merging.** When several kits are bound into one project, severities merge strictest-wins, as `required` already does, and `locked` merges as a plain OR. Both kits are authorities over an entry they both declare, so the merge that cannot quietly relax what one of them meant to enforce is the strict one.
+
+See `cpt-studio-adr-validation-severity-policy` for the decision record.
 
 ### Heading Validation
 
