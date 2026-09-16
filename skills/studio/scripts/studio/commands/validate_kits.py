@@ -585,6 +585,31 @@ def _collect_self_check_failures(
 
 
 # @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-build-result
+def _enrich_kit_validation_findings(
+    all_errors: List[Dict[str, object]],
+    self_check_report: Dict[str, object],
+    project_root: Optional[Path],
+) -> None:
+    """Attach per-code reasons to kit-level findings and binding warnings, in place.
+
+    Both entry points converge on `_build_validate_kits_result`, so this is where
+    the findings that never pass through self-check get their reasons. Self-check
+    findings arrive already enriched and are touched a second time here; that is
+    safe because enrichment is idempotent — a property pinned by
+    `test_enrichment_is_idempotent_across_the_self_check_then_kits_double_pass`,
+    not assumed. `path` is kept: `_show_error` and the duplicate filter in
+    `_collect_self_check_failures` both read it.
+    """
+    enrich_issues(all_errors, project_root=project_root, strip_path=False)
+    for item in self_check_report.get("results", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for bucket in ("errors", "warnings"):
+            enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
+# @cpt-end:cpt-studio-algo-kit-validate:p1:inst-build-result
+
+
+# @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-build-result
 # @cpt-begin:cpt-studio-algo-kit-validate-by-path:p1:inst-build-result
 def _build_validate_kits_result(
     *,
@@ -594,16 +619,7 @@ def _build_validate_kits_result(
     self_check_report: Dict[str, object],
     project_root: Optional[Path] = None,
 ) -> Tuple[int, Dict[str, Any]]:
-    # Both entry points converge here, so this is where every kit-level finding and
-    # every binding warning gets its per-code reasons. Self-check findings arrive
-    # already enriched; enrichment is idempotent, so re-touching them is harmless.
-    # `path` is kept: `_show_error` and the duplicate filter in
-    # `_collect_self_check_failures` both read it.
-    enrich_issues(all_errors, project_root=project_root, strip_path=False)
-    for item in self_check_report.get("results", []) or []:
-        if isinstance(item, dict):
-            for bucket in ("errors", "warnings"):
-                enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
+    _enrich_kit_validation_findings(all_errors, self_check_report, project_root)
     overall_status = "PASS" if not all_errors else "FAIL"
     result: Dict[str, Any] = {
         "status": overall_status,

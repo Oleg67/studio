@@ -176,7 +176,10 @@ def _assert_table_covers_registry() -> None:
     if missing or orphaned:
         raise RuntimeError(
             "DEFAULT_SEVERITY is out of step with error_codes: "
-            f"missing={missing} orphaned={orphaned}"
+            f"missing={missing} orphaned={orphaned}. "
+            "Every uppercase string constant in error_codes.py is a rule code and "
+            "needs a default here; a constant that is not a rule code does not "
+            "belong in that module."
         )
     # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-exhaustive-guard
 

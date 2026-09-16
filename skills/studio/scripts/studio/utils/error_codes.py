@@ -3,6 +3,16 @@
 Every validation error/warning carries a ``code`` field from this module.
 Fixing prompts and downstream consumers match on codes, not messages.
 
+Invariant — every uppercase string constant in this module is a rule code, and
+only rule codes live here. ``utils/severity.py`` checks at import that each one
+has a declared default severity and refuses to load otherwise. That is a
+deliberate tripwire, not a heuristic to be worked around: a constant that is
+not a rule code (a schema version, a format tag) belongs in the module that
+uses it, and adding it here will name itself in the import error. Scoping the
+check to a curated list instead would let a new code slip past the guard when
+someone forgot to add it to the list — the exact silence the guard exists to
+prevent.
+
 @cpt-algo:cpt-studio-algo-traceability-validation-validate-structure:p1
 @cpt-dod:cpt-studio-dod-traceability-validation-structure:p1
 """

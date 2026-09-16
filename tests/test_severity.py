@@ -173,7 +173,10 @@ def test_the_module_refuses_to_import_when_the_registry_gains_an_unlisted_code(m
 
     monkeypatch.setattr(EC, "PROBE_CODE_WITHOUT_A_DEFAULT", "probe-code-without-a-default", raising=False)
     try:
-        with pytest.raises(RuntimeError, match="missing=\\['probe-code-without-a-default'\\]"):
+        with pytest.raises(
+            RuntimeError,
+            match="missing=\\['probe-code-without-a-default'\\].*does not belong in that module",
+        ):
             importlib.reload(sev)
     finally:
         monkeypatch.undo()
@@ -531,6 +534,31 @@ def test_validate_kits_findings_carry_their_reasons(tmp_path):
     assert result["errors"][0]["reasons"], "kit-level finding lost its reasons"
     assert "path" in result["errors"][0], "path must survive enrichment"
     assert result["self_check_results"][0]["warnings"][0]["reasons"], "binding warning lost its reasons"
+
+
+def test_enrichment_is_idempotent_across_the_self_check_then_kits_double_pass(tmp_path):
+    """Self-check enriches its findings once; `_build_validate_kits_result` enriches
+    the same dicts again. The code relies on the second pass being a no-op. This
+    pins that reliance: a change that appended to `reasons`, or wrote a
+    relativised value back into `location`, would corrupt the agent-facing fixing
+    text on exactly the findings that flow through both commands."""
+    import copy
+    from studio.utils.fixing import enrich_issues
+
+    finding = constraints_error(
+        "template", "ID kind has no template in constraints.toml",
+        path=tmp_path / "kits" / "sdlc" / "artifacts" / "PRD" / "template.md", line=1,
+        code=EC.TEMPLATE_ID_KIND_NO_TEMPLATE, kit_id="sdlc", artifact_kind="PRD", id_kind="fr",
+    )
+    enrich_issues([finding], project_root=tmp_path, strip_path=False)
+    after_first_pass = copy.deepcopy(finding)
+    assert after_first_pass["reasons"], "first pass must have produced reasons for this to test anything"
+
+    enrich_issues([finding], project_root=tmp_path, strip_path=False)
+
+    assert finding == after_first_pass, "second enrichment pass changed the finding"
+    for key in ("reasons", "fixing_prompt", "path", "location"):
+        assert finding.get(key) == after_first_pass.get(key), f"{key} drifted on the second pass"
 
 
 @pytest.mark.integration

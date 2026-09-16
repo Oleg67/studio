@@ -915,6 +915,21 @@ def _collect_kit_results(
 # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-for-each-kind
 
 
+# @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
+def _enrich_self_check_results(results: List[Dict[str, object]], project_root: Path) -> None:
+    """Attach per-code reasons to every self-check finding, in place.
+
+    This is the one point every self-check finding passes through, so enriching
+    here is what lets the reasons reach this command's own output and not only
+    `validate`'s. `path` is kept: the kit-validation renderer and its duplicate
+    filter both read it.
+    """
+    for item in results:
+        for bucket in ("errors", "warnings"):
+            enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
+# @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
+
+
 # @cpt-flow:cpt-studio-flow-developer-experience-self-check:p1
 # @cpt-dod:cpt-studio-dod-developer-experience-self-check:p1
 def run_self_check_from_meta(  # pylint: disable=too-many-locals
@@ -969,12 +984,7 @@ def run_self_check_from_meta(  # pylint: disable=too-many-locals
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-for-each-kit
 
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
-    # Enrich here, at the one point every self-check finding passes through, so the
-    # per-code reasons reach this command's own output and not only `validate`'s.
-    # `path` is kept: the kit-validation renderer and its duplicate filter read it.
-    for item in results:
-        for bucket in ("errors", "warnings"):
-            enrich_issues(item.get(bucket) or [], project_root=project_root, strip_path=False)
+    _enrich_self_check_results(results, project_root)
     out = {
         "status": overall_status,
         "project_root": project_root.as_posix(),
