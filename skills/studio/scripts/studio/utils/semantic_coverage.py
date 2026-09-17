@@ -155,3 +155,40 @@ def summary_line(semantic: Dict[str, object]) -> str:
             f"{semantic.get('presumed_covered', 0)} presumed-covered, "
             f"{len(semantic.get('unjudgeable') or [])} unjudgeable, {weak} weak/wrong")
 # @cpt-end:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-summary
+
+
+#: Cap on named requirement rows in the human report; the rest are summarised as "+N more".
+_SEMANTIC_CAP = 20
+
+
+# @cpt-begin:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-flagged
+def flagged_lines(semantic: Dict[str, object]) -> List[str]:
+    """The weak/wrong requirements, named one per line for the human report, so a reader can act on
+    the result without opening ``--json``: a finding whose ``verdict`` is ``wrong`` or ``partial``
+    (the set ``summary_line`` counts as "weak/wrong") named by ``block_id`` + ``path:line``. The
+    more severe ``wrong`` findings are listed before ``partial`` ones, so when the list is capped
+    the rows that survive are the worst, not merely the first the engine happened to emit.
+    Presumed-covered blocks are the passing majority and are not listed; *unjudgeable* blocks are
+    not listed either — that category is dominated by no-judge-wired noise (with no judge wired
+    every block is unjudgeable) but also holds permanent pre-filter gaps; neither is an actionable
+    requirement here, and their combined count stays on the summary line above. Capped, with a
+    "+N more — see --json" continuation. Advisory: rendering only, never gates. A malformed/absent
+    shape yields no lines, never raises — including a single wrong/partial record missing or
+    mistyping any of ``block_id``/``path``/``start_line`` (a boolean ``start_line`` is rejected too,
+    since ``bool`` subclasses ``int``), which is skipped rather than rendered as ``None:None``."""
+    if not isinstance(semantic, dict) or semantic.get("error"):
+        return []
+    findings = semantic.get("findings")
+    findings = findings if isinstance(findings, list) else []
+    valid = [f for f in findings if isinstance(f, dict)
+             and f.get("verdict") in (eval_semantic.SEM_WRONG, eval_semantic.SEM_PARTIAL)
+             and isinstance(f.get("block_id"), str) and f["block_id"]
+             and isinstance(f.get("path"), str) and f["path"]
+             and isinstance(f.get("start_line"), int) and not isinstance(f.get("start_line"), bool)]
+    # wrong before partial, stable within each — so a cap keeps the most severe rows, not the first.
+    valid.sort(key=lambda f: 0 if f.get("verdict") == eval_semantic.SEM_WRONG else 1)
+    out = [f"  {f['block_id']}  {f['verdict']}  {f['path']}:{f['start_line']}" for f in valid]
+    if len(out) > _SEMANTIC_CAP:
+        return out[:_SEMANTIC_CAP] + [f"  (+{len(out) - _SEMANTIC_CAP} more — see --json)"]
+    return out
+# @cpt-end:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-flagged

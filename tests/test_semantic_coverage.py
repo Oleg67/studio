@@ -364,3 +364,79 @@ def test_relative_posix_still_relativises_against_a_root(tmp_path: Path):
     target = tmp_path / "src" / "mod.py"
     target.write_text("x = 1\n", encoding="utf-8")
     assert sc._relative_posix(target, tmp_path) == "src/mod.py"
+
+
+def test_flagged_lines_names_weak_wrong_only():
+    # #195: name the weak/wrong requirements by block_id + path:line so a reader acts without
+    # --json; a covered block is not listed, and an unjudgeable block is not listed either (with
+    # no judge wired every block is unjudgeable, so per-block rows would be pure noise).
+    semantic = {
+        "assessed": 3, "presumed_covered": 1,
+        "findings": [
+            {"block_id": "algo-a:inst-x", "path": "a.py", "start_line": 10,
+             "verdict": sem.SEM_WRONG, "rationale": "r"},
+            {"block_id": "algo-p:inst-q", "path": "p.py", "start_line": 15,
+             "verdict": sem.SEM_PARTIAL, "rationale": "half"},        # partial -> listed too
+            {"block_id": "algo-b:inst-y", "path": "b.py", "start_line": 20,
+             "verdict": sem.SEM_COVERED, "rationale": "ok"},          # covered -> not listed
+        ],
+        "unjudgeable": [
+            {"block_id": "algo-c:inst-z", "path": "c.py", "start_line": 30, "reason": "no judge"}],
+    }
+    joined = "\n".join(sc.flagged_lines(semantic))
+    assert "algo-a:inst-x  wrong  a.py:10" in joined                 # the wrong finding, named
+    assert "algo-p:inst-q  partial  p.py:15" in joined               # partial is weak/wrong too
+    assert "algo-b:inst-y" not in joined                             # a covered block is not listed
+    assert "algo-c:inst-z" not in joined                            # unjudgeable is not listed
+
+
+def test_flagged_lines_tolerates_malformed_and_caps():
+    assert sc.flagged_lines(None) == []                              # absent/malformed -> no lines
+    assert sc.flagged_lines({"error": "boom"}) == []                 # errored pass -> no lines
+    assert sc.flagged_lines({"findings": "nope"}) == []              # non-list findings -> no raise
+    assert sc.flagged_lines({"findings": []}) == []                  # empty findings -> no lines
+    assert sc.flagged_lines({"findings": [None, 7]}) == []           # non-dict rows skipped, no raise
+    # a wrong/partial record missing (or null-ing) a required field is skipped, not rendered as
+    # "None:None" — so the docstring's "malformed shape yields no lines" holds per-record too.
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG}]}) == []            # all missing
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "path": "a.py",
+                                           "start_line": 10}]}) == []                    # block_id missing
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_PARTIAL, "block_id": None,
+                                           "path": "a.py", "start_line": 10}]}) == []    # block_id null
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "block_id": "b:1",
+                                           "path": "a.py", "start_line": None}]}) == []  # start_line null
+    # an otherwise-complete record with NO verdict key at all is skipped, not raised on
+    assert sc.flagged_lines({"findings": [{"block_id": "b:1", "path": "a.py",
+                                           "start_line": 10}]}) == []                    # verdict absent
+    # a boolean start_line is rejected even though bool subclasses int (True would render "a.py:True")
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "block_id": "b:1",
+                                           "path": "a.py", "start_line": True}]}) == []  # bool start_line
+    # empty-string block_id/path (falsy but correct type) and a float start_line are skipped too
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "block_id": "",
+                                           "path": "a.py", "start_line": 10}]}) == []  # empty block_id
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "block_id": "b:1",
+                                           "path": "", "start_line": 10}]}) == []      # empty path
+    assert sc.flagged_lines({"findings": [{"verdict": sem.SEM_WRONG, "block_id": "b:1",
+                                           "path": "a.py", "start_line": 1.5}]}) == []  # float start_line
+    big = {"findings": [{"block_id": f"b:{i}", "path": "p", "start_line": i,
+                         "verdict": sem.SEM_WRONG} for i in range(sc._SEMANTIC_CAP + 5)]}
+    lines = sc.flagged_lines(big)
+    assert len(lines) == sc._SEMANTIC_CAP + 1                        # capped rows + the "+N more"
+    assert "+5 more" in lines[-1]
+
+
+def test_flagged_lines_prioritises_wrong_over_partial_when_capped():
+    # ainetx follow-up: severity outranks input order. Partials come FIRST in the input and there
+    # are enough to fill the cap on their own; the wrong findings must still survive it.
+    partials = [{"block_id": f"p:{i}", "path": "p.py", "start_line": i,
+                 "verdict": sem.SEM_PARTIAL} for i in range(sc._SEMANTIC_CAP)]
+    wrongs = [{"block_id": f"w:{i}", "path": "w.py", "start_line": i,
+               "verdict": sem.SEM_WRONG} for i in range(3)]
+    lines = sc.flagged_lines({"findings": partials + wrongs})        # 20 partials, then 3 wrongs
+    shown = "\n".join(lines[:-1])                                    # drop the "+N more" row
+    assert all(f"w:{i}" in shown for i in range(3))                  # every wrong survived the cap
+    assert "+3 more" in lines[-1]                                    # 3 partials pushed past the cap
+    # and within the shown rows, the wrong ones come before any partial
+    first_partial = next(i for i, ln in enumerate(lines) if "p:" in ln)
+    last_wrong = max(i for i, ln in enumerate(lines) if "w:" in ln)
+    assert last_wrong < first_partial
