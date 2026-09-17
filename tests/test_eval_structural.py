@@ -422,3 +422,87 @@ def test_a_misspelled_workflow_warns_and_says_what_it_used(caplog) -> None:
     message = warnings[0]
     assert "verificaton" in message
     assert "verify" in message                 # names what it would have accepted
+
+
+# --- a declaration has to be a declaration ---------------------------------
+
+@pytest.mark.parametrize("declared", ["true", "1", '"step.out"'],
+                         ids=["boolean", "integer", "bare-string"])
+def test_a_truthy_scalar_is_not_a_declared_output_list(declared: str) -> None:
+    """`outputs = true` is not an output list, and neither is `1` or a bare string.
+
+    The check was a plain truthiness test, so malformed frontmatter collected the same
+    structural credit as a correct declaration. The bare string is the one that matters:
+    it looks right, it is the likeliest mistake, and accepting it hides precisely the
+    authoring error this check exists to surface.
+    """
+    body = (f'```toml\n[phase]\nnumber = 1\ntotal = 1\noutputs = {declared}\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "every-phase-declares-an-output" in _findings_for(run)
+
+
+@pytest.mark.parametrize("declared", ['["step.out"]', '["a.md", "b.md"]'],
+                         ids=["one-entry", "two-entries"])
+def test_a_real_output_list_still_passes(declared: str) -> None:
+    """The tightened check must not start failing correct frontmatter."""
+    body = (f'```toml\n[phase]\nnumber = 1\ntotal = 1\noutputs = {declared}\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "every-phase-declares-an-output" not in _findings_for(run)
+
+
+def test_an_empty_list_is_not_a_declaration_either() -> None:
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutputs = []\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "every-phase-declares-an-output" in _findings_for(run)
+
+
+# --- both CommonMark fence characters --------------------------------------
+
+def test_a_heading_inside_a_tilde_fence_does_not_satisfy_required_sections() -> None:
+    """CommonMark fences with `~~~` as well as backticks; only backticks were stripped.
+
+    A `## Rules` heading inside a tilde-fenced sample therefore read as a real section
+    and handed deterministic structural credit to a code sample.
+    """
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\n'
+            '~~~\n## Rules\nthis is a code sample, not a real section\n~~~\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "Rules" in _findings_for(run)["required-sections-present"]
+
+
+def test_a_fence_closes_on_its_own_character() -> None:
+    """Per CommonMark a fence ends on the character that opened it.
+
+    A tilde line inside a backtick block is content, so the block must stay open and the
+    `## Rules` after it must still be hidden — otherwise the fix would create a new way
+    for a code sample to be read as prose.
+    """
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\n'
+            '```\nnot a fence: ~~~\n## Rules\nstill inside the backtick block\n```\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "Rules" in _findings_for(run)["required-sections-present"]
+
+
+def test_real_sections_after_a_tilde_fence_are_still_found() -> None:
+    """The fence must close, not swallow the rest of the document."""
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n~~~\nsample\n~~~\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "required-sections-present" not in _findings_for(run)

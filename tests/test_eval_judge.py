@@ -428,3 +428,86 @@ def test_calibration_excludes_unscoreable_evidence_runs() -> None:
     assert "e" in cal.excluded
     assert set(cal.covered) == {"g", "e"}
     assert cal.accuracy == 1.0            # measured only over the one scoreable run
+
+
+# --- a judge that never answers --------------------------------------------
+
+def test_a_judge_that_never_returns_is_unknown_not_a_stalled_suite(monkeypatch) -> None:
+    """`except Exception` catches a judge that *raises*. It cannot catch one that hangs.
+
+    The model call lives out-of-tree, so this is a bound on someone else's code: before
+    it, one unresponsive adapter stopped the whole suite with no verdict and no message.
+    """
+    import threading
+    import time
+
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 0.2)
+    release = threading.Event()
+
+    def _hangs(_request):
+        release.wait(30)            # bounded so a failing test cannot wedge the suite
+        return JudgeReply(verdict="compliant", rationale="too late")
+
+    started = time.monotonic()
+    try:
+        result = AdvisoryJudge(_hangs).score(_run(), _scenario())
+        waited = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert result.verdict == VERDICT_UNKNOWN
+    assert "did not return" in result.findings[0]
+    assert waited < 5.0             # bounded by the timeout, not by the judge
+
+
+def test_the_worker_does_not_hold_the_process_open(monkeypatch) -> None:
+    """A ThreadPoolExecutor would move the hang rather than remove it.
+
+    Its threads are non-daemon and the interpreter joins them on the way out, so the
+    call returned promptly and the *process* then sat at shutdown until killed —
+    measured at 1.0s to return and 25s+ to not exit. The worker must be a daemon.
+    """
+    import threading
+
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 0.2)
+    release = threading.Event()
+    before = {t.name for t in threading.enumerate()}
+
+    try:
+        AdvisoryJudge(lambda _r: release.wait(30)).score(_run(), _scenario())
+        leftover = [t for t in threading.enumerate()
+                    if t.name not in before and t.name == "cfs-eval-judge"]
+        assert leftover, "expected the worker to still be running — that is the case under test"
+        assert all(t.daemon for t in leftover), "a non-daemon worker blocks interpreter exit"
+    finally:
+        release.set()
+
+
+def test_a_judge_that_answers_in_time_is_unaffected(monkeypatch) -> None:
+    """The bound must not turn a working judge into an UNKNOWN."""
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 5.0)
+    result = AdvisoryJudge(_stub("compliant")).score(_run(), _scenario())
+
+    assert result.verdict != VERDICT_UNKNOWN
+
+
+def test_a_judge_that_raises_is_still_reported_as_raising(monkeypatch) -> None:
+    """The timeout path must not swallow the exception path it sits beside."""
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 5.0)
+
+    def _boom(_request):
+        raise RuntimeError("model refused")
+
+    result = AdvisoryJudge(_boom).score(_run(), _scenario())
+
+    assert result.verdict == VERDICT_UNKNOWN
+    assert "raised" in result.findings[0]
+    assert "model refused" in result.findings[0]

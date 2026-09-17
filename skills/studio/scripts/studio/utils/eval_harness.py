@@ -22,6 +22,7 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import math
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -457,8 +458,14 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         seen.add(scenario_id)
         _, _, now = _scenario_compliance(scenario_result)
         before = prev.get(scenario_id)
-        # missing / non-numeric baseline → no comparison; exclude bool (a subclass of int).
-        if not isinstance(before, (int, float)) or isinstance(before, bool):
+        # missing / non-numeric baseline → no comparison; exclude bool (a subclass of int),
+        # and NaN/inf, which are floats and so survive the isinstance check. NaN then
+        # disappears a second time: every comparison against it is False, so the scenario
+        # joined neither `regressed` nor `improved` and `has_regression` stayed False even
+        # for a drop to zero. A corrupt or hand-edited baseline switched the gate off and
+        # said nothing.
+        if (not isinstance(before, (int, float)) or isinstance(before, bool)
+                or not math.isfinite(before)):
             before = None
         if before is None:
             if now is not None:
@@ -472,7 +479,7 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
             improved.append({"scenario": scenario_id, "from": before, "to": now})
     for scenario_id, before in prev.items():
         if (scenario_id not in seen and isinstance(before, (int, float))
-                and not isinstance(before, bool)):
+                and not isinstance(before, bool) and math.isfinite(before)):
             # gone from the suite entirely — surfaced, but not a gate-worthy regression.
             no_longer_scoreable.append({"scenario": scenario_id, "from": before})
     baseline_summary = baseline.get("summary", {})

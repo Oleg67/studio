@@ -371,9 +371,26 @@ def _check_dependencies_not_forward(inp: StructuralInput) -> Tuple[bool, str]:
     return not forward, _capped(forward)
 
 
+def _declares_outputs(front: Dict[str, object]) -> bool:
+    """Whether a phase's frontmatter declares outputs in a shape that means anything.
+
+    A bare truthiness test passed ``outputs = true``, ``outputs = 1`` and
+    ``outputs = "step.out"`` -- malformed frontmatter collecting the same structural
+    credit as a correctly declared list. A single string is the interesting one: it
+    looks right and is the likeliest mistake, and treating it as a declaration hides
+    exactly the authoring error this check exists to surface.
+    """
+    for key in ("outputs", "output_files"):
+        value = front.get(key)
+        if isinstance(value, (list, tuple)) and any(
+                isinstance(item, str) and item.strip() for item in value):
+            return True
+    return False
+
+
 def _check_every_phase_declares_output(inp: StructuralInput) -> Tuple[bool, str]:
     missing = [str(n) for n, front in sorted(inp.phases.items())
-               if not (front.get("outputs") or front.get("output_files"))]
+               if not _declares_outputs(front)]
     return not missing, (f"phases without outputs: {_capped(missing, 5)}" if missing else "")
 # @cpt-end:cpt-studio-algo-eval-structural:p1:inst-structural-checks-phase
 
@@ -385,18 +402,28 @@ def _prose_headings(raw_body: str) -> str:
     code sample is not mistaken for a real heading (which would inflate compliance).
 
     A simple line-based fence toggle, not a Markdown parser: no regex over the whole body, so
-    no backtracking, and it covers the fenced ` ``` ` blocks phase files actually use.
+    no backtracking. Both CommonMark fence characters count -- backticks and tildes. Only
+    backticks were recognised, so a ``## Rules`` heading inside a ``~~~`` block read as a
+    real section and could satisfy :func:`_check_required_sections`, handing deterministic
+    structural credit to a code sample.
+
+    A fence closes on its own character, per CommonMark: tildes inside a backtick block are
+    content, not a delimiter.
     """
     front, normalised = _match_frontmatter(raw_body)
     body = normalised[front.end():] if front else normalised
     visible: List[str] = []
-    in_fence = False
+    fence: str = ""
     for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
+        stripped = line.lstrip()
+        if fence:
+            if stripped.startswith(fence):
+                fence = ""
             continue
-        if not in_fence:
-            visible.append(line)
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            fence = stripped[0] * 3
+            continue
+        visible.append(line)
     return "\n".join(visible)
 # @cpt-end:cpt-studio-algo-eval-structural:p1:inst-structural-prose
 

@@ -29,6 +29,7 @@ This module contains no model client. The real model call is provided out-of-tre
 from __future__ import annotations
 
 import logging
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -301,6 +302,14 @@ def load_gold(gold_path: Optional[Path]) -> Optional[Gold]:
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-gold
 
 
+#: Seconds a single injected judge call may take before the scenario is reported
+#: UNKNOWN and the suite moves on. The model call lives out-of-tree, so this is a
+#: bound on someone else's code: the `except Exception` below turns a judge that
+#: *raises* into UNKNOWN, but a judge that simply never returns is not an exception
+#: and was not caught by anything -- one hung adapter stopped the whole suite, with
+#: no verdict and no message.
+_JUDGE_TIMEOUT_SECONDS = 120.0
+
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-scorer
 class AdvisoryJudge:  # pylint: disable=too-few-public-methods
     """Score a run's rule-compliance via an injected model. ADVISORY: it can never gate.
@@ -314,6 +323,42 @@ class AdvisoryJudge:  # pylint: disable=too-few-public-methods
 
     def __init__(self, judge_fn: Optional[JudgeFn] = None) -> None:
         self._judge_fn = judge_fn
+
+    def _call_judge(self, request: "JudgeRequest"):
+        """Run the injected judge with a deadline, raising ``TimeoutError`` past it.
+
+        A worker thread rather than a signal: signals are main-thread and POSIX-only,
+        and this runs wherever the harness does. The honest limitation is that Python
+        cannot kill the thread -- a judge that hangs keeps its thread until the process
+        exits. What this buys is that the *suite* is no longer hostage to it: the
+        scenario is reported UNKNOWN and the remaining ones still run, which is the
+        difference between a degraded report and no report at all.
+        """
+        returned: List[object] = []
+        raised: List[BaseException] = []
+
+        def _run() -> None:
+            try:
+                returned.append(self._judge_fn(request))
+            except Exception as exc:  # pylint: disable=broad-except  # re-raised below
+                raised.append(exc)
+
+        # A **daemon** thread, not a ThreadPoolExecutor. The executor's threads are
+        # non-daemon and the interpreter joins them on the way out, so a judge that
+        # never returns stops the process at exit instead of during the run -- the same
+        # hang, moved somewhere harder to attribute. Measured: the call came back in
+        # 1.0s and the process then sat at shutdown until killed.
+        worker = threading.Thread(target=_run, name="cfs-eval-judge", daemon=True)
+        worker.start()
+        worker.join(_JUDGE_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            raise TimeoutError(
+                f"judge_fn did not return within {_JUDGE_TIMEOUT_SECONDS:.0f}s")
+        if raised:
+            raise raised[0]
+        # Empty only if the judge died on a BaseException; `None` is already handled
+        # downstream as UNKNOWN, which is the right verdict for "said nothing usable".
+        return returned[0] if returned else None
 
     def score(self, run: Optional[RunArtifacts], scenario: Scenario) -> ScorerResult:
         """Advisory PASS/FAIL/UNKNOWN on rule-compliance; never contributes to the exit code."""
@@ -332,7 +377,16 @@ class AdvisoryJudge:  # pylint: disable=too-few-public-methods
             return self._result(VERDICT_UNKNOWN, [f"evidence unscoreable: {gap}"],
                                 f"unscoreable: {gap}", scenario)
         try:
-            reply = self._judge_fn(request)
+            reply = self._call_judge(request)
+        except TimeoutError:
+            # Not an error the judge reported -- an answer that never came. Same
+            # degradation as a raise, said differently so the cause is legible.
+            logger.warning("eval: judge_fn did not return within %.0fs on scenario %s",
+                           _JUDGE_TIMEOUT_SECONDS, scenario.id)
+            return self._result(
+                VERDICT_UNKNOWN,
+                [f"judge_fn did not return within {_JUDGE_TIMEOUT_SECONDS:.0f}s"],
+                "judge timeout", scenario)
         # A misbehaving injected judge must degrade to UNKNOWN, never sink the run.
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("eval: judge_fn raised on scenario %s: %s", scenario.id, exc)
