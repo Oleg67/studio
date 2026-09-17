@@ -134,6 +134,7 @@ def _missing_bound_artifact_warnings(
 
 
 # @cpt-begin:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
+# @cpt-begin:cpt-studio-algo-kit-validate-by-path:p1:inst-unknown-validation-keys
 def _append_unknown_validation_key_warnings(
     self_check_report: Dict[str, object],
     loaded_kits: Optional[Dict[str, Any]],
@@ -202,6 +203,7 @@ def _unknown_validation_key_warnings(kit_id: str, loaded_kit: Any) -> List[Dict[
         "warning_count": len(warnings),
         "warnings": warnings,
     }]
+# @cpt-end:cpt-studio-algo-kit-validate-by-path:p1:inst-unknown-validation-keys
 # @cpt-end:cpt-studio-algo-kit-validate:p1:inst-unknown-validation-keys
 
 
@@ -1235,6 +1237,9 @@ def _human_validate_kits(data: dict) -> None:
     if n_tpl:
         ui.detail("Templates checked", str(n_tpl))
     ui.detail("Errors", str(n_err))
+    # Shown unconditionally, alongside the error count. A JSON-only count is
+    # invisible to the reader at a terminal, which is where a kit is edited.
+    ui.detail("Warnings", str(data.get("warning_count", 0)))
 
     _render_verbose_kit_reports(data.get("kits", []))
     sc_results = data.get("self_check_results", [])
@@ -1243,8 +1248,12 @@ def _human_validate_kits(data: dict) -> None:
 
     overall = data.get("status", "")
     ui.blank()
+    n_warn = data.get("warning_count", 0)
     if overall == "PASS":
-        ui.success(f"{n} kit(s) validated, all passed.")
+        if n_warn:
+            ui.success(f"{n} kit(s) validated, all passed — {n_warn} warning(s).")
+        else:
+            ui.success(f"{n} kit(s) validated, all passed.")
     else:
         ui.error(f"{n} kit(s) validated, {n_err} error(s).")
     ui.blank()

@@ -630,8 +630,9 @@ Enables users to install, update, and validate kit packages with interactive fil
 2. [x] - `p1` - **Phase 1 — Structural**: load and validate all `kind = "constraints"` resources in manifest order, falling back to legacy `constraints.toml` only for legacy path validation - `inst-structural-check`
 3. [x] - `p1` - **Phase 1b — Manifest resources**: **IF** manifest-driven kit, verify all registered resource paths exist on disk - `inst-verify-resource-paths`
 4. [x] - `p1` - Build synthetic `ArtifactsMeta` from explicit constraints artifact bindings for canonical/core KitModel inputs; use kit `artifacts/` directory only as the legacy layout fallback - `inst-build-artifacts-meta`
-5. [x] - `p1` - **Phase 2 — Templates**: run `self_check` for template/example validation - `inst-template-check`
-6. [x] - `p1` - Build result: aggregate errors, set PASS/FAIL - `inst-build-result`
+5. [x] - `p1` - **Phase 2 — Templates**: run `self_check` for template/example validation, applying the kit's own declared severity to its own examples - `inst-template-check`
+6. [x] - `p1` - Warn for each key under a `[validation]` table this engine does not read, on the same terms as registered-kit validation, since both converge on one result builder - `inst-unknown-validation-keys`
+7. [x] - `p1` - Build result: aggregate errors and warnings, set PASS/FAIL - `inst-build-result`
 
 ### Kit Config Helpers
 

@@ -34,17 +34,38 @@
     },
     "severity_table": {
       "type": "object",
-      "description": "Map of rule code to severity.",
+      "description": "Map of rule code to severity. At the root a value may also be a table keyed by artifact kind, whose own keys are rule codes; under an artifact kind only rule codes are accepted.",
       "propertyNames": { "type": "string", "minLength": 1 },
-      "additionalProperties": { "$ref": "#/$defs/severity" }
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/severity" },
+          {
+            "type": "object",
+            "description": "Per-artifact-kind overrides: rule code to severity.",
+            "propertyNames": { "type": "string", "minLength": 1 },
+            "additionalProperties": { "$ref": "#/$defs/severity" }
+          }
+        ]
+      }
     },
     "kit_validation": {
       "type": "object",
-      "additionalProperties": false,
+      "description": "A key this engine does not know is reported by validate-kits as a constraints-unknown-key warning and the rest of the file still loads, so a kit written for a newer engine stays installable on an older one. The schema therefore permits unknown properties here; it does not describe them as valid.",
+      "additionalProperties": true,
+      "properties": {
+        "severity": { "$ref": "#/$defs/severity_table" }
+      }
+    },
+    "kit_validation_for_kind": {
+      "type": "object",
+      "description": "Validation policy under one artifact kind. Same unknown-key tolerance as the root table; a nested artifact kind is refused, because this table is already scoped to one.",
+      "additionalProperties": true,
       "properties": {
         "severity": {
-          "description": "Rule code to severity. At the root a value may also be a table keyed by artifact kind; under an artifact kind only rule codes are accepted.",
-          "$ref": "#/$defs/severity_table"
+          "type": "object",
+          "description": "Rule code to severity, for this artifact kind only.",
+          "propertyNames": { "type": "string", "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/severity" }
         }
       }
     },
@@ -60,7 +81,7 @@
           "description": "Whether the TOC phase runs for this artifact kind (default true)."
         },
         "validation": {
-          "$ref": "#/$defs/kit_validation",
+          "$ref": "#/$defs/kit_validation_for_kind",
           "description": "Validation policy scoped to this artifact kind. Overrides the kit-wide table for the same rule code."
         },
         "headings": {

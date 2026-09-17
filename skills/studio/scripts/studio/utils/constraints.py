@@ -15,11 +15,15 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 from . import error_codes as EC
 from .severity import (
+    ENTRY_HEADING,
+    ENTRY_IDENTIFIER,
+    EntryKey,
     EntrySeverity,
     SeverityPolicy,
     SeverityTables,
     apply_policy,
     default_severity,
+    entry_key,
     is_stricter,
     merge_severity_tables,
     parse_kit_validation,
@@ -2453,6 +2457,7 @@ def _validate_duplicate_definitions(
                 path=drow.get("artifact_path"),
                 line=int(drow.get("line", 1) or 1),
                 id=did,
+                artifact_kind=drow.get("artifact_kind"),
             ))
 # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-duplicate-defs
 
@@ -2478,6 +2483,7 @@ def _validate_reference_definitions_exist(
                 path=row.get("artifact_path"),
                 line=int(row.get("line", 1) or 1),
                 id=rid,
+                artifact_kind=row.get("artifact_kind"),
             ))
         # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-if-no-def
 # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-foreach-ref
@@ -2509,6 +2515,7 @@ def _validate_checked_reference_consistency(
                     path=row.get("artifact_path"),
                     line=int(row.get("line", 1) or 1),
                     id=rid,
+                    artifact_kind=row.get("artifact_kind"),
                 ))
             # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-if-ref-done-def-not
 # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-foreach-checked-ref
@@ -2542,6 +2549,7 @@ def _validate_definition_completion_consistency(
                     path=row.get("artifact_path"),
                     line=int(row.get("line", 1) or 1),
                     id=rid,
+                    artifact_kind=row.get("artifact_kind"),
                     def_artifact_kind=defs_with_task[0].get("artifact_kind"),
                 ))
         # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-if-def-done-ref-not
@@ -2557,6 +2565,7 @@ def _validate_definition_completion_consistency(
                 path=row.get("artifact_path"),
                 line=int(row.get("line", 1) or 1),
                 id=rid,
+                artifact_kind=row.get("artifact_kind"),
             ))
 # @cpt-end:cpt-studio-algo-traceability-validation-cross-validate:p1:inst-foreach-checked-def
 
@@ -3160,14 +3169,12 @@ def _parse_artifact_kind_constraints(
         return None
     text_fields, headings, defined_id, toc_val = parsed
     kind_errors: List[str] = []
-    validation = parse_kit_validation(raw.get("validation"), kind_errors)
-    if validation.by_kind:
-        # This table is already scoped to one kind; a kind inside it would be
-        # two answers to the same question with no rule for which one wins.
-        kind_errors.append(
-            "[validation.severity] under an artifact kind takes rule codes, not artifact kinds "
-            f"({', '.join(sorted(validation.by_kind))})"
-        )
+    validation = parse_kit_validation(
+        raw.get("validation"),
+        kind_errors,
+        where=f"[artifacts.{kind.strip().upper()}.validation]",
+        allow_kinds=False,
+    )
     if kind_errors:
         errors.extend(f"constraints for {kind}: {message}" for message in kind_errors)
         return None
@@ -3641,15 +3648,17 @@ def merge_kit_constraints_all_of(constraints: Sequence[KitConstraints]) -> Optio
 # @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-build-policy
 def collect_entry_severities(
     kit_constraints: Iterable[KitConstraints],
-) -> Dict[str, Dict[str, EntrySeverity]]:
-    """Index every entry that declares a severity or a lock, by kind and entry id.
+) -> Dict[str, Dict[EntryKey, EntrySeverity]]:
+    """Index every entry that declares a severity or a lock, by kind and entry key.
 
     Heading entries are keyed by heading id and identifier entries by ID kind —
     the two fields findings already carry, so a finding can be matched back to
     the entry that produced it without a new key having to be threaded through
-    every emission site.
+    every emission site. The key carries which of the two it is, because the
+    same string can legitimately name both a heading and an ID kind and one
+    must not inherit the other's severity or lock.
     """
-    entries: Dict[str, Dict[str, EntrySeverity]] = {}
+    entries: Dict[str, Dict[EntryKey, EntrySeverity]] = {}
     for kit in kit_constraints:
         for kind, kind_constraints in (getattr(kit, "by_kind", None) or {}).items():
             normalized = str(kind).strip().upper()
@@ -3657,7 +3666,7 @@ def collect_entry_severities(
                 _record_entry(
                     entries,
                     normalized,
-                    getattr(heading, "id", None),
+                    entry_key(ENTRY_HEADING, getattr(heading, "id", None)),
                     getattr(heading, "severity", None),
                     bool(getattr(heading, "locked", False)),
                 )
@@ -3665,7 +3674,7 @@ def collect_entry_severities(
                 _record_entry(
                     entries,
                     normalized,
-                    getattr(identifier, "kind", None),
+                    entry_key(ENTRY_IDENTIFIER, getattr(identifier, "kind", None)),
                     getattr(identifier, "severity", None),
                     bool(getattr(identifier, "locked", False)),
                 )
@@ -3684,20 +3693,20 @@ def _kit_validation_tables(kit: object) -> SeverityTables:
 
 
 def _record_entry(
-    entries: Dict[str, Dict[str, EntrySeverity]],
+    entries: Dict[str, Dict[EntryKey, EntrySeverity]],
     kind: str,
-    entry_id: Optional[str],
+    key: Optional[EntryKey],
     severity: Optional[str],
     locked: bool,
 ) -> None:
-    if not entry_id or (severity is None and not locked):
+    if key is None or (severity is None and not locked):
         return
     by_entry = entries.setdefault(kind, {})
-    existing = by_entry.get(str(entry_id))
+    existing = by_entry.get(key)
     if existing is None:
-        by_entry[str(entry_id)] = EntrySeverity(severity=severity, locked=locked)
+        by_entry[key] = EntrySeverity(severity=severity, locked=locked)
         return
-    by_entry[str(entry_id)] = EntrySeverity(
+    by_entry[key] = EntrySeverity(
         severity=_merge_entry_severity(existing.severity, severity),
         locked=bool(existing.locked or locked),
     )

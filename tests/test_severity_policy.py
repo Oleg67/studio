@@ -72,7 +72,7 @@ def test_an_unknown_code_resolves_to_error_even_under_a_configured_policy():
         (
             {
                 "kit": S.SeverityTables(by_kind={"PRD": {"heading-missing": "off"}}),
-                "entries": {"PRD": {"prd-metrics": S.EntrySeverity("warning")}},
+                "entries": {"PRD": {("heading", "prd-metrics"): S.EntrySeverity("warning")}},
             },
             "warning", S.SOURCE_ENTRY,
         ),
@@ -90,7 +90,7 @@ def test_an_unknown_code_resolves_to_error_even_under_a_configured_policy():
     ],
 )
 def test_each_layer_wins_over_the_ones_below_it(kwargs, expected_severity, expected_source):
-    decision = _policy(**kwargs).resolve("heading-missing", "PRD", "prd-metrics")
+    decision = _policy(**kwargs).resolve("heading-missing", "PRD", ("heading", "prd-metrics"))
     assert (decision.severity, decision.source) == (expected_severity, expected_source)
 
 
@@ -103,9 +103,9 @@ def test_a_kind_scoped_setting_does_not_reach_another_kind():
 
 
 def test_an_entry_scoped_setting_does_not_reach_another_entry():
-    policy = _policy(entries={"PRD": {"prd-metrics": S.EntrySeverity("warning")}})
-    assert policy.resolve("heading-missing", "PRD", "prd-metrics").severity == "warning"
-    assert policy.resolve("heading-missing", "PRD", "prd-overview").severity == "error"
+    policy = _policy(entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity("warning")}})
+    assert policy.resolve("heading-missing", "PRD", ("heading", "prd-metrics")).severity == "warning"
+    assert policy.resolve("heading-missing", "PRD", ("heading", "prd-overview")).severity == "error"
     assert policy.resolve("heading-missing", "PRD", None).severity == "error"
 
 
@@ -140,9 +140,9 @@ def test_a_project_may_not_lower_a_locked_entry_and_the_refusal_is_reported():
     """#140 AC8: the attempt is refused, and the refusal is not silent."""
     policy = _policy(
         project=S.SeverityTables(by_kind={"PRD": {"heading-missing": "off"}}),
-        entries={"PRD": {"prd-metrics": S.EntrySeverity("error", locked=True)}},
+        entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity("error", locked=True)}},
     )
-    decision = policy.resolve("heading-missing", "PRD", "prd-metrics")
+    decision = policy.resolve("heading-missing", "PRD", ("heading", "prd-metrics"))
     assert decision.severity == "error"
     assert decision.source == S.SOURCE_ENTRY
     assert decision.refused_from == "off"
@@ -153,9 +153,9 @@ def test_a_lock_without_a_severity_protects_the_built_in_default():
     """`locked` alone is meaningful: it pins whatever already applies."""
     policy = _policy(
         project=S.SeverityTables(by_code={"heading-missing": "warning"}),
-        entries={"PRD": {"prd-metrics": S.EntrySeverity(None, locked=True)}},
+        entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity(None, locked=True)}},
     )
-    decision = policy.resolve("heading-missing", "PRD", "prd-metrics")
+    decision = policy.resolve("heading-missing", "PRD", ("heading", "prd-metrics"))
     assert decision.severity == "error"
     assert decision.source == S.SOURCE_DEFAULT
     assert decision.refused_from == "warning"
@@ -165,9 +165,9 @@ def test_a_locked_entry_still_accepts_a_raise():
     policy = _policy(
         kit=S.SeverityTables(by_code={"toc-missing": "warning"}),
         project=S.SeverityTables(by_code={"toc-missing": "error"}),
-        entries={"PRD": {"prd-metrics": S.EntrySeverity("warning", locked=True)}},
+        entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity("warning", locked=True)}},
     )
-    decision = policy.resolve("toc-missing", "PRD", "prd-metrics")
+    decision = policy.resolve("toc-missing", "PRD", ("heading", "prd-metrics"))
     assert decision.severity == "error"
     assert decision.refused_from is None
 
@@ -258,7 +258,7 @@ def test_apply_is_idempotent():
 def test_apply_records_a_refusal_once_per_rule_not_once_per_finding():
     policy = _policy(
         project=S.SeverityTables(by_kind={"PRD": {"heading-missing": "off"}}),
-        entries={"PRD": {"prd-metrics": S.EntrySeverity("error", locked=True)}},
+        entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity("error", locked=True)}},
     )
     findings = [
         _finding("heading-missing", artifact_kind="PRD", heading_id="prd-metrics"),
@@ -279,7 +279,7 @@ def test_apply_with_no_policy_leaves_the_stamped_severity_alone():
 
 
 def test_an_identifier_finding_is_matched_to_its_entry_by_id_kind():
-    policy = _policy(entries={"PRD": {"fr": S.EntrySeverity("warning")}})
+    policy = _policy(entries={"PRD": {("identifier", "fr"): S.EntrySeverity("warning")}})
     outcome = S.apply_policy(
         policy, [_finding("required-id-kind-missing", artifact_kind="PRD", id_kind="fr")])
     assert len(outcome.warnings) == 1
@@ -397,7 +397,9 @@ def test_an_unknown_validation_key_is_carried_rather_than_dropped(tmp_path):
         "artifacts": {"PRD": _MINIMAL_KIND},
     })
     assert errors == []
-    assert kit.validation.unknown_keys == ("severty",)
+    # Fully qualified, so the reported warning names where to look rather than
+    # just which word was wrong.
+    assert kit.validation.unknown_keys == ("[validation].severty",)
     assert kit.validation.by_code == {}
 
 
@@ -473,7 +475,7 @@ def test_entry_severities_merge_strictest_and_locks_merge_as_or(tmp_path):
     kit, errors = C.load_constraints_files([first, second])
     assert errors == []
     entries = C.collect_entry_severities([kit])
-    assert entries["PRD"]["prd-metrics"] == S.EntrySeverity(severity="error", locked=True)
+    assert entries["PRD"][("heading", "prd-metrics")] == S.EntrySeverity(severity="error", locked=True)
 
 
 def test_build_severity_policy_folds_per_kind_tables_into_the_kit_layer(tmp_path):
@@ -490,7 +492,7 @@ def test_build_severity_policy_folds_per_kind_tables_into_the_kit_layer(tmp_path
     policy = C.build_severity_policy([kit])
     assert policy.resolve("toc-missing").source == S.SOURCE_KIT
     assert policy.resolve("toc-missing", "PRD").severity == "off"
-    assert policy.resolve("heading-missing", "PRD", "prd-metrics").severity == "warning"
+    assert policy.resolve("heading-missing", "PRD", ("heading", "prd-metrics")).severity == "warning"
 
 
 def test_build_severity_policy_tolerates_a_kit_that_declares_nothing():
@@ -700,7 +702,7 @@ def test_e2e_a_locked_entry_refuses_the_lowering_and_says_so(tmp_path):
     assert report["suppressed_count"] == 1
     refusals = [row for row in report["severity_overrides"] if row["applied"] is False]
     assert refusals == [{
-        "code": "heading-missing", "kind": "PRD", "entry": "metrics",
+        "code": "heading-missing", "kind": "PRD", "entry": "heading:metrics",
         "from": "error", "to": "off", "applied": False, "source": S.SOURCE_DEFAULT,
     }]
 
@@ -797,3 +799,280 @@ def test_e2e_validate_kits_reports_unknown_validation_keys_and_a_warning_count(t
         for warning in (result.get("warnings") or [])
     }
     assert "constraints-unknown-key" in codes
+
+
+# ---------------------------------------------------------------------------
+# Review round 1: entry identity, unknown codes, and the passes that were
+# settling findings in the wrong order
+# ---------------------------------------------------------------------------
+
+def test_a_heading_and_an_id_kind_with_the_same_name_are_different_entries(tmp_path):
+    """Sharing a namespace would let one inherit the other's lock."""
+    kit, errors = _load(tmp_path, {"artifacts": {"PRD": {
+        "identifiers": {"metrics": {"required": True, "severity": "off"}},
+        "headings": [{"id": "metrics", "level": 2, "pattern": "Metrics",
+                      "severity": "warning", "locked": True}],
+    }}})
+    assert errors == []
+    policy = C.build_severity_policy([kit])
+    heading = policy.resolve("heading-missing", "PRD", ("heading", "metrics"))
+    identifier = policy.resolve("required-id-kind-missing", "PRD", ("identifier", "metrics"))
+    assert (heading.severity, identifier.severity) == ("warning", "off")
+    assert policy.entries["PRD"][("heading", "metrics")].locked is True
+    assert policy.entries["PRD"][("identifier", "metrics")].locked is False
+
+
+def test_an_identifier_entry_declared_in_capitals_still_matches_its_findings(tmp_path):
+    """Entries are stored as authored; findings lowercase the kind before emitting."""
+    kit, errors = _load(tmp_path, {"artifacts": {"PRD": {
+        "identifiers": {"FR": {"required": True, "severity": "warning"}},
+    }}})
+    assert errors == []
+    policy = C.build_severity_policy([kit])
+    outcome = S.apply_policy(
+        policy, [_finding("required-id-kind-missing", artifact_kind="PRD", id_kind="fr")])
+    assert len(outcome.warnings) == 1
+
+
+@pytest.mark.parametrize("table", ["validation", "artifacts"])
+def test_a_misspelled_rule_code_is_reported_not_accepted(tmp_path, table):
+    """The registry is closed, so a code that is not in it is knowable here."""
+    data = {"artifacts": {"PRD": _MINIMAL_KIND}}
+    if table == "validation":
+        data["validation"] = {"severity": {"headng-missing": "off"}}
+    else:
+        data["artifacts"]["PRD"] = {
+            **_MINIMAL_KIND, "validation": {"severity": {"headng-missing": "off"}}}
+    kit, errors = _load(tmp_path, data)
+    assert errors == []
+    tables = kit.validation if table == "validation" else kit.by_kind["PRD"].validation
+    assert tables.by_code == {}
+    assert any("headng-missing" in key for key in tables.unknown_keys)
+
+
+def test_a_blank_key_under_severity_fails_the_load(tmp_path):
+    kit, errors = _load(tmp_path, {
+        "validation": {"severity": {"   ": "off"}},
+        "artifacts": {"PRD": _MINIMAL_KIND},
+    })
+    assert kit is None
+    assert any("blank key" in message for message in errors)
+
+
+def test_strictest_wins_compares_a_whole_kit_rule_against_another_kits_kind_rule():
+    """Merging the two dicts independently never compares them against each other."""
+    merged = S.merge_severity_tables([
+        S.SeverityTables(by_code={"toc-missing": "error"}),
+        S.SeverityTables(by_kind={"PRD": {"toc-missing": "off"}}),
+    ])
+    assert merged.by_kind["PRD"]["toc-missing"] == "error"
+
+
+def test_fail_on_warnings_alone_counts_as_configured():
+    policy = _policy(project=S.SeverityTables(fail_on_warnings=True))
+    assert policy.is_configured() is True
+    assert policy.fail_on_warnings is True
+
+
+def test_e2e_a_lowered_context_finding_no_longer_takes_the_early_exit(tmp_path):
+    """Context and language findings arrive after the per-artifact pass.
+
+    Testing the raw list before the policy ran would fail the run on a finding
+    the project had configured away — the relaxation making the run stop
+    sooner rather than not at all.
+    """
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"heading-missing": "warning"}},
+        prd_body="# PRD\n\n## Alpha\n\ntext\n\n## Beta\n\ntext\n",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    # `toc-missing` is only reachable once the heading gate opens, and the run
+    # only reaches the TOC phase because the early exit no longer fires.
+    assert "toc-missing" in {e["code"] for e in report["errors"]}
+    assert exit_code == 2
+
+
+def test_e2e_artifact_reports_are_recounted_after_the_policy_settles(tmp_path):
+    """A top-level PASS must not contain an artifact still marked FAIL."""
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"heading-missing": "warning"}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code", "--verbose"])
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    statuses = {item["status"] for item in report.get("artifacts", report.get("artifact_reports", []))} \
+        if ("artifacts" in report or "artifact_reports" in report) else set()
+    assert "FAIL" not in statuses
+    assert report["warning_count"] == 2
+
+
+def test_e2e_a_refusal_is_reported_once_across_both_policy_passes(tmp_path):
+    """Both passes meet the same surviving finding; the reader sees one line."""
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(PRD={"headings": [
+            _REQUIRED_HEADINGS[0],
+            {**_REQUIRED_HEADINGS[1], "locked": True},
+        ]}),
+        core_validation={"severity": {"heading-missing": "off"}},
+    )
+    _, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    refusals = [row for row in report["severity_overrides"] if row["applied"] is False]
+    assert len(refusals) == 1
+
+
+def test_e2e_explain_severity_runs_while_the_kit_gate_would_fail(tmp_path):
+    """Asking which severity applies must not require a healthy kit."""
+    _write_project(tmp_path, kind_constraints=_both_kinds())
+    # Break the kit's own template so the validate-kits gate fails.
+    (tmp_path / "kits" / "test" / "artifacts" / "PRD" / "template.md").write_text(
+        "# PRD\n", encoding="utf-8")
+    gate_code, _ = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    assert gate_code == 2
+
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate", "--explain-severity", "--rule", "heading-missing"])
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+
+
+def test_e2e_explain_severity_reports_entry_level_overrides(tmp_path):
+    _write_project(tmp_path, kind_constraints=_both_kinds(PRD={"headings": [
+        _REQUIRED_HEADINGS[0],
+        {**_REQUIRED_HEADINGS[1], "severity": "warning"},
+    ]}))
+    exit_code, report = _run(
+        tmp_path,
+        ["--json", "validate", "--explain-severity", "--kind", "PRD", "--rule", "heading-missing"],
+    )
+    assert exit_code == 0
+    entry_rows = [row for row in report["rules"] if row.get("entry")]
+    assert entry_rows == [{
+        "code": "heading-missing", "kind": "PRD", "entry": "heading:metrics",
+        "severity": "warning", "source": S.SOURCE_ENTRY,
+    }]
+
+
+def test_e2e_explain_severity_includes_a_kind_only_the_project_names(tmp_path):
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"GLOSSARY": {"heading-missing": "warning"}}},
+    )
+    _, report = _run(tmp_path, ["--json", "validate", "--explain-severity", "--rule", "heading-missing"])
+    assert "GLOSSARY" in {row["kind"] for row in report["rules"]}
+
+
+@pytest.mark.parametrize("flag", ["--kind", "--rule"])
+def test_e2e_kind_and_rule_are_refused_without_explain_severity(tmp_path, flag):
+    """They narrow an explanation; they have never filtered what is validated."""
+    _write_project(tmp_path, kind_constraints=_both_kinds())
+    with pytest.raises(SystemExit) as excinfo:
+        _run(tmp_path, ["--json", "validate", "--skip-code", flag, "PRD"])
+    assert excinfo.value.code == 2
+
+
+def test_e2e_an_empty_registry_still_reports_a_project_lowering(tmp_path):
+    """A lowering is a property of the configuration, not of what was found."""
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"heading-missing": "off"}},
+    )
+    artifacts = tmp_path / "adapter" / "config" / "artifacts.toml"
+    artifacts.write_text(
+        toml_utils.dumps({
+            "version": "1.0", "project_root": "..",
+            "kits": {"test": {"format": "CFS", "path": "kits/test"}},
+            "systems": [{"name": "Test", "slug": "test", "kit": "test", "artifacts": []}],
+        }),
+        encoding="utf-8",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    assert exit_code == 0
+    assert report["artifacts_validated"] == 0
+    assert report["severity_overrides"] == [{
+        "code": "heading-missing", "kind": None, "entry": None,
+        "from": "error", "to": "off", "applied": True, "source": S.SOURCE_PROJECT,
+    }]
+
+
+def test_e2e_a_kit_honours_its_own_severity_when_checking_its_own_examples(tmp_path):
+    """A kit that declares a rule advisory means it for its examples too."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    kit_dir = tmp_path / "kits" / "test"
+    # The example is missing the required section the kit declares advisory.
+    example = kit_dir / "artifacts" / "PRD" / "examples"
+    example.mkdir(parents=True, exist_ok=True)
+    (example / "example.md").write_text("# PRD\n", encoding="utf-8")
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "validation": {"severity": {"heading-missing": "warning"}},
+    }
+    (kit_dir / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    assert report["warning_count"] >= 1
+
+
+def test_e2e_validate_surfaces_a_kit_warning_from_the_passing_gate(tmp_path):
+    """A gate that lets the run proceed still has something to report."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severty": {"toc-missing": "off"}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    _, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    assert "constraints-unknown-key" in {w["code"] for w in report["warnings"]}
+
+
+def test_e2e_validate_kits_by_path_reports_unknown_keys_too(tmp_path):
+    """Path mode is a separate entry point converging on the same builder."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severty": {"toc-missing": "off"}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "kits/test", "--verbose"])
+    assert exit_code == 0
+    assert report["warning_count"] >= 1
+    codes = {
+        warning.get("code")
+        for result in report.get("self_check_results", [])
+        for warning in (result.get("warnings") or [])
+    }
+    assert "constraints-unknown-key" in codes
+
+
+def test_e2e_validate_toc_fail_on_warnings_marks_the_file_too(tmp_path):
+    """An aggregate FAIL with every file still reading WARN is unreadable."""
+    doc = tmp_path / "doc.md"
+    doc.write_text("# Title\n\n## Alpha\n\n<!-- toc -->\n\n- [Alpha](#alpha)\n\n<!-- /toc -->\n"
+                   + "\n".join(f"line {i}" for i in range(400)) + "\n", encoding="utf-8")
+    passing, before = _run(tmp_path, ["--json", "validate-toc", str(doc)])
+    assert passing == 0
+    assert before["warning_count"] >= 1
+    assert before["status"] == "WARN"
+
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate-toc", str(doc), "--fail-on-warnings"])
+    assert exit_code == 2
+    assert report["status"] == "FAIL"
+    assert report["failed_on"] == "warnings"
+    assert [r["status"] for r in report["results"]] == ["FAIL"]

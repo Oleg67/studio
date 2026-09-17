@@ -228,7 +228,9 @@ fail_on_warnings = false                   # true = warnings alone fail the run 
 
 **What you may change.** You may always *raise* a rule — holding yourself to more than the kit asks needs no permission. You may *lower* any rule the kit has not marked `locked`, and every lowering is listed under `severity_overrides` in the report of every run it affects. A `locked` rule refuses the lowering and says so. No CLI flag lowers anything: `--fail-on-warnings` raises, and relaxation lives in configuration where it is diffed and reviewed.
 
-A severity you misspell fails the run rather than being ignored — an unreadable value would otherwise switch a rule off while the run still reported success. A *key* you misspell under `[validation]` is reported by `cfs validate-kits` as a `constraints-unknown-key` warning, so a kit written for a newer engine still installs on an older one.
+A severity you misspell fails the run rather than being ignored — an unreadable value would otherwise switch a rule off while the run still reported success.
+
+A misspelled **key**, or a rule code this engine does not have, depends on which file it is in. In a **kit's `constraints.toml`** it is a `constraints-unknown-key` warning from `cfs validate-kits`, and the rest of the file still loads, so a kit written for a newer engine still installs on an older one. In your **own `core.toml`** it fails the run: there is no older-engine case to protect, and a typo in your own configuration is better said out loud than carried as a setting you believe is in force.
 
 - 🖥 `cfs validate --explain-severity --kind PRD --rule heading-missing` — the effective severity and which layer set it
 - 🖥 `cfs validate --fail-on-warnings` — make a warning-only run fail

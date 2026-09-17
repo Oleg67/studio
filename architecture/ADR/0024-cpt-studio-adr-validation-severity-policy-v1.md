@@ -183,11 +183,24 @@ Here, an unrecognised value would *disable checking*: a typo in a severity
 would switch a rule off and the run would still report success. That is the
 exact failure this whole model exists to make impossible.
 
-An unrecognised *key* under `[validation]` is different again: it is reported
-by `validate-kits` as a `constraints-unknown-key` warning rather than failing
-the load, so a kit written for a newer engine stays installable on an older
-one. But it is never silent, or the kit author goes on believing a policy is in
-force that the engine has never seen.
+An unrecognised **key** — or a `severity` entry naming a rule code this engine
+does not have — is different again, and the two configuration surfaces are
+deliberately **not** treated alike:
+
+- **In a kit's `constraints.toml`**: reported by `validate-kits` as a
+  `constraints-unknown-key` warning, and the rest of the file still loads. A
+  kit is authored elsewhere and pinned at a version, so it must stay
+  installable on an engine older than the one it was written for. That is the
+  same forward-compatibility bargain the manifest already makes for unknown
+  kit keys.
+- **In the project's own `core.toml`**: a hard error that refuses the run.
+  There is no forward-compatibility case here — the file is authored by the
+  person running the command, against the engine they are running it on — so
+  the failure mode to protect against is not "a newer schema" but "a typo the
+  author believes is in force". Failing loudly is the better service.
+
+Neither is ever silent. The engine's rule-code registry is closed and guarded
+at import, so a misspelled code is knowable at parse time on both surfaces.
 
 ### Where policy is applied
 

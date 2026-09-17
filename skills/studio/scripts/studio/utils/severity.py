@@ -307,7 +307,35 @@ class SeverityTables:
 
     def is_empty(self) -> bool:
         """Return whether this layer configures nothing at all."""
-        return not self.by_code and not self.by_kind
+        return not self.by_code and not self.by_kind and not self.fail_on_warnings
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-entry-key
+#: The two kinds of constraint entry that can declare a severity. They share a
+#: namespace per artifact kind but not a key: a heading whose id is
+#: ``requirement`` and an ID kind named ``requirement`` are different entries,
+#: and merging them would let one silently inherit the other's lock.
+ENTRY_HEADING = "heading"
+ENTRY_IDENTIFIER = "identifier"
+
+#: An entry key: (entry type, normalised entry id).
+EntryKey = Tuple[str, str]
+
+
+def entry_key(entry_type: str, entry_id: object) -> Optional[EntryKey]:
+    """Build the lookup key for one constraint entry, or None if it has no id.
+
+    Ids are case-folded on both sides. Heading ids are already normalised by
+    the constraint loader, but an ID kind is stored as the author typed it in
+    ``[artifacts.PRD.identifiers.FR]`` while every emission site lowercases it
+    before attaching it to a finding — so without folding here, an entry
+    declared in capitals would configure a rule nothing ever matches.
+    """
+    normalized = str(entry_id or "").strip().lower()
+    if not normalized:
+        return None
+    return (entry_type, normalized)
+# @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-entry-key
 
 
 @dataclass(frozen=True)
@@ -362,10 +390,16 @@ class SeverityPolicy:
             or any(self.entries.values())
         )
 
-    def _entry(self, kind: Optional[str], entry_id: Optional[str]) -> EntrySeverity:
-        if not kind or not entry_id:
+    def _entry(self, kind: Optional[str], key: Optional[EntryKey]) -> EntrySeverity:
+        if not kind or not key:
             return EntrySeverity()
-        return self.entries.get(str(kind).strip().upper(), {}).get(str(entry_id), EntrySeverity())
+        return self.entries.get(str(kind).strip().upper(), {}).get(key, EntrySeverity())
+
+    def entry_keys_for(self, kind: Optional[str]) -> List[EntryKey]:
+        """List the entries that declare anything for ``kind``, in a stable order."""
+        if not kind:
+            return []
+        return sorted(self.entries.get(str(kind).strip().upper(), {}))
 
     def _kit_side(
         self,
@@ -403,10 +437,10 @@ class SeverityPolicy:
         self,
         code: Optional[str],
         kind: Optional[str] = None,
-        entry_id: Optional[str] = None,
+        key: Optional[EntryKey] = None,
     ) -> SeverityDecision:
         """Return the effective severity for one rule and the layer that set it."""
-        entry = self._entry(kind, entry_id)
+        entry = self._entry(kind, key)
         kit_value, kit_source = self._kit_side(code, kind, entry)
         project_value, project_source = self._project_side(code, kind)
         if project_value is None or project_value == kit_value:
@@ -441,15 +475,51 @@ def declared_overrides(policy: SeverityPolicy) -> List[Dict[str, object]]:
     be silent about exactly the setting that silenced everything else.
     """
     rows: List[Dict[str, object]] = []
+    seen: Set[Tuple[object, ...]] = set()
     for kind, code in _configured_project_pairs(policy):
-        decision = policy.resolve(code, kind)
-        if decision.lowered_from is None:
-            continue
-        rows.append(override_row(code, kind, None, decision))
+        # Unscoped first, then once per entry of that kind. An entry that
+        # declares a stricter severity than its kind's table is lowered by a
+        # project setting that leaves the kind-level value untouched, so
+        # resolving only without an entry would report no lowering at all
+        # while the entry's own rules were quietly relaxed.
+        for key in [None] + _override_entry_keys(policy, kind):
+            decision = policy.resolve(code, kind, key)
+            if decision.lowered_from is None and decision.refused_from is None:
+                continue
+            identity = (kind, code, key)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(override_row(code, kind, key, decision))
     # Sorted by what a reader scans for, not by dict order: goldens hide an
     # ordering bug behind whatever insertion order the config happened to have.
-    rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"])))
-    return rows
+    rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"]), str(row["entry"] or "")))
+    return _collapse_redundant_entry_rows(rows)
+
+
+def _override_entry_keys(policy: SeverityPolicy, kind: Optional[str]) -> List[Optional[EntryKey]]:
+    """Entries a setting for ``kind`` could reach — all kinds when unscoped."""
+    if kind:
+        return list(policy.entry_keys_for(kind))
+    return [key for entry_kind in sorted(policy.entries) for key in policy.entry_keys_for(entry_kind)]
+
+
+def _collapse_redundant_entry_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Drop entry rows that say exactly what their unscoped row already said.
+
+    An entry that merely inherits the kind-level value produces an identical
+    lowering; listing it again turns one decision into as many lines as the
+    kit happens to have entries, which buries the entries that differ.
+    """
+    unscoped = {
+        (row["kind"], row["code"]): (row["from"], row["to"], row["applied"])
+        for row in rows if row["entry"] is None
+    }
+    return [
+        row for row in rows
+        if row["entry"] is None
+        or unscoped.get((row["kind"], row["code"])) != (row["from"], row["to"], row["applied"])
+    ]
 
 
 def _configured_project_pairs(policy: SeverityPolicy) -> List[Tuple[Optional[str], str]]:
@@ -462,14 +532,14 @@ def _configured_project_pairs(policy: SeverityPolicy) -> List[Tuple[Optional[str
 def override_row(
     code: Optional[str],
     kind: Optional[str],
-    entry_id: Optional[str],
+    key: Optional[EntryKey],
     decision: SeverityDecision,
 ) -> Dict[str, object]:
     """Render one lowering or refusal for the report and for ``--explain-severity``."""
     return {
         "code": code,
         "kind": kind,
-        "entry": entry_id,
+        "entry": f"{key[0]}:{key[1]}" if key else None,
         "from": decision.lowered_from or decision.severity,
         "to": decision.refused_from or decision.severity,
         "applied": decision.refused_from is None,
@@ -493,12 +563,17 @@ class PolicyOutcome:
     refusals: List[Dict[str, object]] = field(default_factory=list)
 
 
-def _finding_entry_id(finding: Dict[str, object]) -> Optional[str]:
-    """Return the constraint entry a finding belongs to, if it names one."""
-    for key in ("heading_id", "id_kind"):
-        value = finding.get(key)
+def _finding_entry_key(finding: Dict[str, object]) -> Optional[EntryKey]:
+    """Return the constraint entry a finding belongs to, if it names one.
+
+    The two fields are checked separately rather than as one namespace: a
+    heading whose id is ``requirement`` and an ID kind named ``requirement``
+    are different entries, and one must not inherit the other's severity.
+    """
+    for field_name, entry_type in (("heading_id", ENTRY_HEADING), ("id_kind", ENTRY_IDENTIFIER)):
+        value = finding.get(field_name)
         if isinstance(value, str) and value.strip():
-            return value.strip()
+            return entry_key(entry_type, value)
     return None
 
 
@@ -526,17 +601,17 @@ def apply_policy(
             severity = str(finding.get("severity") or default_severity(
                 code if isinstance(code, str) else None))
         else:
-            entry_id = _finding_entry_id(finding)
+            key = _finding_entry_key(finding)
             normalized_code = code if isinstance(code, str) else None
             normalized_kind = str(finding_kind) if finding_kind else None
-            decision = policy.resolve(normalized_code, normalized_kind, entry_id)
+            decision = policy.resolve(normalized_code, normalized_kind, key)
             severity = decision.severity
             if decision.refused_from is not None:
-                key = (normalized_code, normalized_kind, entry_id)
-                if key not in seen_refusals:
-                    seen_refusals.add(key)
+                identity = (normalized_code, normalized_kind, key)
+                if identity not in seen_refusals:
+                    seen_refusals.add(identity)
                     outcome.refusals.append(
-                        override_row(normalized_code, normalized_kind, entry_id, decision))
+                        override_row(normalized_code, normalized_kind, key, decision))
         if severity == OFF:
             outcome.suppressed += 1
             continue
@@ -592,14 +667,33 @@ _KIT_VALIDATION_KEYS = frozenset({"severity"})
 _PROJECT_VALIDATION_KEYS = frozenset({"severity", "fail_on_warnings"})
 
 
+def is_known_rule_code(code: str) -> bool:
+    """Return whether ``code`` is a rule this engine actually has.
+
+    ``DEFAULT_SEVERITY`` is exhaustive over the registry by construction and
+    guarded at import, so it doubles as the list of every code that exists.
+    """
+    return code in DEFAULT_SEVERITY
+
+
 def _parse_severity_table(
     raw: object,
     where: str,
     errors: List[str],
+    unknown: List[str],
+    *,
+    allow_kinds: bool = True,
 ) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
     """Split one ``[...severity]`` table into per-code and per-kind entries.
 
     A string value names a rule code; a table value names an artifact kind.
+
+    A key naming no rule this engine has is collected into ``unknown`` rather
+    than accepted in silence. The registry is closed and guarded at import, so
+    a misspelled code is knowable here — and a misspelling accepted quietly is
+    a policy its author believes is in force and the engine has never seen,
+    which is the same failure the unknown-key check above exists to prevent,
+    one level down.
     """
     by_code: Dict[str, str] = {}
     by_kind: Dict[str, Dict[str, str]] = {}
@@ -611,19 +705,46 @@ def _parse_severity_table(
     for key, value in raw.items():
         name = str(key).strip()
         if not name:
+            # Fail closed, like an unreadable value: a blank key configures
+            # nothing and cannot be reported back to its author by name.
+            errors.append(f"{where} has a blank key; a rule code or artifact kind is required")
             continue
         if isinstance(value, dict):
-            nested_code, nested_kind = _parse_severity_table(value, f"{where}.{name}", errors)
-            if nested_kind:
-                errors.append(f"{where}.{name} may not nest another artifact kind")
-                continue
-            if nested_code:
-                by_kind.setdefault(name.upper(), {}).update(nested_code)
+            _parse_nested_kind_table(
+                name, value, where, errors, unknown, by_kind, allow_kinds=allow_kinds)
             continue
         parsed = parse_severity_value(value, f"{where}.{name}", errors)
-        if parsed is not None:
-            by_code[name] = parsed
+        if parsed is None:
+            continue
+        if not is_known_rule_code(name):
+            unknown.append(f"{where}.{name}")
+            continue
+        by_code[name] = parsed
     return by_code, by_kind
+
+
+def _parse_nested_kind_table(
+    name: str,
+    value: Dict[str, object],
+    where: str,
+    errors: List[str],
+    unknown: List[str],
+    by_kind: Dict[str, Dict[str, str]],
+    *,
+    allow_kinds: bool,
+) -> None:
+    if not allow_kinds:
+        # This table is already scoped to one kind; a kind inside it would be
+        # two answers to the same question with no rule for which one wins.
+        errors.append(f"{where}.{name} takes rule codes, not artifact kinds")
+        return
+    nested_code, nested_kind = _parse_severity_table(
+        value, f"{where}.{name}", errors, unknown, allow_kinds=False)
+    if nested_kind:
+        errors.append(f"{where}.{name} may not nest another artifact kind")
+        return
+    if nested_code:
+        by_kind.setdefault(name.upper(), {}).update(nested_code)
 
 
 def _parse_validation_table(
@@ -631,14 +752,17 @@ def _parse_validation_table(
     where: str,
     known_keys: Set[str],
     errors: List[str],
+    *,
+    allow_kinds: bool = True,
 ) -> SeverityTables:
     if raw is None:
         return SeverityTables()
     if not isinstance(raw, dict):
         errors.append(f"{where} must be a table")
         return SeverityTables()
-    unknown = tuple(sorted(str(key) for key in raw if str(key) not in known_keys))
-    by_code, by_kind = _parse_severity_table(raw.get("severity"), f"{where}.severity", errors)
+    unknown = [f"{where}.{key}" for key in sorted(raw) if str(key) not in known_keys]
+    by_code, by_kind = _parse_severity_table(
+        raw.get("severity"), f"{where}.severity", errors, unknown, allow_kinds=allow_kinds)
     fail_on_warnings = False
     if "fail_on_warnings" in known_keys and "fail_on_warnings" in raw:
         value = raw.get("fail_on_warnings")
@@ -650,13 +774,23 @@ def _parse_validation_table(
         by_code=by_code,
         by_kind=by_kind,
         fail_on_warnings=fail_on_warnings,
-        unknown_keys=unknown,
+        unknown_keys=tuple(sorted(unknown)),
     )
 
 
-def parse_kit_validation(raw: object, errors: List[str]) -> SeverityTables:
-    """Parse a kit's top-level ``[validation]`` table from ``constraints.toml``."""
-    return _parse_validation_table(raw, "[validation]", set(_KIT_VALIDATION_KEYS), errors)
+def parse_kit_validation(
+    raw: object,
+    errors: List[str],
+    *,
+    where: str = "[validation]",
+    allow_kinds: bool = True,
+) -> SeverityTables:
+    """Parse a kit's ``[validation]`` table from ``constraints.toml``.
+
+    ``allow_kinds`` is false for a table already scoped to one artifact kind.
+    """
+    return _parse_validation_table(
+        raw, where, set(_KIT_VALIDATION_KEYS), errors, allow_kinds=allow_kinds)
 
 
 def parse_project_validation(raw: object, errors: List[str]) -> SeverityTables:
@@ -676,19 +810,31 @@ def merge_severity_tables(layers: Sequence[SeverityTables]) -> SeverityTables:
     unknown: List[str] = []
     for layer in layers:
         for code, severity in layer.by_code.items():
-            existing = by_code.get(code)
-            if existing is None or is_stricter(severity, existing):
-                by_code[code] = severity
+            _keep_stricter(by_code, code, severity)
         for kind, table in layer.by_kind.items():
             target = by_kind.setdefault(kind, {})
             for code, severity in table.items():
-                existing = target.get(code)
-                if existing is None or is_stricter(severity, existing):
-                    target[code] = severity
+                _keep_stricter(target, code, severity)
         unknown.extend(layer.unknown_keys)
+    # One kit's whole-kit rule and another's kind-scoped rule are two opinions
+    # about the same code in the same place, and merging the two dicts
+    # independently never compares them: kit A saying `error` everywhere would
+    # lose to kit B saying `off` for PRD purely because they landed in
+    # different tables. Fold the stricter of the pair into the narrower one,
+    # which is the table that will actually be consulted for that kind.
+    for kind_table in by_kind.values():
+        for code, severity in by_code.items():
+            if code in kind_table:
+                _keep_stricter(kind_table, code, severity)
     return SeverityTables(
         by_code=by_code,
         by_kind=by_kind,
         unknown_keys=tuple(sorted(set(unknown))),
     )
+
+
+def _keep_stricter(table: Dict[str, str], code: str, severity: str) -> None:
+    existing = table.get(code)
+    if existing is None or is_stricter(severity, existing):
+        table[code] = severity
 # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-parse-tables

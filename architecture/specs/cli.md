@@ -270,17 +270,25 @@ cfs update [--project-root P] [--dry-run] [--no-interactive] [-y/--yes]
 Validate artifacts.
 
 ```
-cfs validate [--artifact PATH] [--system SYSTEM] [--kind KIND] [--strict]
+cfs validate [--artifact PATH] [--skip-code] [--verbose] [--output FILE]
+             [--local-only] [--source SOURCE] [--fail-on-warnings]
+             [--explain-severity [--kind KIND] [--rule RULE]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--artifact PATH` | Validate a single artifact file |
-| `--system SYSTEM` | Validate all artifacts for a system |
-| `--kind KIND` | Filter by artifact kind (PRD, DESIGN, etc.) |
-| `--strict` | Enable strict validation (all checklist items) |
+| `--skip-code` | Skip code traceability validation |
+| `--verbose` | Print the full validation report |
+| `--output FILE` | Write the report to a file instead of stdout |
 | `--local-only` | Skip cross-repo workspace validation (validate local repo only) |
 | `--source SOURCE` | Target a specific workspace source for validation (uses that source's adapter context). Returns error when used outside workspace mode. |
+| `--fail-on-warnings` | Fail the run when there are warnings but no errors (exit 2). Raises only; no flag lowers a rule. |
+| `--explain-severity` | Report each rule's effective severity and the layer that set it, then exit without validating |
+| `--kind KIND` | With `--explain-severity`: restrict the explanation to one artifact kind. Refused on a normal run. |
+| `--rule RULE` | With `--explain-severity`: restrict the explanation to one rule code. Refused on a normal run. |
+
+> Earlier revisions of this table listed `--system`, `--kind` and `--strict` as artifact filters. None were ever implemented. `--kind` now exists with a different, narrower meaning, documented above; `--system` and `--strict` are removed here rather than left describing a surface that does not exist.
 
 **Workspace flag interaction**: `--local-only` and `--source` are independent and can be combined. `--source` narrows **which** artifacts are validated (a single source's artifacts using its own adapter context). `--local-only` controls **whether cross-repo IDs** from other workspace sources are included as reference context. Examples: `cfs validate --source backend` validates the backend source with cross-repo references; `cfs validate --source backend --local-only` validates the backend source without cross-repo references; `cfs validate --local-only` validates the primary repo only without cross-repo references.
 
@@ -307,19 +315,37 @@ cfs validate [--artifact PATH] [--system SYSTEM] [--kind KIND] [--strict]
   "status": "PASS",
   "artifacts_validated": 3,
   "error_count": 0,
-  "warning_count": 2,
-  "issues": [
+  "warning_count": 1,
+  "suppressed_count": 2,
+  "errors": [],
+  "warnings": [
     {
-      "file": "architecture/PRD.md",
+      "type": "constraints",
+      "path": "architecture/PRD.md",
       "line": 42,
+      "location": "architecture/PRD.md:42",
+      "code": "toc-missing",
       "severity": "warning",
-      "rule": "PLACEHOLDER",
-      "message": "TODO marker detected"
+      "artifact_kind": "PRD",
+      "message": "Document has no table of contents"
+    }
+  ],
+  "severity_overrides": [
+    {
+      "code": "heading-number-not-consecutive",
+      "kind": "PRD",
+      "entry": null,
+      "from": "error",
+      "to": "off",
+      "applied": true,
+      "source": "project-kind"
     }
   ],
   "next_step": "Deterministic validation passed. Now perform semantic validation."
 }
 ```
+
+A warning-only failure adds `"failed_on": "warnings"` alongside `"status": "FAIL"`. `severity_overrides` and `suppressed_count` appear only when non-empty. An override that a `locked` entry refused carries `"applied": false` and names the entry as `"<type>:<id>"`, for example `"heading:prd-metrics"`.
 
 Both `errors` and `warnings` are emitted on every run, passing or failing. When a rule is set to `off`, the findings it removed are counted under `suppressed_count`; when a project lowers a rule, or a `locked` entry refuses a lowering, each is listed under `severity_overrides`. `--fail-on-warnings` (or `fail_on_warnings = true` in `core.toml`) turns a warning-only run into `status: FAIL`, exit 2, with `failed_on: "warnings"`.
 

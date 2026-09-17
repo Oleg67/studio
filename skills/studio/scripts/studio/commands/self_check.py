@@ -725,6 +725,21 @@ def _append_constraints_load_failure(
 
 
 # @cpt-begin:cpt-studio-algo-developer-experience-self-check:p1:inst-validate-example
+def _kit_only_policy(kit_constraints: object) -> Optional[object]:
+    """Build the severity policy from the kit alone, with no project layer.
+
+    A project may relax rules for its own documents; it has no say over
+    whether a kit's shipped examples satisfy the kit. Admitting the project
+    layer here would let a project's `core.toml` hide a broken example in
+    someone else's kit.
+    """
+    if kit_constraints is None:
+        return None
+    from ..utils.constraints import build_severity_policy
+
+    return build_severity_policy([kit_constraints])
+
+
 def _validate_example_paths(
     *,
     example_paths: List[Path],
@@ -732,8 +747,15 @@ def _validate_example_paths(
     kit_id: str,
     constraints_for_kind: object,
     constraints_path: Optional[Path],
+    policy: Optional[object] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
-    """Validate example artifacts for one kind."""
+    """Validate example artifacts for one kind.
+
+    The kit's own severity policy applies here. A kit that declares a rule
+    advisory means it for its own examples too, and without this its examples
+    would be judged at the built-in default while every user artifact honoured
+    the declaration — the kit failing its own published policy.
+    """
     issues: Dict[str, List[Dict[str, object]]] = {"errors": [], "warnings": []}
     for example_path in example_paths:
         report = validate_artifact_file(
@@ -745,6 +767,7 @@ def _validate_example_paths(
             registered_systems=None,
             constraints_path=constraints_path,
             kit_id=str(kit_id),
+            policy=policy,
         )
         issues["errors"].extend(list(report.get("errors", []) or []))
         issues["warnings"].extend(list(report.get("warnings", []) or []))
@@ -796,6 +819,7 @@ def _build_kind_result(
             kit_id=kit_ctx.kit_id,
             constraints_for_kind=_get_constraints_for_kind(kit_ctx.constraints, kind_u),
             constraints_path=kit_ctx.constraints_path,
+            policy=_kit_only_policy(kit_ctx.constraints),
         )
         issues["errors"].extend(issues_for_examples["errors"])
         issues["warnings"].extend(issues_for_examples["warnings"])

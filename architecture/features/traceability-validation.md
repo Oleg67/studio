@@ -307,6 +307,7 @@ site.
 **Supporting**:
 - [x] - `p1` - Imports and module setup for the severity policy - `inst-severity-imports`
 - [x] - `p1` - Data model for the policy layers, a resolved decision, and the outcome of applying one - `inst-severity-policy-model`
+- [x] - `p1` - Build a constraint entry's lookup key from its type and its case-folded id, so a heading and an ID kind sharing a name stay separate entries - `inst-severity-entry-key`
 
 ### Validate Artifact Structure
 
