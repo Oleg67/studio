@@ -213,6 +213,16 @@ deliberately **not** treated alike:
 Neither is ever silent. The engine's rule-code registry is closed and guarded
 at import, so a misspelled code is knowable at parse time on both surfaces.
 
+A misspelled *artifact kind* under `[validation.severity.<KIND>]` is the third
+case, and the one most worth catching: it is not a rule code, so it resolves
+to nothing and appears in no override report, and the common direction is a
+**raise** — leaving the author believing a rule now blocks when it does not.
+A kit's own file warns, as above; `core.toml` refuses the run. The known-kind
+set is the union of every loaded kit's declared kinds and every kind the
+artifact registry registers, because either source alone would raise false
+alarms: a kit may constrain a kind no system registers, and a system may
+register a kind constrained by a kit that is not loaded.
+
 ### Where policy is applied
 
 Policy is applied to a file's findings at the end of `validate_artifact_file`,

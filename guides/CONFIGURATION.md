@@ -230,7 +230,9 @@ fail_on_warnings = false                   # true = warnings alone fail the run 
 
 A severity you misspell fails the run rather than being ignored — an unreadable value would otherwise switch a rule off while the run still reported success.
 
-A misspelled **key**, or a rule code this engine does not have, depends on which file it is in. In a **kit's `constraints.toml`** it is a `constraints-unknown-key` warning from `cfs validate-kits`, and the rest of the file still loads, so a kit written for a newer engine still installs on an older one. In your **own `core.toml`** it fails the run: there is no older-engine case to protect, and a typo in your own configuration is better said out loud than carried as a setting you believe is in force.
+A misspelled **key**, a rule code this engine does not have, or an artifact kind your project does not have, depends on which file it is in. In a **kit's `constraints.toml`** it is a `constraints-unknown-key` warning from `cfs validate-kits`, and the rest of the file still loads, so a kit written for a newer engine still installs on an older one. In your **own `core.toml`** it fails the run: there is no older-engine case to protect, and a typo in your own configuration is better said out loud than carried as a setting you believe is in force.
+
+That last case is the easiest to miss, because the usual reason to scope a rule to one kind is to *raise* it — so a typo leaves you believing a rule now blocks when it never runs at all.
 
 - 🖥 `cfs validate --explain-severity --kind PRD --rule heading-missing` — the effective severity and which layer set it
 - 🖥 `cfs validate --fail-on-warnings` — make a warning-only run fail

@@ -957,13 +957,42 @@ def test_e2e_explain_severity_reports_entry_level_overrides(tmp_path):
     }]
 
 
-def test_e2e_explain_severity_includes_a_kind_only_the_project_names(tmp_path):
+def test_e2e_a_project_severity_for_an_unknown_kind_is_refused(tmp_path):
+    """A misspelled kind is inert, and the usual direction is a raise.
+
+    It is not a rule code, so it resolves to nothing and appears in no
+    override report — leaving the author believing a rule now blocks when it
+    does not. Refused rather than merely surfaced, matching the rule for
+    everything else in `core.toml`.
+    """
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"PRDD": {"heading-missing": "error"}}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    assert exit_code == 1
+    assert report["status"] == "ERROR"
+    assert any("PRDD" in message for message in report["errors"])
+
+
+def test_e2e_explain_severity_includes_a_registered_kind_no_kit_constrains(tmp_path):
+    """Registered but unconstrained is legitimate, and must not be refused."""
     _write_project(
         tmp_path,
         kind_constraints=_both_kinds(),
         core_validation={"severity": {"GLOSSARY": {"heading-missing": "warning"}}},
     )
-    _, report = _run(tmp_path, ["--json", "validate", "--explain-severity", "--rule", "heading-missing"])
+    config = tmp_path / "adapter" / "config"
+    registry = toml_utils.load(config / "artifacts.toml")
+    registry["systems"][0]["artifacts"].append(
+        {"path": "architecture/GLOSSARY.md", "kind": "GLOSSARY"})
+    toml_utils.dump(registry, config / "artifacts.toml")
+    (tmp_path / "architecture" / "GLOSSARY.md").write_text("# GLOSSARY\n", encoding="utf-8")
+
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate", "--explain-severity", "--rule", "heading-missing"])
+    assert exit_code == 0
     assert "GLOSSARY" in {row["kind"] for row in report["rules"]}
 
 
@@ -1464,3 +1493,66 @@ def test_e2e_explain_severity_shows_both_kits_contributions(tmp_path):
         ("FEATURE", "warning", S.SOURCE_KIT),
         ("PRD", "error", S.SOURCE_KIT_KIND),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+def test_a_kit_severity_for_an_unknown_kind_is_reported_not_dropped(tmp_path):
+    """Warned rather than fatal in a kit, on the usual forward-compat terms."""
+    kit, errors = _load(tmp_path, {
+        "validation": {"severity": {"PRDD": {"heading-missing": "error"}}},
+        "artifacts": {"PRD": _MINIMAL_KIND},
+    })
+    assert errors == []
+    assert kit.validation.by_kind == {}
+    assert kit.validation.unknown_keys == ("[validation.severity].PRDD",)
+
+
+def test_a_kit_severity_for_a_declared_kind_survives(tmp_path):
+    kit, errors = _load(tmp_path, {
+        "validation": {"severity": {"PRD": {"heading-missing": "warning"}}},
+        "artifacts": {"PRD": _MINIMAL_KIND},
+    })
+    assert errors == []
+    assert kit.validation.by_kind == {"PRD": {"heading-missing": "warning"}}
+    assert kit.validation.unknown_keys == ()
+
+
+def test_e2e_a_kit_naming_an_unknown_kind_warns_through_validate_kits(tmp_path):
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severity": {"PRDD": {"heading-missing": "error"}}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    codes = {
+        warning.get("code")
+        for result in report["self_check_results"]
+        for warning in (result.get("warnings") or [])
+    }
+    assert "constraints-unknown-key" in codes
+
+
+def test_e2e_explain_severity_human_table_is_capped(tmp_path):
+    """Every other listing this command prints truncates; so does this one."""
+    _write_project(tmp_path, kind_constraints=_both_kinds())
+    exit_code, out = _run_human(tmp_path, ["validate", "--explain-severity"])
+    assert exit_code == 0
+    # Two kinds over 85 rule codes is far past the cap.
+    assert "more rule(s)" in out
+    assert "--kind/--rule" in out
+
+
+def test_e2e_explain_severity_human_table_is_not_capped_when_it_fits(tmp_path):
+    _write_project(tmp_path, kind_constraints=_both_kinds())
+    exit_code, out = _run_human(
+        tmp_path, ["validate", "--explain-severity", "--rule", "heading-missing"])
+    assert exit_code == 0
+    assert "more rule(s)" not in out

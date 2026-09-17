@@ -3530,8 +3530,44 @@ def parse_kit_constraints(
 
     if errors:
         return None, errors
-    return KitConstraints(by_kind=out, validation=validation or SeverityTables()), []
+    return KitConstraints(
+        by_kind=out,
+        validation=_flag_unknown_severity_kinds(validation or SeverityTables(), set(out)),
+    ), []
     # @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-parse-kit
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-unknown-severity-kinds
+def _flag_unknown_severity_kinds(
+    validation: SeverityTables,
+    known_kinds: Set[str],
+) -> SeverityTables:
+    """Record ``[validation.severity.<KIND>]`` names this kit never declares.
+
+    A misspelled kind configures nothing and, unlike a misspelled rule code or
+    a misspelled key, left no trace anywhere — it is not a rule so it cannot be
+    resolved, and it produces no override row because nothing ever matches it.
+    The common direction is a *raise*, which makes the silence worse: the
+    author believes a rule is now blocking and it is not.
+
+    Reported rather than fatal, on the same forward-compatibility terms as the
+    other unknown keys in a kit's own file.
+    """
+    unknown = [
+        f"[validation.severity].{kind}"
+        for kind in sorted(validation.by_kind)
+        if kind not in known_kinds
+    ]
+    if not unknown:
+        return validation
+    return replace(
+        validation,
+        by_kind={
+            kind: table for kind, table in validation.by_kind.items() if kind in known_kinds
+        },
+        unknown_keys=tuple(sorted(set(validation.unknown_keys) | set(unknown))),
+    )
+# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-unknown-severity-kinds
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-constraints-normalize
 def _merge_reference_rule(base: ReferenceRule, incoming: ReferenceRule) -> ReferenceRule:

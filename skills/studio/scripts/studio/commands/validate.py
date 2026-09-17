@@ -22,6 +22,7 @@ from ..utils.document import scan_cdsl_instructions, scan_cpt_ids
 from ..utils.fixing import enrich_issues
 from ..utils.severity import (
     SeverityPolicy,
+    SeverityTables,
     apply_policy,
     declared_overrides,
     override_row,
@@ -445,6 +446,54 @@ def _emit_policy_config_error(errors: List[str]) -> int:
     return 1
 
 
+def _known_artifact_kinds(ctx: object) -> Set[str]:
+    """Every artifact kind this project could validate.
+
+    Both sources, because either alone would produce false alarms: a kit can
+    declare constraints for a kind no system registers, and a system can
+    register a kind whose constraints live in a kit that is not loaded here.
+    """
+    kinds: Set[str] = set()
+    for kit in (getattr(ctx, "kits", None) or {}).values():
+        constraints = getattr(kit, "constraints", None)
+        for kind in (getattr(constraints, "by_kind", None) or {}):
+            kinds.add(str(kind).strip().upper())
+    meta = getattr(ctx, "meta", None)
+    iter_artifacts = getattr(meta, "iter_all_artifacts", None)
+    if callable(iter_artifacts):
+        for artifact_meta, _system_node in iter_artifacts():
+            kinds.add(str(getattr(artifact_meta, "kind", "") or "").strip().upper())
+    return {kind for kind in kinds if kind}
+
+
+def _unknown_project_severity_kinds(ctx: object, project: SeverityTables) -> List[str]:
+    """Refuse a `[validation.severity.<KIND>]` naming a kind that does not exist.
+
+    A misspelled kind is inert: it is not a rule code, so it resolves to
+    nothing and shows up in no override report. The usual direction is a
+    *raise*, so the author is left believing a rule now blocks when it does
+    not — the failure this whole model exists to prevent, wearing a typo.
+
+    A hard error rather than a warning, matching the rule for everything else
+    in `core.toml`: the file is authored by whoever is running the command, on
+    the engine they are running it on, so there is no older-engine case to
+    protect and a typo is better said out loud.
+    """
+    known = _known_artifact_kinds(ctx)
+    if not known:
+        # Nothing registered and no kit loaded: every name would look wrong,
+        # and refusing the run over that would be an alarm about our own
+        # ignorance rather than about the project's configuration.
+        return []
+    unknown = sorted(kind for kind in project.by_kind if kind not in known)
+    if not unknown:
+        return []
+    return [
+        "[validation.severity] in core.toml names artifact kind(s) this project does not have: "
+        f"{', '.join(unknown)} (known: {', '.join(sorted(known))})"
+    ]
+
+
 def _build_severity_policy(
     ctx: object,
     project_root: Path,
@@ -471,6 +520,7 @@ def _build_severity_policy(
             "[validation] in core.toml has unrecognised keys: "
             f"{', '.join(project.unknown_keys)}"
         )
+    errors.extend(_unknown_project_severity_kinds(ctx, project))
     if errors:
         return SeverityPolicy(), errors
     if getattr(args, "fail_on_warnings", False):
@@ -1430,6 +1480,11 @@ def _emit_severity_explanation(session: _ValidateSession) -> int:
     return 0
 
 
+#: Rows the severity explanation prints before truncating, matching the
+#: 30-row cap `_human_validate` uses for errors.
+_EXPLAIN_ROW_CAP = 30
+
+
 def _human_explain_severity(data: dict) -> None:
     """Render the severity explanation for a terminal.
 
@@ -1442,21 +1497,32 @@ def _human_explain_severity(data: dict) -> None:
     ui.detail("Fail on warnings", "yes" if data.get("fail_on_warnings") else "no")
 
     rules = data.get("rules") or []
-    if rules:
-        ui.blank()
-        ui.table(
-            ["Rule", "Kind", "Entry", "Severity", "Set by"],
-            [[
-                str(row.get("code") or ""),
-                str(row.get("kind") or "(any)"),
-                str(row.get("entry") or ""),
-                str(row.get("severity") or ""),
-                str(row.get("source") or ""),
-            ] for row in rules],
-        )
-    else:
-        ui.blank()
+    ui.blank()
+    if not rules:
         ui.info("No rules matched.")
+        _show_severity_overrides(data.get("severity_overrides") or [])
+        ui.blank()
+        return
+    # Capped like every other listing this command prints. 85 rule codes times
+    # the kinds times their entries is an unreadable dump, and the reader who
+    # wants all of it wants `--json` — while the reader who wants one rule has
+    # `--rule`, which the remainder line points at.
+    shown = rules[:_EXPLAIN_ROW_CAP]
+    ui.table(
+        ["Rule", "Kind", "Entry", "Severity", "Set by"],
+        [[
+            str(row.get("code") or ""),
+            str(row.get("kind") or "(any)"),
+            str(row.get("entry") or ""),
+            str(row.get("severity") or ""),
+            str(row.get("source") or ""),
+        ] for row in shown],
+    )
+    if len(rules) > len(shown):
+        ui.substep(
+            f"  ... and {len(rules) - len(shown)} more rule(s) "
+            "— narrow with --kind/--rule, or use --json for all of them"
+        )
 
     _show_severity_overrides(data.get("severity_overrides") or [])
     ui.blank()
@@ -1703,9 +1769,14 @@ def _enrich_target_artifact_paths(
     meta: object,
     project_root: Path,
 ) -> None:
-    """Add ``target_artifact_path`` to 'ID not referenced from required artifact kind' errors.
+    """Add ``target_artifact_path`` to 'ID not referenced from required artifact kind' findings.
 
-    Three outcomes per error:
+    Called for both settled buckets. The rule defaults to ``error``, but a
+    project may lower it to ``warning`` as a migration step, and the hint is
+    what makes that step actionable — so enrichment follows the finding rather
+    than the severity it happens to have ended up with.
+
+    Three outcomes per finding:
     - ``target_artifact_path`` set  → artifact exists, prompt says "in `path`"
     - ``target_artifact_suggested_path`` set → artifact missing, autodetect knows where → "create `path`"
     - neither set → no autodetect rule → prompt asks LLM to request path from user
