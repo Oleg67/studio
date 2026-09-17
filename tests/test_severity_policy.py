@@ -1255,3 +1255,122 @@ def test_specificity_decides_within_a_kit_and_strictness_between_kits(label, kit
     wins even across the whole-kit/per-kind boundary.
     """
     assert C.build_severity_policy(kits).resolve("toc-missing", "PRD").severity == expected
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: what a terminal reader actually sees
+# ---------------------------------------------------------------------------
+
+def _run_human(root: Path, argv: list[str]) -> tuple[int, str]:
+    """Drive the CLI in human mode and capture what a terminal would show."""
+    from studio.cli import main
+    from studio.utils.ui import is_json_mode, set_json_mode
+
+    old_cwd = Path.cwd()
+    saved = is_json_mode()
+    stdout = io.StringIO()
+    try:
+        os.chdir(root)
+        set_json_mode(False)
+        with redirect_stdout(stdout):
+            exit_code = main(argv)
+        return exit_code, stdout.getvalue()
+    finally:
+        set_json_mode(saved)
+        os.chdir(old_cwd)
+
+
+def test_e2e_explain_severity_renders_its_table_in_human_mode(tmp_path):
+    """Without a human formatter the whole answer collapses to `Done (PASS)`."""
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"PRD": {"heading-missing": "warning"}}},
+    )
+    exit_code, out = _run_human(
+        tmp_path,
+        ["validate", "--explain-severity", "--kind", "PRD", "--rule", "heading-missing"],
+    )
+    assert exit_code == 0
+    assert "heading-missing" in out
+    assert "warning" in out
+    assert S.SOURCE_PROJECT_KIND in out
+    assert out.strip() != "✓ Done (PASS)"
+
+
+def test_e2e_explain_severity_human_mode_names_a_lowering(tmp_path):
+    _write_project(
+        tmp_path,
+        kind_constraints=_both_kinds(),
+        core_validation={"severity": {"heading-missing": "off"}},
+    )
+    _, out = _run_human(tmp_path, ["validate", "--explain-severity", "--rule", "heading-missing"])
+    assert "error -> off" in out
+    assert "lowered" in out
+
+
+def test_e2e_validate_kits_human_mode_names_a_suppression(tmp_path):
+    """A kit that switched a rule off must not read like a clean one."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    kit_dir = tmp_path / "kits" / "test"
+    examples = kit_dir / "artifacts" / "PRD" / "examples"
+    examples.mkdir(parents=True, exist_ok=True)
+    (examples / "example.md").write_text("# PRD\n", encoding="utf-8")
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "validation": {"severity": {"heading-missing": "off"}},
+    }
+    (kit_dir / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+    exit_code, out = _run_human(tmp_path, ["validate-kits", "--verbose"])
+    assert exit_code == 0
+    assert "suppressed" in out
+
+
+def test_e2e_a_lowered_reference_rule_keeps_its_target_path(tmp_path):
+    """The migration path has to stay actionable, not just non-blocking."""
+    constraints = {
+        "PRD": {
+            "identifiers": {"fr": {
+                "required": True,
+                "template": "cpt-{system}-fr-{slug}",
+                "to_code": False,
+                "references": {"FEATURE": {"coverage": True}},
+            }},
+        },
+        "FEATURE": {"identifiers": {}},
+    }
+    # The definition is checked, or the coverage rule skips it. FEATURE carries
+    # an unrelated reference so its kind counts as present in scope — without
+    # one the rule reports `ref-target-not-in-scope` instead.
+    prd = ("# PRD\n\n<!-- toc -->\n\n- [Metrics](#metrics)\n\n<!-- /toc -->\n\n"
+           "## Metrics\n\n- [x] `p1` - **ID**: `cpt-test-fr-alpha`\n")
+    feature = ("# FEATURE\n\n<!-- toc -->\n\n- [Metrics](#metrics)\n\n<!-- /toc -->\n\n"
+               "## Metrics\n\nrefs `cpt-test-fr-beta`\n")
+    for core_validation, bucket in (
+        (None, "errors"),
+        ({"severity": {"ref-missing-from-kind": "warning"}}, "warnings"),
+    ):
+        _write_project(
+            tmp_path,
+            kind_constraints=constraints,
+            core_validation=core_validation,
+            prd_template="# PRD\n\n## Metrics\n\n**ID**: `cpt-{system}-fr-{slug}`\n",
+            prd_body=prd,
+        )
+        # `coverage = true` means the FEATURE template must give authors a
+        # place to write the reference, or the kit gate fails before validate
+        # ever reaches the policy.
+        (tmp_path / "kits" / "test" / "artifacts" / "FEATURE" / "template.md").write_text(
+            "# FEATURE\n\n## Metrics\n\nrefs `cpt-{system}-fr-{slug}`\n", encoding="utf-8")
+        (tmp_path / "architecture" / "FEATURE.md").write_text(feature, encoding="utf-8")
+        _, report = _run(tmp_path, ["--json", "validate", "--skip-code", "--verbose"])
+        findings = [f for f in report[bucket] if f.get("code") == "ref-missing-from-kind"]
+        assert findings, f"expected a ref-missing-from-kind finding in {bucket}"
+        # Whichever list policy put it in, the remediation hint travels with it.
+        assert all(
+            "target_artifact_path" in f or "target_artifact_suggested_path" in f
+            for f in findings
+        ), f"{bucket} finding lost its target path"

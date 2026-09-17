@@ -1294,15 +1294,25 @@ def _render_self_check_result(result: dict, *, show_verbose: bool) -> None:
     status = result.get("status", "?")
     error_count = result.get("error_count", 0)
     warning_count = result.get("warning_count", 0)
+    # A kit whose own policy switched a rule off would otherwise look exactly
+    # like a kit whose examples are clean — the distinction the JSON keeps and
+    # the terminal dropped, for the reader most likely to be editing the kit.
+    suppressed = result.get("suppressed_count", 0)
+    suppressed_note = f", {suppressed} suppressed" if suppressed else ""
     if status == "PASS":
         suffix = ""
         if warning_count:
-            suffix = f" ({warning_count} warning(s))"
+            suffix = f" ({warning_count} warning(s){suppressed_note})"
             if not show_verbose:
                 suffix += " - use --verbose for details"
+        elif suppressed:
+            suffix = f" ({suppressed} suppressed by the kit's own severity policy)"
         ui.step(f"{kit_id}/{kind}: PASS{suffix}")
     else:
-        ui.warn(f"{kit_id}/{kind}: {status} - {error_count} error(s), {warning_count} warning(s)")
+        ui.warn(
+            f"{kit_id}/{kind}: {status} - {error_count} error(s), "
+            f"{warning_count} warning(s){suppressed_note}"
+        )
     for error in result.get("errors", [])[:10]:
         _show_error(error)
     for warning in result.get("warnings", [])[:10]:

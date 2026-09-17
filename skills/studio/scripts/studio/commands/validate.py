@@ -1426,8 +1426,40 @@ def _emit_severity_explanation(session: _ValidateSession) -> int:
         "fail_on_warnings": session.policy.fail_on_warnings,
         "rules": rows,
         "severity_overrides": declared_overrides(session.policy),
-    })
+    }, human_fn=_human_explain_severity)
     return 0
+
+
+def _human_explain_severity(data: dict) -> None:
+    """Render the severity explanation for a terminal.
+
+    Without this the command falls to the generic result renderer, which reads
+    only `status` and prints `Done (PASS)` — the whole answer discarded for
+    every caller who did not think to add `--json`, which is most of them.
+    """
+    ui.header("Effective severity")
+    ui.detail("Configured", "yes" if data.get("configured") else "no (built-in defaults only)")
+    ui.detail("Fail on warnings", "yes" if data.get("fail_on_warnings") else "no")
+
+    rules = data.get("rules") or []
+    if rules:
+        ui.blank()
+        ui.table(
+            ["Rule", "Kind", "Entry", "Severity", "Set by"],
+            [[
+                str(row.get("code") or ""),
+                str(row.get("kind") or "(any)"),
+                str(row.get("entry") or ""),
+                str(row.get("severity") or ""),
+                str(row.get("source") or ""),
+            ] for row in rules],
+        )
+    else:
+        ui.blank()
+        ui.info("No rules matched.")
+
+    _show_severity_overrides(data.get("severity_overrides") or [])
+    ui.blank()
 # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-explain-severity
 
 
@@ -1540,7 +1572,12 @@ def _emit_final_validate_report(session: _ValidateSession, results: _ValidateRes
     # that carry their own `artifact_kind` resolve against it; the rest resolve
     # unscoped. Re-running this over the already-settled ones changes nothing.
     _apply_run_policy(session, results)
-    _enrich_target_artifact_paths(results.all_errors, meta=session.meta, project_root=session.project_root)
+    # Both lists. Policy has just repartitioned them, so a reference rule a
+    # project lowered to `warning` now sits in `all_warnings` — and enriching
+    # only the errors would strip the target path from exactly the findings a
+    # team is migrating gradually, which is when they most need the hint.
+    for settled in (results.all_errors, results.all_warnings):
+        _enrich_target_artifact_paths(settled, meta=session.meta, project_root=session.project_root)
     enrich_issues(results.all_errors, project_root=session.project_root)
     enrich_issues(results.all_warnings, project_root=session.project_root)
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-enrich-errors
