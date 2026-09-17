@@ -882,7 +882,12 @@ def cmd_validate_kits(argv: List[str]) -> int:
     # @cpt-begin:cpt-studio-flow-kit-validate-cli:p1:inst-parse-args
     p = argparse.ArgumentParser(
         prog="validate-kits",
-        description="Validate kit structure, templates, and examples",
+        description=(
+            "Validate kit structure, templates, and examples. "
+            "Narrowing to one kit (by path or --kit) skips the check for a severity "
+            "scoped to an unknown artifact kind: one kit may legitimately scope to a "
+            "kind a companion kit declares, and a narrowed run cannot see the companion."
+        ),
     )
     p.add_argument(
         "path",
@@ -890,7 +895,8 @@ def cmd_validate_kits(argv: List[str]) -> int:
         default=None,
         help=(
             "Path to a kit directory to validate (e.g. kits/sdlc). "
-            "If omitted, validates registered kits."
+            "If omitted, validates registered kits. "
+            "Narrowing skips the unknown-artifact-kind check — see the description."
         ),
     )
     p.add_argument(
@@ -898,7 +904,10 @@ def cmd_validate_kits(argv: List[str]) -> int:
         "--rule",
         dest="kit",
         default=None,
-        help="Kit ID to validate (if omitted, validates all kits)",
+        help=(
+            "Kit ID to validate (if omitted, validates all kits). "
+            "Narrowing skips the unknown-artifact-kind check — see the description."
+        ),
     )
     p.add_argument("--verbose", action="store_true", help="Print full validation report")
     args = p.parse_args(argv)

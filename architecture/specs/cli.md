@@ -719,6 +719,8 @@ cfs validate-kits [path] [--kit KIT] [--verbose]
 | `--kit KIT` | Validate only a specific kit (e.g., `studio-sdlc`) |
 | `--verbose` | Include full per-template error/warning lists |
 
+> Narrowing to one kit — by `path` or `--kit` — skips the check for a severity scoped to an unknown artifact kind. One kit may legitimately scope to a kind a companion kit declares, and a narrowed run cannot see the companion, so it reports nothing rather than calling a working setting a typo. Unknown keys and unknown rule codes are still reported in every mode.
+
 **Behavior**:
 1. Load installed kits from artifacts registry.
 2. For each kit, load `constraints.toml` and locate template/example files.

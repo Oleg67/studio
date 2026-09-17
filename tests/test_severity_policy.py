@@ -1650,3 +1650,52 @@ def test_human_explain_severity_prints_overrides_with_no_matching_rules(capsys):
     assert "No rules matched." in out
     assert "heading-missing" in out
     assert "error -> off" in out
+
+
+# ---------------------------------------------------------------------------
+# Review round 7
+# ---------------------------------------------------------------------------
+
+def _scope_alpha_to_a_companion_kind(root: Path) -> None:
+    """Make kit `alpha` scope a severity to FEATURE, which only `beta` declares."""
+    alpha = root / "kits" / "alpha" / "constraints.toml"
+    data = toml_utils.load(alpha)
+    data["artifacts"].pop("FEATURE")
+    data["validation"] = {"severity": {"FEATURE": {"heading-missing": "warning"}}}
+    alpha.write_text(toml_utils.dumps(data), encoding="utf-8")
+
+
+def _unknown_key_codes(report: dict) -> set:
+    return {
+        warning.get("code")
+        for result in report.get("self_check_results", [])
+        for warning in (result.get("warnings") or [])
+    }
+
+
+def test_e2e_a_kit_filtered_run_does_not_judge_artifact_kinds(tmp_path):
+    """`--kit` hides the sibling a kind comes from, so it must not guess.
+
+    A third path through the check, distinct from both the unfiltered run and
+    path mode: registered mode with the kit list narrowed. Narrowing makes the
+    companion invisible, and judging on a partial view would report a working
+    cross-kit scope as a typo.
+    """
+    _write_two_kit_project(tmp_path)
+    _scope_alpha_to_a_companion_kind(tmp_path)
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--kit", "alpha", "--verbose"])
+    assert exit_code == 0
+    assert "constraints-unknown-key" not in _unknown_key_codes(report)
+
+
+def test_e2e_an_unfiltered_run_still_reports_a_kind_no_kit_declares(tmp_path):
+    """The other side of the same condition, so neither can drift alone."""
+    _write_two_kit_project(tmp_path)
+    alpha = tmp_path / "kits" / "alpha" / "constraints.toml"
+    data = toml_utils.load(alpha)
+    data["validation"] = {"severity": {"GLOSSARY": {"heading-missing": "warning"}}}
+    alpha.write_text(toml_utils.dumps(data), encoding="utf-8")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    assert "constraints-unknown-key" in _unknown_key_codes(report)
