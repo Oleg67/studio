@@ -1193,3 +1193,65 @@ def test_e2e_the_kit_gate_runs_after_the_artifact_resolves_its_context(tmp_path)
         tmp_path, ["--json", "validate", "--skip-code", "--artifact", "architecture/PRD.md"])
     assert exit_code == 2
     assert "validate-kits failed" in str(report.get("message", ""))
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: specificity within a kit, strictness between kits
+# ---------------------------------------------------------------------------
+
+def _severity_kit(whole: dict | None = None, per_kind: dict | None = None) -> C.KitConstraints:
+    by_kind = {
+        kind: C.ArtifactKindConstraints(
+            name=None, description=None, defined_id=[],
+            validation=S.SeverityTables(by_code=table))
+        for kind, table in (per_kind or {}).items()
+    }
+    return C.KitConstraints(
+        by_kind=by_kind, validation=S.SeverityTables(by_code=whole or {}))
+
+
+@pytest.mark.parametrize(
+    ("label", "kits", "expected"),
+    [
+        (
+            "one kit: its own per-kind table overrides its own whole-kit table",
+            [_severity_kit(whole={"toc-missing": "warning"},
+                           per_kind={"PRD": {"toc-missing": "off"}})],
+            "off",
+        ),
+        (
+            "two kits: a whole-kit error is not relaxed by another kit's PRD off",
+            [_severity_kit(whole={"toc-missing": "error"}),
+             _severity_kit(per_kind={"PRD": {"toc-missing": "off"}})],
+            "error",
+        ),
+        (
+            "and the answer does not depend on which kit loaded first",
+            [_severity_kit(per_kind={"PRD": {"toc-missing": "off"}}),
+             _severity_kit(whole={"toc-missing": "error"})],
+            "error",
+        ),
+        (
+            "two kits, both kind-scoped: the stricter wins",
+            [_severity_kit(per_kind={"PRD": {"toc-missing": "off"}}),
+             _severity_kit(per_kind={"PRD": {"toc-missing": "warning"}})],
+            "warning",
+        ),
+        (
+            "a kind-scoped rule with no rival applies as written",
+            [_severity_kit(per_kind={"PRD": {"toc-missing": "warning"}})],
+            "warning",
+        ),
+    ],
+)
+def test_specificity_decides_within_a_kit_and_strictness_between_kits(label, kits, expected):
+    """Two different questions that a single strictest-wins merge conflates.
+
+    Within one kit, a per-kind table is the author's more specific instruction
+    and must win — otherwise declaring `warning` generally and `off` for PRD
+    silently yields `warning` for PRD, and per-kind tables are pointless.
+
+    Between kits, nobody has agreed to be overruled, so the stricter opinion
+    wins even across the whole-kit/per-kind boundary.
+    """
+    assert C.build_severity_policy(kits).resolve("toc-missing", "PRD").severity == expected

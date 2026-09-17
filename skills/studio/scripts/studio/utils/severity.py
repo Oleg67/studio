@@ -635,32 +635,52 @@ def apply_policy(
     outcome = PolicyOutcome()
     seen_refusals: Set[Tuple[object, ...]] = set()
     for finding in findings:
-        code = finding.get("code")
-        finding_kind = finding.get("artifact_kind") or kind
-        if policy is None:
-            severity = str(finding.get("severity") or default_severity(
-                code if isinstance(code, str) else None))
-        else:
-            key = _finding_entry_key(finding)
-            normalized_code = code if isinstance(code, str) else None
-            normalized_kind = str(finding_kind) if finding_kind else None
-            decision = policy.resolve(normalized_code, normalized_kind, key)
-            severity = decision.severity
-            if decision.refused_from is not None:
-                identity = (normalized_code, normalized_kind, key)
-                if identity not in seen_refusals:
-                    seen_refusals.add(identity)
-                    outcome.refusals.append(
-                        override_row(normalized_code, normalized_kind, key, decision))
+        severity = _settle_finding(policy, finding, kind, outcome, seen_refusals)
         if severity == OFF:
             outcome.suppressed += 1
             continue
         finding["severity"] = severity
-        if severity == WARNING:
-            outcome.warnings.append(finding)
-        else:
-            outcome.errors.append(finding)
+        bucket = outcome.warnings if severity == WARNING else outcome.errors
+        bucket.append(finding)
     return outcome
+
+
+def _settle_finding(
+    policy: Optional[SeverityPolicy],
+    finding: Dict[str, object],
+    kind: Optional[str],
+    outcome: PolicyOutcome,
+    seen_refusals: Set[Tuple[object, ...]],
+) -> str:
+    """Return one finding's effective severity, recording any refusal it met."""
+    code = finding.get("code")
+    normalized_code = code if isinstance(code, str) else None
+    if policy is None:
+        return str(finding.get("severity") or default_severity(normalized_code))
+    finding_kind = finding.get("artifact_kind") or kind
+    normalized_kind = str(finding_kind) if finding_kind else None
+    key = _finding_entry_key(finding)
+    decision = policy.resolve(normalized_code, normalized_kind, key)
+    _record_refusal(outcome, seen_refusals, normalized_code, normalized_kind, key, decision)
+    return decision.severity
+
+
+def _record_refusal(
+    outcome: PolicyOutcome,
+    seen_refusals: Set[Tuple[object, ...]],
+    code: Optional[str],
+    kind: Optional[str],
+    key: Optional[EntryKey],
+    decision: SeverityDecision,
+) -> None:
+    """Record a refused lowering once per rule, however many findings met it."""
+    if decision.refused_from is None:
+        return
+    identity = (code, kind, key)
+    if identity in seen_refusals:
+        return
+    seen_refusals.add(identity)
+    outcome.refusals.append(override_row(code, kind, key, decision))
 # @cpt-end:cpt-studio-algo-traceability-validation-severity-policy:p1:inst-severity-apply
 
 
@@ -839,38 +859,49 @@ def parse_project_validation(raw: object, errors: List[str]) -> SeverityTables:
 
 
 def merge_severity_tables(layers: Sequence[SeverityTables]) -> SeverityTables:
-    """Merge kit layers strictest-wins, matching how ``required`` already merges.
+    """Merge one layer per kit, strictest-wins, matching how ``required`` merges.
 
-    Two kits bound into one project are both authorities; taking the stricter
-    of their opinions is the only merge that cannot quietly relax a rule one of
-    them meant to enforce.
+    Each layer is one kit's complete opinion — its whole-kit table and its
+    kind-scoped tables together. Two kits bound into one project are both
+    authorities, and taking the stricter of their opinions is the only merge
+    that cannot quietly relax a rule one of them meant to enforce.
+
+    Within a layer, specificity decides and strictness does not: a kit that
+    says ``warning`` generally and ``off`` for PRD means ``off`` for PRD. That
+    is the whole point of a per-kind table, and it is what the resolver's own
+    precedence does. Strictness only arbitrates *between* kits, where nobody
+    has agreed to be overruled.
     """
     by_code: Dict[str, str] = {}
-    by_kind: Dict[str, Dict[str, str]] = {}
-    unknown: List[str] = []
     for layer in layers:
         for code, severity in layer.by_code.items():
             _keep_stricter(by_code, code, severity)
-        for kind, table in layer.by_kind.items():
-            target = by_kind.setdefault(kind, {})
-            for code, severity in table.items():
-                _keep_stricter(target, code, severity)
-        unknown.extend(layer.unknown_keys)
-    # One kit's whole-kit rule and another's kind-scoped rule are two opinions
-    # about the same code in the same place, and merging the two dicts
-    # independently never compares them: kit A saying `error` everywhere would
-    # lose to kit B saying `off` for PRD purely because they landed in
-    # different tables. Fold the stricter of the pair into the narrower one,
-    # which is the table that will actually be consulted for that kind.
-    for kind_table in by_kind.values():
-        for code, severity in by_code.items():
-            if code in kind_table:
-                _keep_stricter(kind_table, code, severity)
+    by_kind: Dict[str, Dict[str, str]] = {}
+    for kind in {kind for layer in layers for kind in layer.by_kind}:
+        by_kind[kind] = _merge_kind_across_layers(layers, kind)
     return SeverityTables(
         by_code=by_code,
         by_kind=by_kind,
-        unknown_keys=tuple(sorted(set(unknown))),
+        unknown_keys=tuple(sorted({key for layer in layers for key in layer.unknown_keys})),
     )
+
+
+def _merge_kind_across_layers(layers: Sequence[SeverityTables], kind: str) -> Dict[str, str]:
+    """Strictest of each layer's *effective* value for one artifact kind.
+
+    A layer's effective value is its kind-scoped entry if it has one, else its
+    whole-kit entry, else no opinion at all. Comparing effective values is what
+    stops kit A's whole-kit ``error`` losing to kit B's PRD-scoped ``off``
+    purely because the two landed in different tables — while still letting a
+    single kit's own per-kind entry override its own whole-kit one.
+    """
+    merged: Dict[str, str] = {}
+    for code in {code for layer in layers for code in layer.by_kind.get(kind, {})}:
+        for layer in layers:
+            effective = layer.by_kind.get(kind, {}).get(code) or layer.by_code.get(code)
+            if effective:
+                _keep_stricter(merged, code, effective)
+    return merged
 
 
 def _keep_stricter(table: Dict[str, str], code: str, severity: str) -> None:

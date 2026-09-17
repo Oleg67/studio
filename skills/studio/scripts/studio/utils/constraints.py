@@ -3712,22 +3712,30 @@ def _record_entry(
     )
 
 
-def _fold_kind_scoped_tables(kit: object, by_kind: Dict[str, Dict[str, str]]) -> None:
-    """Merge one kit's ``[artifacts.<KIND>.validation]`` tables into the kit layer.
+def _kit_severity_layer(kit: object) -> SeverityTables:
+    """One kit's complete severity opinion: whole-kit table plus kind-scoped ones.
 
-    Strictest-wins, like every other severity merge: two kits that both scope a
-    rule to the same kind are both authorities over it, and the merge that
-    cannot quietly relax what one of them meant to enforce is the strict one.
+    Assembled as a single layer so the merge can compare each kit's *effective*
+    value for a kind against every other kit's. Contributing the two tables as
+    separate layers, or folding the kind-scoped ones in afterwards, both lose
+    the distinction between "this kit's own per-kind override" — which wins by
+    specificity — and "another kit's opinion", which wins by strictness.
     """
+    whole_kit = _kit_validation_tables(kit)
+    by_kind: Dict[str, Dict[str, str]] = {
+        kind: dict(table) for kind, table in whole_kit.by_kind.items()
+    }
+    unknown = list(whole_kit.unknown_keys)
     for kind, kind_constraints in (getattr(kit, "by_kind", None) or {}).items():
-        per_kind = _kit_validation_tables(kind_constraints).by_code
-        if not per_kind:
-            continue
-        target = by_kind.setdefault(str(kind).strip().upper(), {})
-        for code, severity in per_kind.items():
-            existing = target.get(code)
-            if existing is None or is_stricter(severity, existing):
-                target[code] = severity
+        scoped = _kit_validation_tables(kind_constraints)
+        unknown.extend(scoped.unknown_keys)
+        if scoped.by_code:
+            by_kind.setdefault(str(kind).strip().upper(), {}).update(scoped.by_code)
+    return SeverityTables(
+        by_code=dict(whole_kit.by_code),
+        by_kind=by_kind,
+        unknown_keys=tuple(sorted(set(unknown))),
+    )
 
 
 def build_severity_policy(
@@ -3736,18 +3744,8 @@ def build_severity_policy(
 ) -> SeverityPolicy:
     """Assemble the policy from every loaded kit plus the project's own table."""
     loaded = list(kit_constraints)
-    kit_tables = merge_severity_tables([_kit_validation_tables(kit) for kit in loaded])
-    by_kind: Dict[str, Dict[str, str]] = {
-        kind: dict(table) for kind, table in kit_tables.by_kind.items()
-    }
-    for kit in loaded:
-        _fold_kind_scoped_tables(kit, by_kind)
     return SeverityPolicy(
-        kit=SeverityTables(
-            by_code=kit_tables.by_code,
-            by_kind=by_kind,
-            unknown_keys=kit_tables.unknown_keys,
-        ),
+        kit=merge_severity_tables([_kit_severity_layer(kit) for kit in loaded]),
         project=project or SeverityTables(),
         entries=collect_entry_severities(loaded),
     )

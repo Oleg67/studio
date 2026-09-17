@@ -191,7 +191,11 @@ Reading it as six layers of plain specificity cannot be right: the constraint en
 
 **Unknown values and unknown keys differ.** A `severity` value outside the vocabulary fails the load — it would otherwise disable a check while the run still reported success. An unknown *key* under a `[validation]` table is reported by `validate-kits` as a `constraints-unknown-key` warning and the rest of the file loads, so a kit written for a newer engine remains installable on an older one.
 
-**Merging.** When several kits are bound into one project, severities merge strictest-wins, as `required` already does, and `locked` merges as a plain OR. Both kits are authorities over an entry they both declare, so the merge that cannot quietly relax what one of them meant to enforce is the strict one.
+**Merging** answers two different questions, and they do not have the same answer.
+
+*Within one kit*, specificity decides: a kit that declares `"toc-missing" = "warning"` under `[validation.severity]` and `"toc-missing" = "off"` under `[artifacts.PRD.validation.severity]` means `off` for PRD. That is what a per-kind table is for, and it matches the resolution order above.
+
+*Between kits* bound into one project, strictness decides — including across the whole-kit/per-kind boundary. One kit's whole-kit `error` is not relaxed by another kit's PRD-scoped `off`, because neither kit has agreed to be overruled by the other. Each kit contributes its own effective value for the kind (its kind-scoped entry if it has one, else its whole-kit entry), and the strictest of those wins. `locked` merges as a plain OR, for the same reason.
 
 See `cpt-studio-adr-validation-severity-policy` for the decision record.
 

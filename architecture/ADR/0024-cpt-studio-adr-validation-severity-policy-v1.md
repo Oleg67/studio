@@ -150,6 +150,17 @@ So there are two layers:
 Every resolved severity carries the layer that decided it, and that layer name
 is reported by `--explain-severity`.
 
+When several kits are bound into one project, merging their tables asks a
+different question from resolution, and it is worth separating the two.
+*Within* one kit, specificity decides: its own per-kind table overrides its own
+whole-kit table, exactly as the resolution order above says. *Between* kits,
+strictness decides, including across the whole-kit/per-kind boundary — one
+kit's whole-kit `error` is not relaxed by another kit's PRD-scoped `off`,
+because neither has agreed to be overruled by the other. Each kit contributes
+its effective value for a kind, and the strictest of those wins. Applying
+strictest-wins uniformly would defeat a kit's own per-kind override, which is
+the one thing a per-kind table exists to do.
+
 ### The raise/lower rule, and what it does to No-Weakening
 
 - A project may **raise** any rule, always. Holding yourself to more than the
