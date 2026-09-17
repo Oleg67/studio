@@ -1374,3 +1374,93 @@ def test_e2e_a_lowered_reference_rule_keeps_its_target_path(tmp_path):
             "target_artifact_path" in f or "target_artifact_suggested_path" in f
             for f in findings
         ), f"{bucket} finding lost its target path"
+
+
+def _write_two_kit_project(root: Path) -> None:
+    """A project with two registered kits holding conflicting severity opinions.
+
+    Kit `alpha` says `heading-missing` is a warning everywhere. Kit `beta`
+    says it is an error for PRD. Both are registered, so both contribute to one
+    merged policy regardless of which kit a system names.
+    """
+    (root / ".git").mkdir(parents=True, exist_ok=True)
+    (root / "AGENTS.md").write_text(
+        '<!-- @cf:root-agents -->\n```toml\ncf-studio-path = "adapter"\n```\n'
+        "<!-- /@cf:root-agents -->\n",
+        encoding="utf-8",
+    )
+    config = root / "adapter" / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "AGENTS.md").write_text("# Test adapter\n", encoding="utf-8")
+
+    for slug, extra in (("alpha", "whole-kit"), ("beta", "per-kind")):
+        kit = root / "kits" / slug
+        for kind in ("PRD", "FEATURE"):
+            template = kit / "artifacts" / kind
+            template.mkdir(parents=True, exist_ok=True)
+            (template / "template.md").write_text(f"# {kind}\n\n## Metrics\n", encoding="utf-8")
+        kinds: dict = {
+            kind: {"identifiers": {}, "headings": list(_REQUIRED_HEADINGS)}
+            for kind in ("PRD", "FEATURE")
+        }
+        data: dict = {"artifacts": kinds}
+        if extra == "whole-kit":
+            data["validation"] = {"severity": {"heading-missing": "warning"}}
+        else:
+            kinds["PRD"]["validation"] = {"severity": {"heading-missing": "error"}}
+        (kit / "constraints.toml").write_text(toml_utils.dumps(data), encoding="utf-8")
+
+    kits = {slug: {"format": "CFS", "path": f"kits/{slug}"} for slug in ("alpha", "beta")}
+    toml_utils.dump(
+        {"version": "1.0", "project_root": "..", "kits": kits}, config / "core.toml")
+    toml_utils.dump({
+        "version": "1.0",
+        "project_root": "..",
+        "kits": kits,
+        "systems": [{
+            "name": "Test", "slug": "test", "kit": "alpha",
+            "artifacts": [
+                {"path": "architecture/PRD.md", "kind": "PRD"},
+                {"path": "architecture/FEATURE.md", "kind": "FEATURE"},
+            ],
+        }],
+    }, config / "artifacts.toml")
+
+    architecture = root / "architecture"
+    architecture.mkdir(parents=True, exist_ok=True)
+    (architecture / "PRD.md").write_text("# PRD\n\ncontent\n", encoding="utf-8")
+    (architecture / "FEATURE.md").write_text("# FEATURE\n\ncontent\n", encoding="utf-8")
+
+
+def test_e2e_two_registered_kits_merge_their_conflicting_severities(tmp_path):
+    """Cross-kit merging through the whole pipeline, not just the merge function.
+
+    The unit matrix proves the rule; this proves `validate` reaches it —
+    registration, constraints loading, policy assembly and the report. Those
+    are the steps a merge-level test cannot see, and they are where this PR
+    has needed the most correction.
+    """
+    _write_two_kit_project(tmp_path)
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code", "--verbose"])
+
+    # PRD: kit beta's per-kind `error` beats kit alpha's whole-kit `warning`,
+    # because between kits the stricter opinion wins.
+    assert [(f["code"], f["artifact_kind"]) for f in report["errors"]] == [
+        ("heading-missing", "PRD")]
+    # FEATURE: only kit alpha has an opinion, so its `warning` applies as written.
+    assert [(f["code"], f["artifact_kind"]) for f in report["warnings"]] == [
+        ("heading-missing", "FEATURE")]
+    assert (report["status"], report["error_count"], report["warning_count"]) == ("FAIL", 1, 1)
+    assert exit_code == 2
+
+
+def test_e2e_explain_severity_shows_both_kits_contributions(tmp_path):
+    """The same merge, read back through the command that reports it."""
+    _write_two_kit_project(tmp_path)
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate", "--explain-severity", "--rule", "heading-missing"])
+    assert exit_code == 0
+    assert [(r["kind"], r["severity"], r["source"]) for r in report["rules"]] == [
+        ("FEATURE", "warning", S.SOURCE_KIT),
+        ("PRD", "error", S.SOURCE_KIT_KIND),
+    ]
