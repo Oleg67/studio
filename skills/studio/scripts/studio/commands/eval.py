@@ -19,7 +19,7 @@ import math
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..utils import eval_harness
 from ..utils.eval_judge import AdvisoryJudge, calibrate, load_gold, reference_stub_judge
@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 _NO_JUDGE_REASON = "no judge_fn"
 #: Cap on regressed scenarios listed in the human summary (the rest are summarised as "+N more").
 _REGRESSION_CAP = 10
+#: Cap on per-scenario rows in the human summary, so a large suite does not bury the capped
+#: regression section below it (the rest are summarised as "+N more — see --json").
+_SCENARIOS_CAP = 20
+
+#: Human-report ordering: a failing scenario outranks an unassessable one, which outranks a pass —
+#: so when the cap trims the list, the rows it keeps are the ones a reader must act on, not merely
+#: the first the suite loaded (scenarios arrive alphabetically, which could otherwise bury a failure).
+_VERDICT_RANK = {"FAIL": 0, "UNKNOWN": 1, "PASS": 2}
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-eval-imports
 
 
@@ -65,7 +73,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check", action="store_true",
         help="Exit 2 when structural compliance is below --min, or when --baseline shows "
-             "a per-scenario regression (gating is off by default).")
+             "a per-scenario regression (gating is off by default). A positive --min also "
+             "exits 2 if nothing was scored — a suite that is empty, or in which every "
+             "scenario was unscoreable, is a failure to assess, not a pass.")
     parser.add_argument(
         "--min", type=_compliance_arg, default=1.0,
         help="Minimum structural compliance for --check (default 1.0).")
@@ -156,12 +166,86 @@ def _human_report(data: Dict[str, object]) -> None:
     compliance = summary.get("structural_compliance")
     ui.info(f"structural compliance: {compliance * 100:.0f}%" if compliance is not None
             else "structural compliance: n/a (nothing scored)")
+    _report_scenarios(data.get("per_scenario"))
     _report_regression(data.get("regression"))
     _report_calibration(data.get("judge_calibration"))
     save_error = data.get("save_error")
     if save_error:
         ui.warn(f"save failed: {save_error}")
 # @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-report
+
+
+# @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-scenarios
+def _scenario_verdict(deterministic: List[Dict[str, object]]) -> str:
+    """FAIL if any deterministic check failed, PASS if at least one ran and none failed, else
+    UNKNOWN — nothing deterministic was assessed, so it is not a pass ("cannot assess is not
+    PASS", the same rule the gate applies)."""
+    verdicts = [r.get("verdict") for r in deterministic]
+    if eval_harness.VERDICT_FAIL in verdicts:
+        return "FAIL"
+    if eval_harness.VERDICT_PASS in verdicts:
+        return "PASS"
+    return "UNKNOWN"
+
+
+def _scenario_findings(deterministic: List[Dict[str, object]]) -> List[str]:
+    """The FAILING checks, each prefixed by its scorer — only a result whose own verdict is FAIL
+    contributes, so a passing/unknown scorer's informational notes never read as failures. A FAIL
+    that carried no finding string still names its scorer, so the check is never anonymous; a
+    non-list ``findings`` is ignored, never iterated, so a malformed payload cannot raise."""
+    out: List[str] = []
+    for r in deterministic:
+        if r.get("verdict") != eval_harness.VERDICT_FAIL:
+            continue
+        raw = r.get("findings")
+        named = [f"{r.get('scorer')}: {finding}"
+                 for finding in (raw if isinstance(raw, list) else [])]
+        out += named or [f"{r.get('scorer')}: (no detail)"]
+    return out
+
+
+def _rendered_scenario_row(row: Dict[str, object]) -> Tuple[str, str]:
+    """``(line, verdict)`` for one scenario — the verdict is returned alongside so the caller can
+    rank by it before applying the cap without re-deriving it. Only deterministic checks are named
+    (an advisory scorer's notes, e.g. an unwired judge, are on their own line); a verdict without
+    its findings is a bare boolean, the most common report defect, so a FAIL always names its check.
+    The compliance percentage is formatted like the aggregate line above it."""
+    results = row.get("results")
+    deterministic = [r for r in (results if isinstance(results, list) else [])
+                     if isinstance(r, dict)
+                     and r.get("kind") == eval_harness.ScorerKind.DETERMINISTIC.value]
+    verdict = _scenario_verdict(deterministic)
+    comp = row.get("compliance")
+    pct = f"{comp * 100:.0f}%" if isinstance(comp, (int, float)) else "n/a"
+    line = f"  {row.get('scenario', '?')}  {verdict}  {pct}"
+    findings = _scenario_findings(deterministic)
+    if findings:
+        line += f"  findings={findings}"
+    return line, verdict
+
+
+def _report_scenarios(per_scenario: object) -> None:
+    """Name each scenario's verdict and the checks it failed on the human console.
+
+    The per-scenario rows are already in the payload; this only renders them, so a reader can
+    act on the result without re-running under the global ``--json`` flag. Every scenario is
+    shown so a passing control is visible too, but the ledger is **capped** so a large suite does
+    not bury the regression section below. Because a cap that trimmed in load order (alphabetical)
+    could hide a failing scenario past the cap, the rows are ordered **FAIL first, then UNKNOWN,
+    then PASS** before trimming — so failures are never the rows dropped — and if failures still
+    overflow the cap their count is named in the overflow line, never silently lost. Tolerates any
+    malformed shape without raising."""
+    candidates = per_scenario if isinstance(per_scenario, list) else []
+    rendered = [_rendered_scenario_row(r) for r in candidates if isinstance(r, dict)]
+    rendered.sort(key=lambda lv: _VERDICT_RANK.get(lv[1], 1))     # stable: FAIL < UNKNOWN < PASS
+    for line, _verdict in rendered[:_SCENARIOS_CAP]:
+        ui.info(line)
+    if len(rendered) > _SCENARIOS_CAP:
+        omitted = rendered[_SCENARIOS_CAP:]
+        omitted_fail = sum(1 for _line, verdict in omitted if verdict == "FAIL")
+        failing = f"; {omitted_fail} failing" if omitted_fail else ""
+        ui.info(f"  (+{len(omitted)} more{failing} — see --json for the full list)")
+# @cpt-end:cpt-studio-flow-eval-harness-run:p1:inst-human-scenarios
 
 
 # @cpt-begin:cpt-studio-flow-eval-harness-run:p1:inst-human-advisory
