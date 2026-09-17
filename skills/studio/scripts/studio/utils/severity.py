@@ -477,43 +477,71 @@ def declared_overrides(policy: SeverityPolicy) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     seen: Set[Tuple[object, ...]] = set()
     for scope_kind, code in _configured_project_pairs(policy):
-        # Unscoped first, then once per entry the setting can reach. An entry
-        # that declares a stricter severity than its kind's table is lowered by
-        # a project setting that leaves the kind-level value untouched, so
-        # resolving only without an entry would report no lowering at all while
-        # the entry's own rules were quietly relaxed.
-        unscoped = policy.resolve(code, scope_kind)
-        baseline: Optional[Tuple[object, object, object]] = None
-        if unscoped.lowered_from is not None or unscoped.refused_from is not None:
-            row = override_row(code, scope_kind, None, unscoped)
-            baseline = (row["from"], row["to"], row["applied"])
-            rows.append(row)
-            seen.add((scope_kind, code, None))
-        for entry_kind, key in _override_entry_keys(policy, scope_kind):
-            # Resolved against the entry's *own* artifact kind. A whole-project
-            # setting has no kind of its own, and passing None here is what made
-            # the entry invisible: `_entry` needs the kind to find it, so every
-            # entry-specific override under an unscoped setting — including a
-            # locked entry's refusal — resolved as though no entry existed.
-            decision = policy.resolve(code, entry_kind, key)
-            if decision.lowered_from is None and decision.refused_from is None:
-                continue
-            identity = (entry_kind, code, key)
-            if identity in seen:
-                continue
-            row = override_row(code, entry_kind, key, decision)
-            if baseline == (row["from"], row["to"], row["applied"]):
-                # Says exactly what the unscoped row already said: an entry
-                # that merely inherits the setting would otherwise turn one
-                # decision into as many lines as the kit has entries, burying
-                # the entries that differ.
-                continue
-            seen.add(identity)
-            rows.append(row)
+        rows.extend(_overrides_for_setting(policy, scope_kind, code, seen))
     # Sorted by what a reader scans for, not by dict order: goldens hide an
     # ordering bug behind whatever insertion order the config happened to have.
     rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"]), str(row["entry"] or "")))
     return rows
+
+
+def _overrides_for_setting(
+    policy: SeverityPolicy,
+    scope_kind: Optional[str],
+    code: str,
+    seen: Set[Tuple[object, ...]],
+) -> List[Dict[str, object]]:
+    """Rows for one configured (kind, code) setting: unscoped, then per entry.
+
+    An entry that declares a stricter severity than its kind's table is lowered
+    by a project setting that leaves the kind-level value untouched, so
+    resolving only without an entry would report no lowering at all while the
+    entry's own rules were quietly relaxed.
+    """
+    rows: List[Dict[str, object]] = []
+    unscoped = policy.resolve(code, scope_kind)
+    baseline: Optional[Tuple[object, object, object]] = None
+    if unscoped.lowered_from is not None or unscoped.refused_from is not None:
+        row = override_row(code, scope_kind, None, unscoped)
+        baseline = (row["from"], row["to"], row["applied"])
+        rows.append(row)
+        seen.add((scope_kind, code, None))
+    for entry_kind, key in _override_entry_keys(policy, scope_kind):
+        row = _entry_override_row(policy, entry_kind, code, key, baseline, seen)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def _entry_override_row(
+    policy: SeverityPolicy,
+    entry_kind: str,
+    code: str,
+    key: EntryKey,
+    baseline: Optional[Tuple[object, object, object]],
+    seen: Set[Tuple[object, ...]],
+) -> Optional[Dict[str, object]]:
+    """One entry's row, or None when it adds nothing the reader needs.
+
+    Resolved against the entry's *own* artifact kind. A whole-project setting
+    has no kind of its own, and passing None here is what made the entry
+    invisible: ``_entry`` needs the kind to find it, so every entry-specific
+    override under an unscoped setting — including a locked entry's refusal —
+    resolved as though no entry existed.
+    """
+    decision = policy.resolve(code, entry_kind, key)
+    if decision.lowered_from is None and decision.refused_from is None:
+        return None
+    identity = (entry_kind, code, key)
+    if identity in seen:
+        return None
+    row = override_row(code, entry_kind, key, decision)
+    if baseline == (row["from"], row["to"], row["applied"]):
+        # Says exactly what the unscoped row already said: an entry that merely
+        # inherits the setting would otherwise turn one decision into as many
+        # lines as the kit has entries, burying the entries that differ.
+        return None
+    seen.add(identity)
+    return row
 
 
 def _override_entry_keys(

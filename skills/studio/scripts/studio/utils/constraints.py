@@ -3712,6 +3712,24 @@ def _record_entry(
     )
 
 
+def _fold_kind_scoped_tables(kit: object, by_kind: Dict[str, Dict[str, str]]) -> None:
+    """Merge one kit's ``[artifacts.<KIND>.validation]`` tables into the kit layer.
+
+    Strictest-wins, like every other severity merge: two kits that both scope a
+    rule to the same kind are both authorities over it, and the merge that
+    cannot quietly relax what one of them meant to enforce is the strict one.
+    """
+    for kind, kind_constraints in (getattr(kit, "by_kind", None) or {}).items():
+        per_kind = _kit_validation_tables(kind_constraints).by_code
+        if not per_kind:
+            continue
+        target = by_kind.setdefault(str(kind).strip().upper(), {})
+        for code, severity in per_kind.items():
+            existing = target.get(code)
+            if existing is None or is_stricter(severity, existing):
+                target[code] = severity
+
+
 def build_severity_policy(
     kit_constraints: Iterable[KitConstraints],
     project: Optional[SeverityTables] = None,
@@ -3723,15 +3741,7 @@ def build_severity_policy(
         kind: dict(table) for kind, table in kit_tables.by_kind.items()
     }
     for kit in loaded:
-        for kind, kind_constraints in (getattr(kit, "by_kind", None) or {}).items():
-            per_kind = _kit_validation_tables(kind_constraints).by_code
-            if not per_kind:
-                continue
-            target = by_kind.setdefault(str(kind).strip().upper(), {})
-            for code, severity in per_kind.items():
-                existing = target.get(code)
-                if existing is None or is_stricter(severity, existing):
-                    target[code] = severity
+        _fold_kind_scoped_tables(kit, by_kind)
     return SeverityPolicy(
         kit=SeverityTables(
             by_code=kit_tables.by_code,
