@@ -1076,3 +1076,120 @@ def test_e2e_validate_toc_fail_on_warnings_marks_the_file_too(tmp_path):
     assert report["status"] == "FAIL"
     assert report["failed_on"] == "warnings"
     assert [r["status"] for r in report["results"]] == ["FAIL"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 2
+# ---------------------------------------------------------------------------
+
+def test_declared_overrides_finds_an_entry_refusal_under_a_whole_project_setting():
+    """The entry's own kind has to travel with its key.
+
+    A whole-project setting has no kind of its own. Resolving its entries
+    without one made every entry-specific override invisible, because the
+    lookup needs the kind to find the entry at all — so a locked entry's
+    refusal went unreported for exactly the settings that reach furthest.
+    """
+    policy = _policy(
+        project=S.SeverityTables(by_code={"heading-missing": "off"}),
+        entries={"PRD": {("heading", "prd-metrics"): S.EntrySeverity("error", locked=True)}},
+    )
+    rows = S.declared_overrides(policy)
+    assert [(r["kind"], r["entry"], r["applied"]) for r in rows] == [
+        (None, None, True),
+        ("PRD", "heading:prd-metrics", False),
+    ]
+
+
+def test_declared_overrides_still_collapses_entries_that_merely_inherit():
+    policy = _policy(
+        project=S.SeverityTables(by_code={"heading-missing": "warning"}),
+        entries={"PRD": {
+            ("heading", "a"): S.EntrySeverity(None, locked=False),
+            ("heading", "b"): S.EntrySeverity(None, locked=False),
+        }},
+    )
+    rows = S.declared_overrides(policy)
+    assert [(r["kind"], r["entry"]) for r in rows] == [(None, None)]
+
+
+def test_e2e_a_suppressed_finding_in_a_kit_example_is_counted_per_kind(tmp_path):
+    """The kit's own policy can switch a rule off; the count must not vanish."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    kit_dir = tmp_path / "kits" / "test"
+    examples = kit_dir / "artifacts" / "PRD" / "examples"
+    examples.mkdir(parents=True, exist_ok=True)
+    (examples / "example.md").write_text("# PRD\n", encoding="utf-8")
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "validation": {"severity": {"heading-missing": "off"}},
+    }
+    (kit_dir / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"]
+    assert [r.get("suppressed_count") for r in prd] == [1]
+    # Deliberately per-kind only: `suppressed_count` at the top level is part
+    # of `validate`'s report contract, not `validate-kits`'.
+    assert "suppressed_count" not in report
+
+
+def test_e2e_an_empty_registry_still_reports_a_kit_warning(tmp_path):
+    """The run where nothing else would mention it."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severty": {"toc-missing": "off"}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    toml_utils.dump({
+        "version": "1.0", "project_root": "..",
+        "kits": {"test": {"format": "CFS", "path": "kits/test"}},
+        "systems": [{"name": "Test", "slug": "test", "kit": "test", "artifacts": []}],
+    }, tmp_path / "adapter" / "config" / "artifacts.toml")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate", "--skip-code"])
+    assert exit_code == 0
+    assert report["artifacts_validated"] == 0
+    assert "constraints-unknown-key" in {w["code"] for w in report["warnings"]}
+
+
+def test_e2e_an_empty_registry_honours_fail_on_warnings(tmp_path):
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severty": {"toc-missing": "off"}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    toml_utils.dump({
+        "version": "1.0", "project_root": "..",
+        "kits": {"test": {"format": "CFS", "path": "kits/test"}},
+        "systems": [{"name": "Test", "slug": "test", "kit": "test", "artifacts": []}],
+    }, tmp_path / "adapter" / "config" / "artifacts.toml")
+
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate", "--skip-code", "--fail-on-warnings"])
+    assert exit_code == 2
+    assert report["failed_on"] == "warnings"
+
+
+def test_e2e_the_kit_gate_runs_after_the_artifact_resolves_its_context(tmp_path):
+    """The gate must judge the kits of the source actually being validated."""
+    _write_project(tmp_path, kind_constraints=_both_kinds())
+    # Break the kit so the gate has something to say, and confirm it still
+    # fires on the resolved context rather than being skipped or run early.
+    (tmp_path / "kits" / "test" / "artifacts" / "PRD" / "template.md").write_text(
+        "# PRD\n", encoding="utf-8")
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate", "--skip-code", "--artifact", "architecture/PRD.md"])
+    assert exit_code == 2
+    assert "validate-kits failed" in str(report.get("message", ""))

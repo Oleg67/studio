@@ -405,16 +405,11 @@ def _build_validate_session(args: argparse.Namespace) -> Tuple[Optional[_Validat
                 ctx_errors.append(constraints_error("workspace", ws_err, path=str(workspace_config.workspace_file)))
 
     project_root = ctx.project_root
-    # `--explain-severity` validates nothing, so it does not run the gate that
-    # guards validation. Reporting which severity applies is exactly what a
-    # reader needs while a kit is broken, and a gate failure there would
-    # answer a question about configuration with a verdict about kits.
-    kit_warnings: List[Dict[str, object]] = []
-    if not args.explain_severity:
-        gate_code = _run_validate_kits_gate(project_root, ctx, bool(args.verbose), kit_warnings)
-        if gate_code is not None:
-            return None, gate_code
-
+    # The validate-kits gate does not run here. `--artifact` can move the
+    # session to a different workspace source, and a gate run now would
+    # validate the kits of the source we are about to leave. It runs from
+    # `_resolve_artifacts_to_validate`, once the context is final — which also
+    # means `--explain-severity`, which returns before that, never triggers it.
     known_kinds = ctx.get_known_id_kinds()
     _extend_known_kinds(ctx, known_kinds)
     policy, policy_errors = _build_severity_policy(ctx, project_root, args)
@@ -434,7 +429,6 @@ def _build_validate_session(args: argparse.Namespace) -> Tuple[Optional[_Validat
         known_kinds=known_kinds,
         ctx_errors=ctx_errors,
         policy=policy,
-        kit_warnings=kit_warnings,
     ), None
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-session
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-load-context
@@ -506,6 +500,10 @@ def _emit_no_artifacts_result(session: _ValidateSession) -> int:
     # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-validate-output
     results = _ValidateResults()
     results.all_errors = list(session.ctx_errors)
+    # Kit warnings belong here too. A project with nothing registered can still
+    # have a kit whose `[validation]` table this engine does not understand,
+    # and that is precisely the run where nothing else would mention it.
+    results.all_warnings = list(session.kit_warnings)
     # Context errors are findings like any other, so the policy settles them
     # here too rather than only on the path that has artifacts to validate.
     _apply_run_policy(session, results)
@@ -655,6 +653,17 @@ def _resolve_artifacts_to_validate(session: _ValidateSession) -> Optional[int]:
         session.policy = policy
     else:
         _collect_all_registered_artifacts(session)
+    # The gate runs here rather than during session build, because the context
+    # it should judge is the one `--artifact` may just have switched to. Run
+    # earlier, it validated the kits of the source being left behind.
+    gate_code = _run_validate_kits_gate(
+        session.project_root,
+        session.ctx,
+        bool(session.args.verbose),
+        session.kit_warnings,
+    )
+    if gate_code is not None:
+        return gate_code
     if session.artifacts_to_validate:
         return None
     return _emit_no_artifacts_result(session)
@@ -1488,15 +1497,35 @@ def _attach_policy_report(
     """
     if results.suppressed_count:
         report["suppressed_count"] = results.suppressed_count
-    overrides = declared_overrides(session.policy) + _sorted_refusals(results.refusals)
+    overrides = _merge_overrides(declared_overrides(session.policy), results.refusals)
     if overrides:
         report["severity_overrides"] = overrides
 
 
-def _sorted_refusals(refusals: List[Dict[str, object]]) -> List[Dict[str, object]]:
+def _merge_overrides(
+    declared: List[Dict[str, object]],
+    refusals: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    """Combine configuration-derived and encountered overrides, each once.
+
+    Both sources are needed and they overlap. The declared list covers rules
+    that never fired — including a lowering to `off`, which by definition emits
+    nothing. The encountered list covers refusals on entries the tables cannot
+    be asked about ahead of time. A refusal that both find is one decision, and
+    belongs in the report once.
+    """
+    merged = list(declared)
+    seen = {(row.get("code"), row.get("kind"), row.get("entry")) for row in merged}
+    for row in refusals:
+        identity = (row.get("code"), row.get("kind"), row.get("entry"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(row)
     return sorted(
-        refusals,
-        key=lambda row: (str(row.get("kind") or ""), str(row.get("code") or ""), str(row.get("entry") or "")),
+        merged,
+        key=lambda row: (
+            str(row.get("kind") or ""), str(row.get("code") or ""), str(row.get("entry") or "")),
     )
 # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-apply-policy
 

@@ -476,49 +476,61 @@ def declared_overrides(policy: SeverityPolicy) -> List[Dict[str, object]]:
     """
     rows: List[Dict[str, object]] = []
     seen: Set[Tuple[object, ...]] = set()
-    for kind, code in _configured_project_pairs(policy):
-        # Unscoped first, then once per entry of that kind. An entry that
-        # declares a stricter severity than its kind's table is lowered by a
-        # project setting that leaves the kind-level value untouched, so
-        # resolving only without an entry would report no lowering at all
-        # while the entry's own rules were quietly relaxed.
-        for key in [None] + _override_entry_keys(policy, kind):
-            decision = policy.resolve(code, kind, key)
+    for scope_kind, code in _configured_project_pairs(policy):
+        # Unscoped first, then once per entry the setting can reach. An entry
+        # that declares a stricter severity than its kind's table is lowered by
+        # a project setting that leaves the kind-level value untouched, so
+        # resolving only without an entry would report no lowering at all while
+        # the entry's own rules were quietly relaxed.
+        unscoped = policy.resolve(code, scope_kind)
+        baseline: Optional[Tuple[object, object, object]] = None
+        if unscoped.lowered_from is not None or unscoped.refused_from is not None:
+            row = override_row(code, scope_kind, None, unscoped)
+            baseline = (row["from"], row["to"], row["applied"])
+            rows.append(row)
+            seen.add((scope_kind, code, None))
+        for entry_kind, key in _override_entry_keys(policy, scope_kind):
+            # Resolved against the entry's *own* artifact kind. A whole-project
+            # setting has no kind of its own, and passing None here is what made
+            # the entry invisible: `_entry` needs the kind to find it, so every
+            # entry-specific override under an unscoped setting — including a
+            # locked entry's refusal — resolved as though no entry existed.
+            decision = policy.resolve(code, entry_kind, key)
             if decision.lowered_from is None and decision.refused_from is None:
                 continue
-            identity = (kind, code, key)
+            identity = (entry_kind, code, key)
             if identity in seen:
                 continue
+            row = override_row(code, entry_kind, key, decision)
+            if baseline == (row["from"], row["to"], row["applied"]):
+                # Says exactly what the unscoped row already said: an entry
+                # that merely inherits the setting would otherwise turn one
+                # decision into as many lines as the kit has entries, burying
+                # the entries that differ.
+                continue
             seen.add(identity)
-            rows.append(override_row(code, kind, key, decision))
+            rows.append(row)
     # Sorted by what a reader scans for, not by dict order: goldens hide an
     # ordering bug behind whatever insertion order the config happened to have.
     rows.sort(key=lambda row: (str(row["kind"] or ""), str(row["code"]), str(row["entry"] or "")))
-    return _collapse_redundant_entry_rows(rows)
+    return rows
 
 
-def _override_entry_keys(policy: SeverityPolicy, kind: Optional[str]) -> List[Optional[EntryKey]]:
-    """Entries a setting for ``kind`` could reach — all kinds when unscoped."""
-    if kind:
-        return list(policy.entry_keys_for(kind))
-    return [key for entry_kind in sorted(policy.entries) for key in policy.entry_keys_for(entry_kind)]
+def _override_entry_keys(
+    policy: SeverityPolicy,
+    kind: Optional[str],
+) -> List[Tuple[str, EntryKey]]:
+    """Entries a setting for ``kind`` could reach, each with its own kind.
 
-
-def _collapse_redundant_entry_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    """Drop entry rows that say exactly what their unscoped row already said.
-
-    An entry that merely inherits the kind-level value produces an identical
-    lowering; listing it again turns one decision into as many lines as the
-    kit happens to have entries, which buries the entries that differ.
+    The artifact kind travels with the key because resolution needs it: an
+    unscoped project setting reaches entries in every kind, and each must be
+    resolved against the kind that owns it rather than against no kind at all.
     """
-    unscoped = {
-        (row["kind"], row["code"]): (row["from"], row["to"], row["applied"])
-        for row in rows if row["entry"] is None
-    }
+    kinds = [str(kind).strip().upper()] if kind else sorted(policy.entries)
     return [
-        row for row in rows
-        if row["entry"] is None
-        or unscoped.get((row["kind"], row["code"])) != (row["from"], row["to"], row["applied"])
+        (entry_kind, key)
+        for entry_kind in kinds
+        for key in policy.entry_keys_for(entry_kind)
     ]
 
 

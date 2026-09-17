@@ -756,7 +756,7 @@ def _validate_example_paths(
     would be judged at the built-in default while every user artifact honoured
     the declaration — the kit failing its own published policy.
     """
-    issues: Dict[str, List[Dict[str, object]]] = {"errors": [], "warnings": []}
+    issues: Dict[str, object] = {"errors": [], "warnings": [], "suppressed": 0}
     for example_path in example_paths:
         report = validate_artifact_file(
             artifact_path=example_path,
@@ -771,6 +771,11 @@ def _validate_example_paths(
         )
         issues["errors"].extend(list(report.get("errors", []) or []))
         issues["warnings"].extend(list(report.get("warnings", []) or []))
+        # Carried, not dropped. Now that the kit's own policy applies here, a
+        # rule the kit set to `off` removes findings from its examples, and a
+        # suppression nobody counts is the silence this whole model exists to
+        # prevent — one level in from where it was fixed for `validate`.
+        issues["suppressed"] += int(report.get("suppressed") or 0)
     return issues
 # @cpt-end:cpt-studio-algo-developer-experience-self-check:p1:inst-validate-example
 
@@ -795,7 +800,7 @@ def _build_kind_result(
         "examples_checked": len(example_paths),
         "status": "PASS",
     }
-    issues: Dict[str, List[Dict[str, object]]] = {"errors": [], "warnings": []}
+    issues: Dict[str, object] = {"errors": [], "warnings": [], "suppressed": 0}
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-template
     if template_path is not None and template_path.is_file():
         report = _check_template_constraints_consistency(
@@ -823,6 +828,7 @@ def _build_kind_result(
         )
         issues["errors"].extend(issues_for_examples["errors"])
         issues["warnings"].extend(issues_for_examples["warnings"])
+        issues["suppressed"] += int(issues_for_examples["suppressed"])
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-example
 
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
@@ -834,6 +840,13 @@ def _build_kind_result(
         item["warning_count"] = len(issues["warnings"])
         if issues["errors"] or bool(verbose):
             item["warnings"] = issues["warnings"]
+    if issues["suppressed"]:
+        # Per kind, beside the counts it belongs with. Deliberately not summed
+        # into a top-level `validate-kits` field: `suppressed_count` is part of
+        # `validate`'s documented report contract, and quietly giving the name
+        # a second meaning on another command is how a contract stops meaning
+        # one thing.
+        item["suppressed_count"] = issues["suppressed"]
     return item
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-return-self-check
 # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-for-each-kind
