@@ -1496,17 +1496,23 @@ def _human_explain_severity(data: dict) -> None:
     ui.detail("Configured", "yes" if data.get("configured") else "no (built-in defaults only)")
     ui.detail("Fail on warnings", "yes" if data.get("fail_on_warnings") else "no")
 
-    rules = data.get("rules") or []
     ui.blank()
+    # One exit, one call to each renderer. An early return for the empty case
+    # would need its own copy of the overrides call, and a copy is a thing a
+    # later edit can drop from one branch while the other keeps passing.
+    _show_explained_rules(data.get("rules") or [])
+    _show_severity_overrides(data.get("severity_overrides") or [])
+    ui.blank()
+
+
+def _show_explained_rules(rules: List[Dict[str, object]]) -> None:
+    """Print the resolved-severity table, capped like every other listing here."""
     if not rules:
         ui.info("No rules matched.")
-        _show_severity_overrides(data.get("severity_overrides") or [])
-        ui.blank()
         return
-    # Capped like every other listing this command prints. 85 rule codes times
-    # the kinds times their entries is an unreadable dump, and the reader who
-    # wants all of it wants `--json` — while the reader who wants one rule has
-    # `--rule`, which the remainder line points at.
+    # 85 rule codes times the kinds times their entries is an unreadable dump,
+    # and the reader who wants all of it wants `--json` — while the reader who
+    # wants one rule has `--rule`, which the remainder line points at.
     shown = rules[:_EXPLAIN_ROW_CAP]
     ui.table(
         ["Rule", "Kind", "Entry", "Severity", "Set by"],
@@ -1523,9 +1529,6 @@ def _human_explain_severity(data: dict) -> None:
             f"  ... and {len(rules) - len(shown)} more rule(s) "
             "— narrow with --kind/--rule, or use --json for all of them"
         )
-
-    _show_severity_overrides(data.get("severity_overrides") or [])
-    ui.blank()
 # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-explain-severity
 
 

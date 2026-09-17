@@ -1499,15 +1499,37 @@ def test_e2e_explain_severity_shows_both_kits_contributions(tmp_path):
 # Review round 5
 # ---------------------------------------------------------------------------
 
-def test_a_kit_severity_for_an_unknown_kind_is_reported_not_dropped(tmp_path):
-    """Warned rather than fatal in a kit, on the usual forward-compat terms."""
+def test_parsing_one_kit_does_not_judge_an_artifact_kind_it_cannot_see(tmp_path):
+    """A kit file is parsed alone, and alone it cannot tell scoping from a typo.
+
+    In a multi-kit project one kit may legitimately scope a severity to a kind
+    a companion kit declares. Judging that here would strip a working setting
+    and call it a mistake, so the check lives where every kit is in view.
+    """
     kit, errors = _load(tmp_path, {
-        "validation": {"severity": {"PRDD": {"heading-missing": "error"}}},
+        "validation": {"severity": {"FEATURE": {"heading-missing": "error"}}},
         "artifacts": {"PRD": _MINIMAL_KIND},
     })
     assert errors == []
-    assert kit.validation.by_kind == {}
-    assert kit.validation.unknown_keys == ("[validation.severity].PRDD",)
+    assert kit.validation.by_kind == {"FEATURE": {"heading-missing": "error"}}
+    assert kit.validation.unknown_keys == ()
+
+
+def test_one_kit_may_scope_a_severity_to_a_kind_another_kit_declares(tmp_path):
+    """The composition resolves it, and nothing reports it as unknown."""
+    alpha = tmp_path / "alpha.toml"
+    beta = tmp_path / "beta.toml"
+    alpha.write_text(toml_utils.dumps({
+        "validation": {"severity": {"FEATURE": {"heading-missing": "warning"}}},
+        "artifacts": {"PRD": _MINIMAL_KIND},
+    }), encoding="utf-8")
+    beta.write_text(toml_utils.dumps({"artifacts": {"FEATURE": _MINIMAL_KIND}}), encoding="utf-8")
+
+    kit_a, errors_a = C.load_constraints_file(alpha)
+    kit_b, errors_b = C.load_constraints_file(beta)
+    assert (errors_a, errors_b) == ([], [])
+    policy = C.build_severity_policy([kit_a, kit_b])
+    assert policy.resolve("heading-missing", "FEATURE").severity == "warning"
 
 
 def test_a_kit_severity_for_a_declared_kind_survives(tmp_path):
@@ -1556,3 +1578,75 @@ def test_e2e_explain_severity_human_table_is_not_capped_when_it_fits(tmp_path):
         tmp_path, ["validate", "--explain-severity", "--rule", "heading-missing"])
     assert exit_code == 0
     assert "more rule(s)" not in out
+
+
+# ---------------------------------------------------------------------------
+# Review round 6
+# ---------------------------------------------------------------------------
+
+def test_e2e_a_cross_kit_severity_scope_is_not_reported_as_unknown(tmp_path):
+    """The case the per-kit check used to strip and misreport as a typo."""
+    _write_two_kit_project(tmp_path)
+    # Kit `alpha` declares PRD and FEATURE itself, so scope to a kind only a
+    # companion could provide by removing it from alpha's own artifacts.
+    alpha = tmp_path / "kits" / "alpha" / "constraints.toml"
+    data = toml_utils.load(alpha)
+    data["artifacts"].pop("FEATURE")
+    data["validation"] = {"severity": {"FEATURE": {"heading-missing": "warning"}}}
+    alpha.write_text(toml_utils.dumps(data), encoding="utf-8")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    codes = {
+        warning.get("code")
+        for result in report["self_check_results"]
+        for warning in (result.get("warnings") or [])
+    }
+    assert "constraints-unknown-key" not in codes
+
+
+def test_e2e_validate_kits_by_path_does_not_judge_artifact_kinds(tmp_path):
+    """Standalone validation cannot see siblings, so it does not guess."""
+    constraints = _both_kinds()
+    _write_project(tmp_path, kind_constraints=constraints)
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({
+            "validation": {"severity": {"GLOSSARY": {"heading-missing": "warning"}}},
+            "artifacts": constraints,
+        }),
+        encoding="utf-8",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "kits/test", "--verbose"])
+    assert exit_code == 0
+    codes = {
+        warning.get("code")
+        for result in report.get("self_check_results", [])
+        for warning in (result.get("warnings") or [])
+    }
+    assert "constraints-unknown-key" not in codes
+
+
+def test_human_explain_severity_prints_overrides_with_no_matching_rules(capsys):
+    """The empty-rules path must still say what the project lowered."""
+    from studio.commands import validate as validate_cmd
+    from studio.utils.ui import is_json_mode, set_json_mode
+
+    saved = is_json_mode()
+    try:
+        set_json_mode(False)
+        validate_cmd._human_explain_severity({
+            "status": "PASS",
+            "configured": True,
+            "fail_on_warnings": False,
+            "rules": [],
+            "severity_overrides": [{
+                "code": "heading-missing", "kind": "PRD", "entry": None,
+                "from": "error", "to": "off", "applied": True, "source": "project-kind",
+            }],
+        })
+    finally:
+        set_json_mode(saved)
+    out = capsys.readouterr().out
+    assert "No rules matched." in out
+    assert "heading-missing" in out
+    assert "error -> off" in out

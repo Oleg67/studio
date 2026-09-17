@@ -234,6 +234,8 @@ A misspelled **key**, a rule code this engine does not have, or an artifact kind
 
 That last case is the easiest to miss, because the usual reason to scope a rule to one kind is to *raise* it — so a typo leaves you believing a rule now blocks when it never runs at all.
 
+For a **kit**, the kind check needs to see every kit your project installs, since one kit may legitimately scope a severity to a kind another kit provides. `cfs validate-kits` with no `--kit` filter has that view and reports the typo; `cfs validate-kits <path>` and `--kit` do not, and say nothing rather than calling a composable setting a mistake.
+
 - 🖥 `cfs validate --explain-severity --kind PRD --rule heading-missing` — the effective severity and which layer set it
 - 🖥 `cfs validate --fail-on-warnings` — make a warning-only run fail
 

@@ -766,7 +766,6 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 7. [x] - `p1` - Parse `severity` and `locked` from one constraint entry, accepting a lock without a severity - `inst-parse-entry-severity`
 8. [x] - `p1` - Merge two entry severities by taking the stricter, and a lock by taking either - `inst-merge-entry-severity`
 9. [x] - `p1` - Assemble the severity policy from every loaded kit and the project's own table, indexing entries by heading id and by ID kind - `inst-build-policy`
-10. [x] - `p1` - Report any artifact kind named under a kit's severity table that the kit never declares, since a misspelled kind configures nothing and would otherwise leave no trace at all - `inst-unknown-severity-kinds`
 
 **Supporting**:
 - [x] - `p1` - Examples parser, heading-constraint ID slugifier, and references map parser - `inst-constraints-helpers`

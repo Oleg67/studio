@@ -138,6 +138,7 @@ def _missing_bound_artifact_warnings(
 def _append_unknown_validation_key_warnings(
     self_check_report: Dict[str, object],
     loaded_kits: Optional[Dict[str, Any]],
+    composition_known: bool = False,
 ) -> None:
     """Add one advisory result per kit that declares a `[validation]` key we ignore.
 
@@ -145,9 +146,20 @@ def _append_unknown_validation_key_warnings(
     path, so that a kit registered by plain path is checked too — the setting
     is in its constraints file either way.
     """
+    kits = loaded_kits or {}
+    # Every kit's kinds together. A kit may legitimately scope a severity to a
+    # kind a companion kit declares, so only the whole composition can tell
+    # that from a typo. `composition_known` says whether this caller has it:
+    # true for an unfiltered registered-mode run, false when validating one kit
+    # by path or through `--kit`, where siblings exist and are not in view. The
+    # check stands down there rather than calling a composable kit's setting a
+    # mistake — and it is the number of kits *in view* that is unknown, not the
+    # number of kits, so a single-kit project still gets the check.
+    known_kinds = _kinds_across_kits(kits) if composition_known else None
     results: List[Dict[str, object]] = []
-    for kit_id, loaded_kit in sorted((loaded_kits or {}).items()):
-        results.extend(_unknown_validation_key_warnings(str(kit_id), loaded_kit))
+    for kit_id, loaded_kit in sorted(kits.items()):
+        results.extend(
+            _unknown_validation_key_warnings(str(kit_id), loaded_kit, known_kinds))
     if not results:
         return
     existing = self_check_report.get("results")
@@ -157,7 +169,21 @@ def _append_unknown_validation_key_warnings(
         self_check_report["results"] = results
 
 
-def _unknown_validation_key_warnings(kit_id: str, loaded_kit: Any) -> List[Dict[str, object]]:
+def _kinds_across_kits(loaded_kits: Dict[str, Any]) -> Set[str]:
+    """Union of the artifact kinds every loaded kit declares."""
+    return {
+        str(kind).strip().upper()
+        for loaded_kit in loaded_kits.values()
+        for kind in (getattr(getattr(loaded_kit, "constraints", None), "by_kind", None) or {})
+        if str(kind).strip()
+    }
+
+
+def _unknown_validation_key_warnings(
+    kit_id: str,
+    loaded_kit: Any,
+    known_kinds: Optional[Set[str]] = None,
+) -> List[Dict[str, object]]:
     """Report keys under ``[validation]`` this engine does not understand.
 
     The kind parser's habit is to read the keys it knows and drop the rest, so
@@ -176,6 +202,16 @@ def _unknown_validation_key_warnings(kit_id: str, loaded_kit: Any) -> List[Dict[
         unknown.extend(
             (f"[artifacts.{kind}.validation]", key)
             for key in getattr(getattr(kind_constraints, "validation", None), "unknown_keys", ()) or ()
+        )
+    # A severity scoped to an artifact kind no kit in this project declares.
+    # Not a rule code, so it resolves to nothing and shows up in no override
+    # report — and the usual direction is a raise, which leaves the author
+    # believing a rule now blocks when it never runs.
+    if known_kinds is not None:
+        unknown.extend(
+            ("[validation.severity]", kind)
+            for kind in getattr(getattr(constraints, "validation", None), "by_kind", None) or {}
+            if str(kind).strip().upper() not in known_kinds
         )
     if not unknown:
         return []
@@ -705,8 +741,10 @@ def _build_validate_kits_result(
     self_check_report: Dict[str, object],
     project_root: Optional[Path] = None,
     loaded_kits: Optional[Dict[str, Any]] = None,
+    composition_known: bool = False,
 ) -> Tuple[int, Dict[str, Any]]:
-    _append_unknown_validation_key_warnings(self_check_report, loaded_kits)
+    _append_unknown_validation_key_warnings(
+        self_check_report, loaded_kits, composition_known)
     _enrich_kit_validation_findings(all_errors, self_check_report, project_root)
     warning_count = _count_kit_validation_warnings(self_check_report)
     verdict = run_verdict(len(all_errors), warning_count)
@@ -821,6 +859,9 @@ def run_validate_kits(
         self_check_report=self_check_report,
         project_root=project_root,
         loaded_kits=_filtered_loaded_kits(ctx, kit_filter),
+        # Unfiltered registered mode is the only view that holds every kit the
+        # project composes; `--kit` hides the siblings a kind may come from.
+        composition_known=kit_filter is None,
     )
 
 

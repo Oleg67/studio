@@ -217,11 +217,23 @@ A misspelled *artifact kind* under `[validation.severity.<KIND>]` is the third
 case, and the one most worth catching: it is not a rule code, so it resolves
 to nothing and appears in no override report, and the common direction is a
 **raise** — leaving the author believing a rule now blocks when it does not.
-A kit's own file warns, as above; `core.toml` refuses the run. The known-kind
-set is the union of every loaded kit's declared kinds and every kind the
-artifact registry registers, because either source alone would raise false
-alarms: a kit may constrain a kind no system registers, and a system may
-register a kind constrained by a kit that is not loaded.
+A kit's own file warns, as above; `core.toml` refuses the run.
+
+Both checks need the whole composition, and that is what decides where they
+live. The known-kind set is the union of every loaded kit's declared kinds and
+every kind the artifact registry registers, because either source alone would
+raise false alarms: a kit may constrain a kind no system registers, and a
+system may register a kind constrained by a kit that is not loaded.
+
+That union is also why a kit's kinds are *not* judged while its
+`constraints.toml` is parsed. A kit file is read alone, and in a multi-kit
+project one kit may legitimately scope a severity to a kind a companion kit
+declares — a setting the composition resolves correctly and a per-file check
+would strip and misreport as a typo. So the kit-side check runs from
+`validate-kits`, and only on the view that holds every kit: an unfiltered
+registered-mode run. Validating one kit by path, or through `--kit`, the
+siblings a kind may come from are out of view, so the check stands down rather
+than calling a composable kit's setting a mistake.
 
 ### Where policy is applied
 
