@@ -118,6 +118,7 @@ under the gate contract (only deterministic verdicts affect the exit code).
 6. [x] - `p1` - Derive the exit code: under `--check`, gate (exit 2) when compliance is below the floor, or when a positive floor scored nothing (an empty or all-unscoreable suite — cannot assess is not a pass); a non-positive floor demands nothing and clears; advisory verdicts never gate - `inst-gate`
 7. [x] - `p1` - Serialise the report: per-scenario compliance, a failing-check histogram, and an UNKNOWN-aware coverage-stating summary - `inst-report-json`
 8. [x] - `p1` - Bucket per-scenario compliance changes against a baseline (regressed / improved / newly- and no-longer-scoreable) - `inst-diff-reports`
+9. [x] - `p1` - Recognise a Markdown fenced-code delimiter and decide whether one closes another (backtick or tilde, by character and run length, nothing but whitespace after) — shared, so the structural scorer and the judge cannot drift apart on what counts as a fence - `inst-fence-delim`
 
 **Supporting**:
 - [x] - `p1` - Imports and module setup for the harness - `inst-harness-imports`
@@ -203,7 +204,6 @@ or unreadable gold file is *excluded* from calibration rather than counted as a 
 
 **Supporting**:
 - [x] - `p1` - Imports, the rules-section pattern, and the gold-label-to-verdict mapping - `inst-judge-imports`
-- [x] - `p1` - Recognise a Markdown fenced-code delimiter (backtick or tilde, by character and length) so a `## Rules` inside a fenced example is not read as a heading - `inst-judge-fence`
 - [x] - `p1` - Order phase texts by the run manifest so rules, evidence, and the run summary present the same sequence - `inst-judge-order`
 - [x] - `p1` - The judge data model: gold label, judge request/reply, and the `JudgeFn` seam - `inst-judge-datamodel`
 - [x] - `p1` - Detect when the harness cannot present real evidence (empty, or whole phases omitted) so the run is UNKNOWN and excluded from calibration - `inst-judge-gap`

@@ -22,6 +22,7 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import math
 import tomllib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -437,6 +438,52 @@ def report_to_dict(report: EvalReport) -> Dict[str, object]:
 
 
 # @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-diff-reports
+def _aggregate_baseline(baseline_summary: object) -> Optional[float]:
+    """The baseline's overall compliance, or ``None`` when it is not a usable number."""
+    if not isinstance(baseline_summary, dict):
+        return None
+    value = baseline_summary.get("structural_compliance")
+    return value if _usable_baseline(value) else None
+
+
+def _usable_baseline(value: object) -> bool:
+    """Whether a baseline number can be compared against at all.
+
+    Excludes bool (an int subclass) and the non-finite floats, which survive an
+    ``isinstance`` check and then fail every comparison silently. Shared by the
+    per-scenario values and the aggregate, which were hardened separately and so
+    disagreed about what counted as a number (#234 review).
+    """
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+# @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-fence-delim
+def fence_delim(stripped: str) -> Optional[Tuple[str, int]]:
+    """A Markdown fenced-code delimiter -- three or more backticks or tildes -- as
+    ``(char, run_length)``, else ``None``.
+
+    Here, in the module both scorers already import, rather than in either of them: the
+    CommonMark closer rule (same character, run at least as long as the opener, nothing
+    but whitespace after) was implemented twice, independently, once in
+    ``eval_judge._split_sections`` and once in ``eval_structural._prose_headings``. Two
+    copies of one rule drift, and the second copy was written without noticing the first
+    (constructorfabric/studio#234 review).
+    """
+    for char in ("`", "~"):
+        if stripped.startswith(char * 3):
+            return char, len(stripped) - len(stripped.lstrip(char))
+    return None
+
+
+def fence_closes(delim: Tuple[str, int], opener: Tuple[str, int], stripped: str) -> bool:
+    """Whether ``delim`` closes ``opener``: same character, at least as long, and nothing
+    but whitespace after the run."""
+    return (delim[0] == opener[0] and delim[1] >= opener[1]
+            and not stripped[delim[1]:].strip())
+# @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-fence-delim
+
+
 def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, object]:
     """Per-scenario compliance change vs a baseline report, bucketed.
 
@@ -465,8 +512,13 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         seen.add(scenario_id)
         _, _, now = _scenario_compliance(scenario_result)
         before = prev.get(scenario_id)
-        # missing / non-numeric baseline → no comparison; exclude bool (a subclass of int).
-        if not isinstance(before, (int, float)) or isinstance(before, bool):
+        # missing / non-numeric baseline → no comparison; exclude bool (a subclass of int),
+        # and NaN/inf, which are floats and so survive the isinstance check. NaN then
+        # disappears a second time: every comparison against it is False, so the scenario
+        # joined neither `regressed` nor `improved` and `has_regression` stayed False even
+        # for a drop to zero. A corrupt or hand-edited baseline switched the gate off and
+        # said nothing.
+        if not _usable_baseline(before):
             before = None
         if before is None:
             if now is not None:
@@ -479,8 +531,7 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         elif now > before:
             improved.append({"scenario": scenario_id, "from": before, "to": now})
     for scenario_id, before in prev.items():
-        if (scenario_id not in seen and isinstance(before, (int, float))
-                and not isinstance(before, bool)):
+        if scenario_id not in seen and _usable_baseline(before):
             # gone from the suite entirely — surfaced, but not a gate-worthy regression.
             no_longer_scoreable.append({"scenario": scenario_id, "from": before})
     baseline_summary = baseline.get("summary", {})
@@ -489,8 +540,10 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         "improved": improved,
         "newly_scoreable": newly_scoreable,
         "no_longer_scoreable": no_longer_scoreable,
-        "aggregate_before": (baseline_summary.get("structural_compliance")
-                             if isinstance(baseline_summary, dict) else None),
+        # Guarded like the per-scenario values above: a corrupt baseline's aggregate is
+        # a number the report *shows a reader*, and NaN rendered beside a real
+        # `aggregate_after` reads as a measurement rather than as missing data.
+        "aggregate_before": _aggregate_baseline(baseline_summary),
         "aggregate_after": structural_compliance(report),
         "has_regression": bool(regressed),   # removals are surfaced, not gated
     }

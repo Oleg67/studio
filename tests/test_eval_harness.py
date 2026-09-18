@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from studio.utils import eval_harness as eh
 
 FIXTURES = Path(__file__).parent / "fixtures" / "eval"
@@ -414,3 +416,74 @@ def test_diff_reports_identical_has_no_regression() -> None:
     assert diff["has_regression"] is False
     assert diff["regressed"] == []
     assert diff["improved"] == []
+
+
+# --- a baseline that is not a number in any usable sense --------------------
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")],
+                         ids=["nan", "inf", "-inf"])
+def test_diff_reports_treats_a_non_finite_baseline_as_no_baseline(bad: float) -> None:
+    """NaN survived the type guard and then vanished through comparison.
+
+    `isinstance(before, (int, float))` accepts NaN -- it is a float. Every comparison
+    against it is then False, so `now < before` and `now > before` both fail and the
+    scenario joined neither bucket: `has_regression` stayed False for a drop from a
+    corrupt baseline to zero. Non-finite means "no usable baseline", which the module
+    already has a behaviour for.
+    """
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])   # compliant 1.0, non 0.0
+    baseline = {"summary": {}, "per_scenario": [
+        {"scenario": "non-compliant-run", "compliance": bad}]}
+
+    diff = eh.diff_reports(report, baseline)
+
+    assert diff["regressed"] == []
+    # Not silently dropped either: with no baseline to compare against, a scenario that
+    # scores now is newly scoreable, exactly as a missing entry would be.
+    assert "non-compliant-run" in [r["scenario"] for r in diff["newly_scoreable"]]
+
+
+def test_diff_reports_still_flags_a_real_regression_beside_a_nan_one() -> None:
+    """The guard must not swallow the scenarios around it."""
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {}, "per_scenario": [
+        {"scenario": "non-compliant-run", "compliance": 1.0},        # 1.0 → 0.0, regressed
+        {"scenario": "compliant-run", "compliance": float("nan")}]}  # unusable
+
+    diff = eh.diff_reports(report, baseline)
+
+    assert [r["scenario"] for r in diff["regressed"]] == ["non-compliant-run"]
+    assert diff["has_regression"] is True
+
+
+def test_a_non_finite_baseline_for_a_departed_scenario_is_not_reported() -> None:
+    """The same guard governs the `no_longer_scoreable` tail."""
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {}, "per_scenario": [
+        {"scenario": "gone", "compliance": float("nan")}]}
+
+    diff = eh.diff_reports(report, baseline)
+
+    assert diff["no_longer_scoreable"] == []
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, "0.9", None],
+                         ids=["nan", "inf", "bool", "string", "none"])
+def test_a_corrupt_aggregate_baseline_is_reported_as_missing(bad: object) -> None:
+    """The aggregate was left unguarded while the per-scenario values were hardened.
+
+    It is the number a reader *sees*: NaN rendered beside a real `aggregate_after` reads
+    as a measurement rather than as missing data, and `True` renders as `True` (#234
+    review).
+    """
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {"structural_compliance": bad}, "per_scenario": []}
+
+    assert eh.diff_reports(report, baseline)["aggregate_before"] is None
+
+
+def test_a_usable_aggregate_baseline_still_comes_through() -> None:
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {"structural_compliance": 0.75}, "per_scenario": []}
+
+    assert eh.diff_reports(report, baseline)["aggregate_before"] == 0.75
