@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from .eval_harness import (RunArtifacts, Scenario, ScorerKind, ScorerResult,
+                           fence_closes, fence_delim,
                            VERDICT_FAIL, VERDICT_PASS, VERDICT_UNKNOWN)
 
 logger = logging.getLogger(__name__)
@@ -102,16 +103,6 @@ class JudgeFn(Protocol):  # pylint: disable=too-few-public-methods
 # @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-datamodel
 
 
-# @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-fence
-def _fence_delim(stripped: str) -> "Optional[Tuple[str, int]]":
-    """A Markdown fenced-code delimiter — three or more backticks or tildes — as
-    ``(char, run_length)``, else ``None``. Both fence characters are recognised, and the length
-    lets a closer be matched per CommonMark (same character, at least as long as the opener)."""
-    for char in ("`", "~"):
-        if stripped.startswith(char * 3):
-            return char, len(stripped) - len(stripped.lstrip(char))
-    return None
-# @cpt-end:cpt-studio-algo-eval-judge:p1:inst-judge-fence
 
 
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-order
@@ -150,11 +141,11 @@ def _split_sections(text: str) -> "Tuple[List[str], List[str]]":
     fence: "Optional[Tuple[str, int]]" = None
     for line in text.splitlines():
         stripped = line.strip()
-        delim = _fence_delim(stripped)
+        delim = fence_delim(stripped)
         if delim is not None:
             if fence is None:
                 fence = delim                        # open a fenced block (an info string is fine)
-            elif delim[0] == fence[0] and delim[1] >= fence[1] and delim[1] == len(stripped):
+            elif fence_closes(delim, fence, stripped):
                 fence = None                         # a closer: same char, ≥ length, nothing after it
         elif fence is None and stripped.startswith("## "):
             in_rules = stripped[3:].strip().lower().startswith("rules")

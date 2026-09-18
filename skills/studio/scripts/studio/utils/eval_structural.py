@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .eval_harness import (RunArtifacts, Scenario, ScorerKind, ScorerResult,
+                           fence_closes, fence_delim,
                            VERDICT_FAIL, VERDICT_PASS, VERDICT_UNKNOWN)
 
 logger = logging.getLogger(__name__)
@@ -419,20 +420,18 @@ def _prose_headings(raw_body: str) -> str:
     fence: Optional[Tuple[str, int]] = None
     for line in body.splitlines():
         stripped = line.lstrip()
+        delim = fence_delim(stripped)
         if fence is not None:
-            # CommonMark: a closer is the same character, at least as long as the
-            # opener, and nothing but whitespace after it. Storing only three
-            # characters meant a ```` ~~~~ ```` block was closed by a later ``~~~``,
-            # and an info string (```` ```python ````) counted as a closer -- either
-            # way the `## Rules` below became visible again (#234 review).
-            char, opener_length = fence
-            run = len(stripped) - len(stripped.lstrip(char))
-            if run >= opener_length and not stripped[run:].strip():
+            # `fence_closes` rather than a second copy of the rule: the closer contract
+            # (same character, at least as long, nothing but whitespace after) lives in
+            # `eval_harness` and `eval_judge._split_sections` uses the same pair. This
+            # function had its own implementation of it, written without noticing the
+            # first -- which is how two copies of one rule drift (#234 review).
+            if delim is not None and fence_closes(delim, fence, stripped):
                 fence = None
             continue
-        if stripped.startswith(("```", "~~~")):
-            char = stripped[0]
-            fence = (char, len(stripped) - len(stripped.lstrip(char)))
+        if delim is not None:
+            fence = delim
             continue
         visible.append(line)
     return "\n".join(visible)

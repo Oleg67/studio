@@ -450,6 +450,32 @@ def _usable_baseline(value: object) -> bool:
             and math.isfinite(value))
 
 
+# @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-fence-delim
+def fence_delim(stripped: str) -> Optional[Tuple[str, int]]:
+    """A Markdown fenced-code delimiter -- three or more backticks or tildes -- as
+    ``(char, run_length)``, else ``None``.
+
+    Here, in the module both scorers already import, rather than in either of them: the
+    CommonMark closer rule (same character, run at least as long as the opener, nothing
+    but whitespace after) was implemented twice, independently, once in
+    ``eval_judge._split_sections`` and once in ``eval_structural._prose_headings``. Two
+    copies of one rule drift, and the second copy was written without noticing the first
+    (constructorfabric/studio#234 review).
+    """
+    for char in ("`", "~"):
+        if stripped.startswith(char * 3):
+            return char, len(stripped) - len(stripped.lstrip(char))
+    return None
+
+
+def fence_closes(delim: Tuple[str, int], opener: Tuple[str, int], stripped: str) -> bool:
+    """Whether ``delim`` closes ``opener``: same character, at least as long, and nothing
+    but whitespace after the run."""
+    return (delim[0] == opener[0] and delim[1] >= opener[1]
+            and not stripped[delim[1]:].strip())
+# @cpt-end:cpt-studio-algo-eval-harness-run:p1:inst-fence-delim
+
+
 def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, object]:
     """Per-scenario compliance change vs a baseline report, bucketed.
 
