@@ -175,6 +175,7 @@ class TocResolution:
     """
 
     max_level: int
+    max_section_lines: int = DEFAULT_MAX_SECTION_LINES
     kind: Optional[str] = None
     checked: bool = True
 
@@ -184,11 +185,18 @@ def resolve_toc(
     path: Path,
     flag: Optional[int],
 ) -> TocResolution:
-    """Settle a file's TOC depth, and whether anything validates it."""
+    """Settle a file's TOC bounds, and whether anything validates it.
+
+    Both bounds, not just the depth. A caller that checks its own output at
+    one section size while `validate-toc` checks it at another disagrees with
+    the validator for the same reason generating at the wrong depth did.
+    """
     target = targets.get(_path_key(path))
-    configured = target.options.max_level if target is not None else None
+    options = target.options if target is not None else TocOptions()
     return TocResolution(
-        max_level=_resolve_toc_option(flag, configured, DEFAULT_TOC_MAX_LEVEL),
+        max_level=_resolve_toc_option(flag, options.max_level, DEFAULT_TOC_MAX_LEVEL),
+        max_section_lines=_resolve_toc_option(
+            None, options.max_section_lines, DEFAULT_MAX_SECTION_LINES),
         kind=target.kind if target is not None else None,
         checked=target.enabled if target is not None else True,
     )

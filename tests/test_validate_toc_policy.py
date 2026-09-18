@@ -744,6 +744,32 @@ def test_e2e_cfs_toc_still_writes_a_table_for_a_kind_that_does_not_require_one(t
     assert "toc = false" in validation["reason"]
 
 
+@pytest.mark.parametrize(
+    ("validation", "expected"),
+    [
+        # A check that could not run counts as a failure, not as zero.
+        ({"status": "ERROR", "message": "Could not re-read the file"}, 1),
+        ({"status": "FAIL", "errors": 3, "warnings": 0}, 3),
+        ({"status": "WARN", "errors": 0, "warnings": 2}, 0),
+        ({"status": "PASS"}, 0),
+        ({"status": "SKIPPED", "reason": "PRD declares toc = false"}, 0),
+        ({"status": "FAIL", "errors": None}, 0),
+        ({}, 0),
+    ],
+)
+def test_the_failure_count_contract_of_one_validation_result(validation, expected):
+    """Pinned directly, because every other test reaches it through file I/O.
+
+    That indirection is what hides a regression: the ERROR result carries no
+    `errors` key, so a refactor that checked `errors` before `status` would
+    return 0 for an unreadable file and the run would exit 0 having verified
+    nothing.
+    """
+    from studio.commands.toc import _unverified_count
+
+    assert _unverified_count(validation) == expected
+
+
 def test_post_generation_validation_never_raises(tmp_path):
     """The contract stated in the docstring, tested directly.
 
@@ -797,6 +823,42 @@ def test_e2e_an_unreadable_file_does_not_abort_the_rest_of_a_toc_batch(tmp_path,
     assert by_file["FEATURE.md"]["validation"]["status"] == "ERROR"
     assert "Permission denied" in by_file["FEATURE.md"]["validation"]["message"]
     assert exit_code == 2
+
+
+def test_e2e_cfs_toc_checks_its_output_at_the_kinds_configured_section_size(tmp_path):
+    """The other bound drifts the same way the depth did.
+
+    Checking its own output at 300 lines while `validate-toc` checks the same
+    file at the kind's configured size makes the two commands disagree about
+    a file neither of them changed in between.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_section_lines": 1}}}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    validation = report["results"][0]["validation"]
+    assert validation["status"] == "WARN"
+    assert any("toc-section-too-long" in str(d) for d in validation["details"]), validation
+
+    # And `validate-toc` reaches the same verdict on the file just written.
+    _, checked = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert "toc-section-too-long" in _codes(checked, "warnings")
+
+
+def test_e2e_cfs_toc_shows_warning_details_at_a_terminal_not_only_failures(tmp_path):
+    """A WARN result builds `details` exactly as FAIL does, and was rendered
+    as nothing at all — the finding reached the JSON and stopped there."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_section_lines": 1}}}},
+    )
+    exit_code, text = _run_human(tmp_path, ["toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert "toc-section-too-long" in text
 
 
 def test_e2e_cfs_toc_says_at_a_terminal_that_it_did_not_check_its_own_output(tmp_path):

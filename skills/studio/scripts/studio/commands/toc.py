@@ -77,6 +77,7 @@ def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> 
         content,
         artifact_path=filepath,
         max_heading_level=resolution.max_level,
+        max_section_lines=resolution.max_section_lines,
     )
     errs = report.get("errors", [])
     warns = report.get("warnings", [])
@@ -215,7 +216,10 @@ def _human_toc_validation(val: dict) -> None:
         ui.substep(f"  (not validated: {val.get('reason', 'not applicable')})")
     elif status == "ERROR":
         ui.error(f"  {val.get('message', 'could not validate the generated file')}")
-    elif status == "FAIL":
+    elif status in ("FAIL", "WARN"):
+        # WARN carries `details` exactly as FAIL does. Rendering only FAIL
+        # meant a warning-only result was built, returned, counted in the
+        # JSON — and then shown to a terminal reader as nothing at all.
         for detail in val.get("details", []):
             ui.warn(f"  {detail}")
 
