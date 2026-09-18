@@ -263,6 +263,8 @@ Leave an option out and the kind has no opinion about it. That matters because `
 
 `toc = false` means the kind has no table-of-contents contract at all. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as passing but **not applicable** rather than checking it anyway — and says so, so a file nobody examined does not read like a file that came back clean.
 
+`cfs toc` still writes a table for such a file if you ask it to: the switch says a table is not *required*, and there is no setting that forbids one. It reports its post-generation check as skipped, so the one command that writes tables is not also the only one that grades them.
+
 Severity works here like everywhere else. Run inside a Studio project, `cfs validate-toc` reads the same `[validation.severity]` tables `cfs validate` does and maps each registered file to its kind, so this is enough to make a missing TOC visible without blocking the build:
 
 ```toml

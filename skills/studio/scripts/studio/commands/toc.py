@@ -9,7 +9,7 @@ Thin CLI wrapper around the unified ``studio.utils.toc`` module.
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-imports
 import argparse
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from studio.utils.toc import (
     add_toc_max_level_argument,
@@ -17,6 +17,11 @@ from studio.utils.toc import (
     validate_toc as _validate_toc,
 )
 from ..utils.ui import ui
+
+if TYPE_CHECKING:  # pragma: no cover - for the annotation only
+    # Imported lazily inside `cmd_toc` at runtime: `cfs toc` should not pull
+    # the whole validate command tree in just to resolve a heading depth.
+    from .validate_toc import TocResolution
 # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-imports
 
 
@@ -38,12 +43,27 @@ def _process_toc_file(
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-process
 
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
-def _validate_generated_toc(filepath: Path, max_level: int) -> dict:
-    """Check what was just written, at the depth it was written to."""
+def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> dict:
+    """Check what was just written — unless nothing validates this kind's TOC.
+
+    A kind declaring `toc = false` is skipped by `cfs validate` and reported
+    as not applicable by `cfs validate-toc`. Writing the table is still the
+    right answer to an explicit request — that switch says a table is not
+    required, and has no way to say one is forbidden — but this command should
+    not be the only one in the toolchain that judges it.
+    """
+    if not resolution.checked:
+        return {
+            "status": "SKIPPED",
+            "reason": (
+                f"{resolution.kind} declares toc = false; "
+                "no command validates a table of contents for this kind"
+            ),
+        }
     report = _validate_toc(
         filepath.read_text(encoding="utf-8"),
         artifact_path=filepath,
-        max_heading_level=max_level,
+        max_heading_level=resolution.max_level,
     )
     errs = report.get("errors", [])
     warns = report.get("warnings", [])
@@ -96,7 +116,7 @@ def cmd_toc(argv: List[str]) -> int:
     # shallower one produces a TOC listing headings that `validate-toc` then
     # reports as anchors to nothing — the documented way to fix a stale TOC
     # would hand back a file that fails validation.
-    from .validate_toc import resolve_toc_targets, target_max_level
+    from .validate_toc import resolve_toc, resolve_toc_targets
 
     toc_targets = resolve_toc_targets()
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
@@ -106,10 +126,10 @@ def cmd_toc(argv: List[str]) -> int:
     validation_errors = 0
     for filepath_str in args.files:
         filepath = Path(filepath_str).resolve()
-        max_level = target_max_level(toc_targets, filepath, args.max_level)
+        resolution = resolve_toc(toc_targets, filepath, args.max_level)
         result = _process_toc_file(
             filepath_str,
-            max_level=max_level,
+            max_level=resolution.max_level,
             dry_run=args.dry_run,
             indent_size=args.indent,
         )
@@ -119,7 +139,7 @@ def cmd_toc(argv: List[str]) -> int:
                 and not args.dry_run
                 and filepath.is_file()
                 and result.get("status") not in ("ERROR", "SKIP")):
-            validation = _validate_generated_toc(filepath, max_level)
+            validation = _post_generation_validation(filepath, resolution)
             result["validation"] = validation
             validation_errors += int(validation.get("errors") or 0)
 
@@ -162,6 +182,8 @@ def _human_toc(data: dict) -> None:
         else:
             ui.substep(f"{path}: {status}")
         val = r.get("validation", {})
+        if val.get("status") == "SKIPPED":
+            ui.substep(f"  (not validated: {val.get('reason', 'not applicable')})")
         if val.get("status") == "FAIL":
             for detail in val.get("details", []):
                 ui.warn(f"  {detail}")

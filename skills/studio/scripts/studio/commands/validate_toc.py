@@ -162,11 +162,36 @@ def resolve_toc_targets() -> Dict[str, _TocTarget]:
     return _collect_toc_targets(ctx)
 
 
-def target_max_level(targets: Dict[str, _TocTarget], path: Path, flag: Optional[int]) -> int:
-    """Settle a file's TOC depth the way `validate-toc` settles it."""
+@dataclass(frozen=True)
+class TocResolution:
+    """What a per-file TOC command needs to know about one path.
+
+    ``checked`` is False when the file's artifact kind declares ``toc =
+    false``. That switch says the kind has no table-of-contents *contract* —
+    it is a two-state field defaulting to true, so unlike the three-state
+    `multiple` / `numbered` / `task` fields it has no way to express
+    "prohibited" and does not try to. A caller asked to write a table should
+    still write one; a caller about to judge one should not.
+    """
+
+    max_level: int
+    kind: Optional[str] = None
+    checked: bool = True
+
+
+def resolve_toc(
+    targets: Dict[str, _TocTarget],
+    path: Path,
+    flag: Optional[int],
+) -> TocResolution:
+    """Settle a file's TOC depth, and whether anything validates it."""
     target = targets.get(_path_key(path))
     configured = target.options.max_level if target is not None else None
-    return _resolve_toc_option(flag, configured, DEFAULT_TOC_MAX_LEVEL)
+    return TocResolution(
+        max_level=_resolve_toc_option(flag, configured, DEFAULT_TOC_MAX_LEVEL),
+        kind=target.kind if target is not None else None,
+        checked=target.enabled if target is not None else True,
+    )
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-load-project
 
 

@@ -721,6 +721,37 @@ def test_the_path_index_folds_case_the_way_the_filesystem_might(tmp_path, monkey
     assert targets.get(VT._path_key(Path("/project/architecture/prd.md"))) == "sentinel"
 
 
+def test_e2e_cfs_toc_still_writes_a_table_for_a_kind_that_does_not_require_one(tmp_path):
+    """`toc = false` says a table is not required, not that one is forbidden.
+
+    It is a two-state field defaulting to true, so — unlike the three-state
+    `multiple` / `numbered` / `task` fields — it has no way to express
+    "prohibited". Refusing to generate would leave someone who typed the
+    command with no table and no flag to override the refusal.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"toc": False}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert "<!-- toc -->" in (tmp_path / "architecture" / "PRD.md").read_text(encoding="utf-8")
+    # ... but nothing in the toolchain judges it, and this command says so
+    # rather than being the only one that does.
+    validation = report["results"][0]["validation"]
+    assert validation["status"] == "SKIPPED"
+    assert "toc = false" in validation["reason"]
+
+
+def test_e2e_a_kind_that_keeps_its_toc_contract_is_still_checked_after_generating(tmp_path):
+    """The control for the test above: the skip must be the kind's doing."""
+    _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC)
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert report["results"][0]["validation"]["status"] in ("PASS", "WARN")
+
+
 def test_e2e_cfs_toc_regenerates_to_the_depth_the_check_will_judge(tmp_path):
     """The documented fix-it workflow must not hand back a failing file."""
     _write_toc_project(

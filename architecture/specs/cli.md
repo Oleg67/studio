@@ -391,7 +391,7 @@ Both are optional, and an unset option means the kind has no opinion rather than
 
 Both bounds also govern structure validation inside `cfs validate`, which checked every kind at a fixed depth of 3 before, and the regeneration `cfs toc` performs — generating a table at one depth and judging it at another would make the documented way to repair a stale table hand back a file that fails validation.
 
-A kind that sets `toc = false` has no table-of-contents contract. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as `"status": "PASS"` with `"applicable": false` and a message naming the kind, rather than checking it anyway or passing it in silence.
+A kind that sets `toc = false` has no table-of-contents contract. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as `"status": "PASS"` with `"applicable": false` and a message naming the kind, rather than checking it anyway or passing it in silence. `cfs toc` still generates a table for such a file on request — the switch says a table is not required, and being two-state with a default of `true` it has no way to say one is forbidden — and reports its post-generation check as `"validation": {"status": "SKIPPED", "reason": ...}`.
 
 **Behavior**:
 1. Parse arguments; load the surrounding project's policy and registered artifact kinds when there is one.
