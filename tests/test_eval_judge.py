@@ -475,12 +475,16 @@ def test_the_worker_does_not_hold_the_process_open(monkeypatch) -> None:
 
     monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 0.2)
     release = threading.Event()
-    before = {t.name for t in threading.enumerate()}
+    # Identities, not names. The sibling timeout test leaves a worker of the same name
+    # running for a moment after its own `release.set()`, and under `-n 6` both land in
+    # one process -- so a name-based "new thread" filter saw nothing new and failed
+    # intermittently. That was a flake I introduced with this test.
+    before = {id(t) for t in threading.enumerate()}
 
     try:
         AdvisoryJudge(lambda _r: release.wait(30)).score(_run(), _scenario())
         leftover = [t for t in threading.enumerate()
-                    if t.name not in before and t.name == "cfs-eval-judge"]
+                    if id(t) not in before and t.name == "cfs-eval-judge"]
         assert leftover, "expected the worker to still be running — that is the case under test"
         assert all(t.daemon for t in leftover), "a non-daemon worker blocks interpreter exit"
     finally:
