@@ -226,7 +226,7 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 1. [x] - `p1` - Load constraints.toml for each kit - `inst-load-kit-constraints`
 2. [x] - `p1` - For each artifact kind, locate template and example paths - `inst-locate-files`
 3. [x] - `p1` - Validate template headings match constraints heading contract - `inst-validate-headings`
-4. [x] - `p1` - Validate example artifacts against the same heading and constraint contract used for user artifacts - `inst-validate-example`
+4. [x] - `p1` - Validate example artifacts against the same heading and constraint contract used for user artifacts, under the kit's own declared severity policy and not the project's — a kit that declares a rule advisory means it for its own examples, and a project has no say over whether someone else's kit satisfies itself - `inst-validate-example`
 5. [x] - `p1` - Check that template defines all required ID kinds from constraints - `inst-check-id-kinds`
 
 ### Resolve Variables

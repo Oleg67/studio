@@ -270,17 +270,25 @@ cfs update [--project-root P] [--dry-run] [--no-interactive] [-y/--yes]
 Validate artifacts.
 
 ```
-cfs validate [--artifact PATH] [--system SYSTEM] [--kind KIND] [--strict]
+cfs validate [--artifact PATH] [--skip-code] [--verbose] [--output FILE]
+             [--local-only] [--source SOURCE] [--fail-on-warnings]
+             [--explain-severity [--kind KIND] [--rule RULE]]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--artifact PATH` | Validate a single artifact file |
-| `--system SYSTEM` | Validate all artifacts for a system |
-| `--kind KIND` | Filter by artifact kind (PRD, DESIGN, etc.) |
-| `--strict` | Enable strict validation (all checklist items) |
+| `--skip-code` | Skip code traceability validation |
+| `--verbose` | Print the full validation report |
+| `--output FILE` | Write the report to a file instead of stdout |
 | `--local-only` | Skip cross-repo workspace validation (validate local repo only) |
 | `--source SOURCE` | Target a specific workspace source for validation (uses that source's adapter context). Returns error when used outside workspace mode. |
+| `--fail-on-warnings` | Fail the run when there are warnings but no errors (exit 2). Raises only; no flag lowers a rule. |
+| `--explain-severity` | Report each rule's effective severity and the layer that set it, then exit without validating |
+| `--kind KIND` | With `--explain-severity`: restrict the explanation to one artifact kind. Refused on a normal run. |
+| `--rule RULE` | With `--explain-severity`: restrict the explanation to one rule code. Refused on a normal run. |
+
+> Earlier revisions of this table listed `--system`, `--kind` and `--strict` as artifact filters. None were ever implemented. `--kind` now exists with a different, narrower meaning, documented above; `--system` and `--strict` are removed here rather than left describing a surface that does not exist.
 
 **Workspace flag interaction**: `--local-only` and `--source` are independent and can be combined. `--source` narrows **which** artifacts are validated (a single source's artifacts using its own adapter context). `--local-only` controls **whether cross-repo IDs** from other workspace sources are included as reference context. Examples: `cfs validate --source backend` validates the backend source with cross-repo references; `cfs validate --source backend --local-only` validates the backend source without cross-repo references; `cfs validate --local-only` validates the primary repo only without cross-repo references.
 
@@ -307,19 +315,43 @@ cfs validate [--artifact PATH] [--system SYSTEM] [--kind KIND] [--strict]
   "status": "PASS",
   "artifacts_validated": 3,
   "error_count": 0,
-  "warning_count": 2,
-  "issues": [
+  "warning_count": 1,
+  "suppressed_count": 2,
+  "errors": [],
+  "warnings": [
     {
-      "file": "architecture/PRD.md",
+      "type": "constraints",
+      "path": "architecture/PRD.md",
       "line": 42,
+      "location": "architecture/PRD.md:42",
+      "code": "toc-missing",
       "severity": "warning",
-      "rule": "PLACEHOLDER",
-      "message": "TODO marker detected"
+      "artifact_kind": "PRD",
+      "message": "Document has no table of contents"
+    }
+  ],
+  "severity_overrides": [
+    {
+      "code": "heading-number-not-consecutive",
+      "kind": "PRD",
+      "entry": null,
+      "from": "error",
+      "to": "off",
+      "applied": true,
+      "source": "project-kind"
     }
   ],
   "next_step": "Deterministic validation passed. Now perform semantic validation."
 }
 ```
+
+A warning-only failure adds `"failed_on": "warnings"` alongside `"status": "FAIL"`. `severity_overrides` and `suppressed_count` appear only when non-empty. An override that a `locked` entry refused carries `"applied": false` and names the entry as `"<type>:<id>"`, for example `"heading:prd-metrics"`.
+
+Both `errors` and `warnings` are emitted on every run, passing or failing. When a rule is set to `off`, the findings it removed are counted under `suppressed_count`; when a project lowers a rule, or a `locked` entry refuses a lowering, each is listed under `severity_overrides`. `--fail-on-warnings` (or `fail_on_warnings = true` in `core.toml`) turns a warning-only run into `status: FAIL`, exit 2, with `failed_on: "warnings"`.
+
+**Flags**: `--artifact`, `--skip-code`, `--verbose`, `--output`, `--local-only`, `--source`, `--fail-on-warnings`, `--explain-severity [--kind K] [--rule R]`.
+
+`--explain-severity` reports the effective severity of each rule and the layer that set it (`entry`, `project-kind`, `project`, `kit-kind`, `kit`, `default`), then exits 0 without validating anything.
 
 **Exit**: 0=PASS, 2=FAIL.
 
@@ -687,12 +719,17 @@ cfs validate-kits [path] [--kit KIT] [--verbose]
 | `--kit KIT` | Validate only a specific kit (e.g., `studio-sdlc`) |
 | `--verbose` | Include full per-template error/warning lists |
 
+> Narrowing to one kit — by `path` or `--kit` — skips the check for a severity scoped to an unknown artifact kind. One kit may legitimately scope to a kind a companion kit declares, and a narrowed run cannot see the companion, so it reports nothing rather than calling a working setting a typo. Unknown keys and unknown rule codes are still reported in every mode.
+
 **Behavior**:
 1. Load installed kits from artifacts registry.
 2. For each kit, load `constraints.toml` and locate template/example files.
 3. Validate each template against constraints (heading contract, ID placeholders, cross-artifact references).
 4. Validate each example artifact against its template structure and constraints.
 5. Report per-kit, per-kind PASS/FAIL with error details.
+6. Report unrecognised keys under any `[validation]` table as `constraints-unknown-key` warnings, rather than dropping them the way the kind parser drops unknown keys.
+
+A top-level `warning_count` sums the per-kit warnings that previously appeared only nested inside `self_check_results[]`, so a caller reading the top level can tell a kit with advisory findings from one with none.
 
 > **Note**: `validate-kits` is also invoked automatically at the end of `cfs update`. If it fails, the update status becomes WARN and the validation report is included in the update output.
 
