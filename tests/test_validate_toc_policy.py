@@ -744,6 +744,61 @@ def test_e2e_cfs_toc_still_writes_a_table_for_a_kind_that_does_not_require_one(t
     assert "toc = false" in validation["reason"]
 
 
+def test_post_generation_validation_never_raises(tmp_path):
+    """The contract stated in the docstring, tested directly.
+
+    `cli.main` special-cases only `SystemExit`, so anything else escaping a
+    command handler crashes the process.
+    """
+    from studio.commands.toc import _post_generation_validation
+    from studio.commands.validate_toc import TocResolution
+
+    vanished = tmp_path / "written-then-deleted.md"
+    result = _post_generation_validation(vanished, TocResolution(max_level=3))
+    assert result["status"] == "ERROR"
+    assert "Could not re-read" in result["message"]
+
+
+def test_e2e_an_unreadable_file_does_not_abort_the_rest_of_a_toc_batch(tmp_path, monkeypatch):
+    """One racy file must not take the whole invocation down with a traceback.
+
+    The file has just been written, so a failure here is a permission change,
+    an unmount or a TOCTOU race. `cli.main` special-cases only `SystemExit`,
+    so anything else escaping the handler crashes the process and discards the
+    results already collected for every earlier file in the batch.
+    """
+    _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC)
+    (tmp_path / "architecture" / "FEATURE.md").write_text(_PRD_WITHOUT_TOC, encoding="utf-8")
+
+    real_read_text, real_write_text = Path.read_text, Path.write_text
+    written: set[str] = set()
+
+    def track_write(self, *args, **kwargs):
+        written.add(self.name)
+        return real_write_text(self, *args, **kwargs)
+
+    def fail_reading_back_the_feature(self, *args, **kwargs):
+        # Precisely the reviewer's window: readable while being generated,
+        # unreadable by the time the post-generation check reads it back.
+        if self.name == "FEATURE.md" and self.name in written:
+            raise OSError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", track_write)
+    monkeypatch.setattr(Path, "read_text", fail_reading_back_the_feature)
+    exit_code, report = _run(
+        tmp_path, ["--json", "toc", "architecture/PRD.md", "architecture/FEATURE.md"])
+
+    # The good file's result survived rather than being lost to a crash.
+    assert report["files_processed"] == 2
+    by_file = {Path(r["file"]).name: r for r in report["results"]}
+    assert by_file["PRD.md"]["validation"]["status"] in ("PASS", "WARN")
+    # And the bad one is reported, not silently passed: the check never ran.
+    assert by_file["FEATURE.md"]["validation"]["status"] == "ERROR"
+    assert "Permission denied" in by_file["FEATURE.md"]["validation"]["message"]
+    assert exit_code == 2
+
+
 def test_e2e_cfs_toc_says_at_a_terminal_that_it_did_not_check_its_own_output(tmp_path):
     """The JSON carries `validation.status`; a terminal reader sees neither key."""
     _write_toc_project(

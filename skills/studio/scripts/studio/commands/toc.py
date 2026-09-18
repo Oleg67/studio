@@ -51,6 +51,11 @@ def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> 
     right answer to an explicit request — that switch says a table is not
     required, and has no way to say one is forbidden — but this command should
     not be the only one in the toolchain that judges it.
+
+    Never raises, matching the contract `validate-toc` states for its own
+    read: the file has just been written, so a failure here is a permission
+    change, an unmount or a TOCTOU race, and none of those are a reason to
+    abort a batch and discard the results already collected for other files.
     """
     if not resolution.checked:
         return {
@@ -60,8 +65,16 @@ def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> 
                 "no command validates a table of contents for this kind"
             ),
         }
+    try:
+        content = filepath.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Not PASS. The table was written and then could not be read back, so
+        # this run has no idea whether what it produced is correct — and a
+        # verdict of "fine" on a check that never ran is the one answer that
+        # cannot be right.
+        return {"status": "ERROR", "message": f"Could not re-read the file to validate it: {exc}"}
     report = _validate_toc(
-        filepath.read_text(encoding="utf-8"),
+        content,
         artifact_path=filepath,
         max_heading_level=resolution.max_level,
     )
@@ -75,6 +88,18 @@ def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> 
         "warnings": len(warns),
         "details": errs + warns,
     }
+
+
+def _unverified_count(validation: dict) -> int:
+    """How much this file contributes to the run's failure count.
+
+    A check that could not run counts as one, rather than as zero. Exiting 0
+    after writing a file nobody could read back would report success for a
+    result this command never saw.
+    """
+    if validation.get("status") == "ERROR":
+        return 1
+    return int(validation.get("errors") or 0)
 # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
 
 
@@ -141,7 +166,7 @@ def cmd_toc(argv: List[str]) -> int:
                 and result.get("status") not in ("ERROR", "SKIP")):
             validation = _post_generation_validation(filepath, resolution)
             result["validation"] = validation
-            validation_errors += int(validation.get("errors") or 0)
+            validation_errors += _unverified_count(validation)
 
         results.append(result)
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
@@ -188,6 +213,8 @@ def _human_toc_validation(val: dict) -> None:
     status = val.get("status")
     if status == "SKIPPED":
         ui.substep(f"  (not validated: {val.get('reason', 'not applicable')})")
+    elif status == "ERROR":
+        ui.error(f"  {val.get('message', 'could not validate the generated file')}")
     elif status == "FAIL":
         for detail in val.get("details", []):
             ui.warn(f"  {detail}")
