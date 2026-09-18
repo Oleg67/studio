@@ -522,3 +522,218 @@ def test_e2e_outside_a_project_nothing_is_loaded_and_nothing_changes(tmp_path):
 def test_the_defaults_this_command_falls_back_to_are_the_documented_ones(tmp_path):
     """Pinned by value: a changed fallback is invisible to every test above."""
     assert (DEFAULT_TOC_MAX_LEVEL, DEFAULT_MAX_SECTION_LINES) == (3, 300)
+
+
+def test_the_parser_and_the_schema_agree_on_which_toc_options_exist(tmp_path):
+    """Two hand-maintained lists of the same set drift silently otherwise."""
+    schema = json.loads(
+        (Path(__file__).parent.parent / "schemas" / "kit-constraints.schema.json").read_text(
+            encoding="utf-8"))
+    documented = set(schema["$defs"]["toc_options"]["properties"])
+    assert documented == set(C._TOC_OPTION_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# `toc = false`, scope, and the bounds on the flags
+# ---------------------------------------------------------------------------
+
+def test_e2e_a_kind_with_no_toc_contract_is_reported_as_not_applicable(tmp_path):
+    """`cfs validate` skips the phase for `toc = false`; this must agree.
+
+    And it must say so: a file nobody examined and a file that came back clean
+    are different answers, and only one of them means the TOC is correct.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"toc": False}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    result = report["results"][0]
+    assert result["status"] == "PASS"
+    assert result["applicable"] is False
+    assert result["artifact_kind"] == "PRD"
+    assert "toc = false" in result["message"]
+    # The same file under a kind that keeps its TOC contract does fail.
+    feature_code, _ = _run(tmp_path, ["--json", "validate-toc", "architecture/FEATURE.md"])
+    assert feature_code == 2
+
+
+def test_e2e_a_skipped_file_does_not_read_as_clean_at_a_terminal(tmp_path):
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"toc": False}},
+    )
+    exit_code, text = _run_human(tmp_path, ["validate-toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert "skipped" in text
+
+
+def test_e2e_the_human_report_attributes_kind_and_suppression_per_file(tmp_path):
+    """With several files, a run-level count cannot say which one was quietened."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        core_validation={"severity": {"PRD": {"toc-missing": "off"}}},
+    )
+    exit_code, text = _run_human(
+        tmp_path, ["validate-toc", "architecture/PRD.md", "architecture/FEATURE.md"])
+    assert exit_code == 2
+    assert "(kind PRD, 1 finding(s) suppressed)" in text
+    assert "(kind FEATURE)" in text
+
+
+def test_e2e_an_unregistered_file_outside_the_project_is_not_judged_by_it(tmp_path):
+    """Another repository's document is not this project's to grade."""
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_toc_project(
+        project,
+        prd_body=_PRD_WITHOUT_TOC,
+        core_validation={"severity": {"toc-missing": "off"}},
+    )
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "doc.md").write_text(_PRD_WITHOUT_TOC, encoding="utf-8")
+
+    exit_code, report = _run(project, ["--json", "validate-toc", "../elsewhere/doc.md"])
+    # Inside the tree the same rule is `off`; outside it, engine defaults apply.
+    assert exit_code == 2
+    assert "toc-missing" in _codes(report)
+    assert "suppressed_count" not in report["results"][0]
+
+
+def test_e2e_a_registered_artifact_is_judged_by_the_project_wherever_it_resolves(tmp_path):
+    """The containment rule must not reach registered artifacts — see workspaces."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        core_validation={"severity": {"toc-missing": "warning"}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert (exit_code, report["status"]) == (0, "WARN")
+
+
+@pytest.mark.parametrize("argv_flag", [["--max-level", "0"], ["--max-level", "7"]])
+def test_e2e_an_out_of_range_max_level_is_rejected_not_silently_obeyed(tmp_path, argv_flag):
+    """`--max-level 0` empties the heading list, so every check returns early.
+
+    Unbounded, that is a silent PASS on a document with a genuinely broken
+    table of contents — the worst shape a validation bug can take.
+    """
+    (tmp_path / "loose.md").write_text(_PRD_WITHOUT_TOC, encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        _run(tmp_path, ["--json", "validate-toc", *argv_flag, "loose.md"])
+    assert excinfo.value.code == 2
+
+
+def test_e2e_a_non_positive_max_section_lines_is_rejected(tmp_path):
+    (tmp_path / "loose.md").write_text(_PRD_WITHOUT_TOC, encoding="utf-8")
+    with pytest.raises(SystemExit) as excinfo:
+        _run(tmp_path, ["--json", "validate-toc", "--max-section-lines", "0", "loose.md"])
+    assert excinfo.value.code == 2
+
+
+def test_e2e_the_fail_on_warnings_flag_reaches_this_command(tmp_path):
+    """The flag's own wiring, with nothing set in the project configuration."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        core_validation={"severity": {"toc-missing": "warning"}},
+    )
+    passing, _ = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert passing == 0
+
+    exit_code, report = _run(
+        tmp_path, ["--json", "validate-toc", "--fail-on-warnings", "architecture/PRD.md"])
+    assert exit_code == 2
+    assert report["failed_on"] == "warnings"
+
+
+def test_e2e_the_max_section_lines_flag_overrides_the_kinds_configured_value(tmp_path):
+    """The twin of the `--max-level` override; same code path, separate wiring."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITH_SHALLOW_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_level": 2, "max_section_lines": 500}}}},
+    )
+    quiet, report = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert (quiet, "toc-section-too-long" in _codes(report, "warnings")) == (0, False)
+
+    exit_code, report = _run(
+        tmp_path,
+        ["--json", "validate-toc", "--max-section-lines", "1", "architecture/PRD.md"],
+    )
+    assert exit_code == 0
+    assert "toc-section-too-long" in _codes(report, "warnings")
+
+
+def test_e2e_one_lowered_rule_hit_by_two_files_is_reported_once(tmp_path):
+    """Refusals and overrides accumulate across files under one dedupe rule."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        core_validation={"severity": {"toc-missing": "warning"}},
+    )
+    exit_code, report = _run(
+        tmp_path,
+        ["--json", "validate-toc", "architecture/PRD.md", "architecture/FEATURE.md"],
+    )
+    assert exit_code == 0
+    assert report["warning_count"] == 2
+    assert [row["code"] for row in report["severity_overrides"]] == ["toc-missing"]
+
+
+def test_e2e_a_lower_cased_registry_kind_still_finds_its_configured_depth(tmp_path):
+    """`by_kind` is upper-cased by the loader; the registry keeps what was typed.
+
+    Without folding the case here the kind's whole TOC configuration is
+    dropped while its severities keep working, which is close to invisible.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITH_SHALLOW_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_level": 2}}}},
+    )
+    config = tmp_path / "adapter" / "config" / "artifacts.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace('kind = "PRD"', 'kind = "prd"'),
+        encoding="utf-8",
+    )
+    exit_code, report = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert (exit_code, report["status"]) == (0, "PASS")
+    assert report["results"][0]["artifact_kind"] == "prd"
+
+
+def test_the_path_index_folds_case_the_way_the_filesystem_might(tmp_path, monkeypatch):
+    """Proved by simulation: on Linux `normcase` is identity, so a real run
+    on this machine can never tell a folded index from an unfolded one.
+
+    `Path.resolve()` does not correct the case of a path typed differently
+    from the file on disk. Without folding, a macOS or Windows user naming the
+    same file in another case gets it treated as unregistered — losing its
+    kind, its configured depth and its kind-scoped severity, silently.
+    """
+    monkeypatch.setattr(os.path, "normcase", str.lower)
+    targets = {VT._path_key(Path("/Project/Architecture/PRD.md")): "sentinel"}
+    assert targets.get(VT._path_key(Path("/project/architecture/prd.md"))) == "sentinel"
+
+
+def test_e2e_cfs_toc_regenerates_to_the_depth_the_check_will_judge(tmp_path):
+    """The documented fix-it workflow must not hand back a failing file."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_level": 2}}}},
+    )
+    generated, _ = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert generated == 0
+    body = (tmp_path / "architecture" / "PRD.md").read_text(encoding="utf-8")
+    # Regenerated at the kind's depth of 2, so the level-3 section is absent.
+    assert "(#context)" in body
+    assert "(#detail)" not in body
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert (exit_code, report["status"]) == (0, "PASS"), report

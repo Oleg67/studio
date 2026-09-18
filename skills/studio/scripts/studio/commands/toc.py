@@ -37,6 +37,27 @@ def _process_toc_file(
     )
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-process
 
+# @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
+def _validate_generated_toc(filepath: Path, max_level: int) -> dict:
+    """Check what was just written, at the depth it was written to."""
+    report = _validate_toc(
+        filepath.read_text(encoding="utf-8"),
+        artifact_path=filepath,
+        max_heading_level=max_level,
+    )
+    errs = report.get("errors", [])
+    warns = report.get("warnings", [])
+    if not errs and not warns:
+        return {"status": "PASS"}
+    return {
+        "status": "FAIL" if errs else "WARN",
+        "errors": len(errs),
+        "warnings": len(warns),
+        "details": errs + warns,
+    }
+# @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
+
+
 def cmd_toc(argv: List[str]) -> int:
     """Generate/update Table of Contents in markdown files."""
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
@@ -49,7 +70,7 @@ def cmd_toc(argv: List[str]) -> int:
         nargs="+",
         help="Markdown file path(s) to process",
     )
-    add_toc_max_level_argument(p)
+    add_toc_max_level_argument(p, default=None)
     p.add_argument(
         "--indent",
         type=int,
@@ -69,43 +90,38 @@ def cmd_toc(argv: List[str]) -> int:
     args = p.parse_args(argv)
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
 
+    # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
+    # Generate to the depth the checks will judge the result at. Regenerating
+    # at this command's own default in a project where a kind configures a
+    # shallower one produces a TOC listing headings that `validate-toc` then
+    # reports as anchors to nothing — the documented way to fix a stale TOC
+    # would hand back a file that fails validation.
+    from .validate_toc import resolve_toc_targets, target_max_level
+
+    toc_targets = resolve_toc_targets()
+    # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
+
     results = []
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
     validation_errors = 0
     for filepath_str in args.files:
         filepath = Path(filepath_str).resolve()
+        max_level = target_max_level(toc_targets, filepath, args.max_level)
         result = _process_toc_file(
             filepath_str,
-            max_level=args.max_level,
+            max_level=max_level,
             dry_run=args.dry_run,
             indent_size=args.indent,
         )
 
-        # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
         # Auto-validate after generation (unless skipped or dry-run)
         if (not args.skip_validate
                 and not args.dry_run
                 and filepath.is_file()
                 and result.get("status") not in ("ERROR", "SKIP")):
-            content = filepath.read_text(encoding="utf-8")
-            report = _validate_toc(
-                content,
-                artifact_path=filepath,
-                max_heading_level=args.max_level,
-            )
-            errs = report.get("errors", [])
-            warns = report.get("warnings", [])
-            if errs or warns:
-                result["validation"] = {
-                    "status": "FAIL" if errs else "WARN",
-                    "errors": len(errs),
-                    "warnings": len(warns),
-                    "details": errs + warns,
-                }
-                validation_errors += len(errs)
-            else:
-                result["validation"] = {"status": "PASS"}
-        # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
+            validation = _validate_generated_toc(filepath, max_level)
+            result["validation"] = validation
+            validation_errors += int(validation.get("errors") or 0)
 
         results.append(result)
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file

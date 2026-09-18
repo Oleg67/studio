@@ -16,7 +16,8 @@ behaves exactly as it always has.
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-imports
 import argparse
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -27,14 +28,13 @@ from ..utils.toc import (
     DEFAULT_MAX_SECTION_LINES,
     DEFAULT_TOC_MAX_LEVEL,
     add_toc_max_level_argument,
+    toc_max_section_lines,
     validate_toc,
 )
 from ..utils.ui import ui
 from .validate import (
     _build_severity_policy,
     _emit_policy_config_error,
-    _merge_overrides,
-    _record_refusals,
     _show_severity_overrides,
 )
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-imports
@@ -47,6 +47,9 @@ class _TocTarget:
 
     kind: str
     options: TocOptions
+    #: The kind's `toc` switch. False means the kind has no TOC contract at
+    #: all, which `cfs validate` honours by skipping the phase entirely.
+    enabled: bool = True
 
 
 @dataclass
@@ -60,7 +63,20 @@ class _TocProject:
 
     policy: SeverityPolicy
     targets: Dict[str, _TocTarget]
-    refusals: List[Dict[str, object]] = field(default_factory=list)
+    root: Path
+
+
+def _path_key(path: Path) -> str:
+    """The lookup key for one absolute path.
+
+    Case-folded through `os.path.normcase`, which is identity on POSIX and
+    lowercases on Windows. `Path.resolve()` does not correct the case of a
+    path typed differently from the file on disk, so on a case-insensitive
+    filesystem a plain string comparison misses and the file is silently
+    treated as unregistered — losing its kind, its configured depth and its
+    kind-scoped severity with nothing said.
+    """
+    return os.path.normcase(str(path))
 
 
 def _artifact_abs_path(ctx: object, artifact_meta: object) -> Optional[Path]:
@@ -91,8 +107,17 @@ def _collect_toc_targets(ctx: object) -> Dict[str, _TocTarget]:
         kind = str(artifact_meta.kind)
         loaded_kit = (getattr(ctx, "kits", None) or {}).get(str(system_node.kit))
         by_kind = getattr(getattr(loaded_kit, "constraints", None), "by_kind", None) or {}
-        options = getattr(by_kind.get(kind), "toc_options", None) or TocOptions()
-        targets[str(artifact_path)] = _TocTarget(kind=kind, options=options)
+        # `by_kind` is keyed by the upper-cased kind the loader normalised to,
+        # while the registry stores the kind as the author spelled it. Every
+        # other kind boundary in the policy folds the case; not folding it here
+        # would silently drop a kind's whole TOC configuration for a registry
+        # that spelled `prd` in lower case, while its severities kept working.
+        kind_constraints = by_kind.get(kind.strip().upper())
+        targets[_path_key(artifact_path)] = _TocTarget(
+            kind=kind,
+            options=getattr(kind_constraints, "toc_options", None) or TocOptions(),
+            enabled=bool(getattr(kind_constraints, "toc", True)),
+        )
     return targets
 
 
@@ -114,7 +139,34 @@ def _load_toc_project(args: argparse.Namespace) -> Tuple[Optional[_TocProject], 
     policy, policy_errors = _build_severity_policy(ctx, ctx.project_root, args)
     if policy_errors:
         return None, _emit_policy_config_error(policy_errors)
-    return _TocProject(policy=policy, targets=_collect_toc_targets(ctx)), None
+    return _TocProject(
+        policy=policy,
+        targets=_collect_toc_targets(ctx),
+        root=Path(ctx.project_root).resolve(),
+    ), None
+
+
+def resolve_toc_targets() -> Dict[str, _TocTarget]:
+    """Index the surrounding project's artifacts, or return nothing outside one.
+
+    Exists so `cfs toc` can regenerate a TOC to the same depth the checks will
+    judge it at. It deliberately does not build a severity policy: regenerating
+    a table of contents is not a verdict, and a project whose `[validation]`
+    table cannot be read should not lose the command that fixes documents.
+    """
+    from ..utils.context import get_context
+
+    ctx = get_context()
+    if ctx is None:
+        return {}
+    return _collect_toc_targets(ctx)
+
+
+def target_max_level(targets: Dict[str, _TocTarget], path: Path, flag: Optional[int]) -> int:
+    """Settle a file's TOC depth the way `validate-toc` settles it."""
+    target = targets.get(_path_key(path))
+    configured = target.options.max_level if target is not None else None
+    return _resolve_toc_option(flag, configured, DEFAULT_TOC_MAX_LEVEL)
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-load-project
 
 
@@ -150,6 +202,12 @@ def _settle_file_findings(
     Outside a project there is no policy and the two lists are returned as the
     validator built them, so the command's long-standing behaviour survives
     untouched rather than travelling through a policy that configures nothing.
+
+    `outcome.refusals` is deliberately dropped. A refusal only arises where a
+    `locked` constraint entry blocks a lowering, and no TOC finding names an
+    entry — they carry neither a heading id nor an ID kind — so the list is
+    empty by construction here. Carrying it anyway would be plumbing no test
+    could ever exercise, standing in for a guarantee this command cannot make.
     """
     if project is None:
         return errors, warnings, 0
@@ -159,7 +217,6 @@ def _settle_file_findings(
         for finding in list(errors) + list(warnings):
             finding.setdefault("artifact_kind", kind)
     outcome = apply_policy(project.policy, list(errors) + list(warnings), kind=kind)
-    _record_refusals(project.refusals, outcome.refusals)
     return outcome.errors, outcome.warnings, outcome.suppressed
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-apply-policy
 
@@ -193,7 +250,9 @@ def _validate_one_file(
             "code": EC.FILE_READ_ERROR,
         }
 
-    target = project.targets.get(str(filepath)) if project is not None else None
+    target = project.targets.get(_path_key(filepath)) if project is not None else None
+    if target is not None and not target.enabled:
+        return _not_applicable_result(filepath, target)
     options = target.options if target is not None else TocOptions()
     report = validate_toc(
         content,
@@ -205,8 +264,55 @@ def _validate_one_file(
     )
     kind = target.kind if target is not None else None
     errors, warnings, suppressed = _settle_file_findings(
-        project, kind, report.get("errors", []), report.get("warnings", []))
+        _policy_for(project, target, filepath),
+        kind,
+        report.get("errors", []),
+        report.get("warnings", []),
+    )
     return _build_file_result(filepath, args, project, kind, errors, warnings, suppressed)
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-not-applicable
+def _not_applicable_result(filepath: Path, target: _TocTarget) -> dict:
+    """Report a kind that declared it has no table of contents.
+
+    `cfs validate` skips the whole TOC phase for `toc = false`, so running the
+    checks here would report findings for a contract the kit says does not
+    exist. Said out loud rather than passed in silence: a file reported as
+    clean and a file never examined are different answers, and `applicable`
+    is the field this codebase already uses to tell them apart.
+    """
+    return {
+        "file": str(filepath),
+        "status": "PASS",
+        "applicable": False,
+        "artifact_kind": target.kind,
+        "error_count": 0,
+        "warning_count": 0,
+        "message": f"{target.kind} declares toc = false; no table of contents is expected",
+    }
+# @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-not-applicable
+
+
+def _policy_for(
+    project: Optional[_TocProject],
+    target: Optional[_TocTarget],
+    filepath: Path,
+) -> Optional[_TocProject]:
+    """Decide whether this project's policy governs this particular file.
+
+    A registered artifact always belongs to the project, wherever on disk it
+    resolves — workspace sources live outside the project root by design. An
+    *unregistered* file outside the tree does not: judging someone else's
+    document by the severity of whichever project the shell happened to be in
+    is an answer about the wrong configuration, and a silent one.
+    """
+    if project is None or target is not None:
+        return project
+    root = _path_key(project.root)
+    candidate = _path_key(filepath)
+    inside = candidate == root or candidate.startswith(root.rstrip(os.sep) + os.sep)
+    return project if inside else None
 
 
 def _build_file_result(
@@ -282,7 +388,7 @@ def cmd_validate_toc(argv: List[str]) -> int:
     add_toc_max_level_argument(p, default=None)
     p.add_argument(
         "--max-section-lines",
-        type=int,
+        type=toc_max_section_lines,
         default=None,
         help=(
             "Warn when a section exceeds this many lines (default: the artifact "
@@ -371,7 +477,10 @@ def _attach_toc_policy_report(
         output["suppressed_count"] = suppressed
     if project is None:
         return
-    overrides = _merge_overrides(declared_overrides(project.policy), project.refusals)
+    # Configuration-derived, which is the whole list for this command: a rule
+    # lowered to `off` emits nothing at all, and that is exactly the setting a
+    # reader most needs named.
+    overrides = declared_overrides(project.policy)
     if overrides:
         output["severity_overrides"] = overrides
 # @cpt-end:cpt-studio-algo-traceability-validation-validate-toc:p1:inst-toc-policy-report
@@ -383,8 +492,13 @@ def _human_validate_toc_file(r: dict) -> None:
     path = r.get("file", "?")
     status = r.get("status", "?")
     warns = r.get("warning_count", 0)
+    if r.get("applicable") is False:
+        # Not "unchanged": a file nobody checked must not read like a clean one.
+        ui.substep(f"{path}: skipped — {r.get('message', 'not applicable')}")
+        return
     if status == "PASS":
         ui.file_action(path, "unchanged")
+        _show_file_policy_note(r)
         return
     if status == "ERROR":
         ui.error(f"{path}: {r.get('message', 'unknown error')}")
@@ -396,10 +510,28 @@ def _human_validate_toc_file(r: dict) -> None:
         ui.warn(f"{path}: {r.get('error_count', 0)} error(s), {warns} warning(s)")
     else:
         ui.warn(f"{path}: {warns} warning(s)")
+    _show_file_policy_note(r)
     for e in r.get("errors", []):
         ui.substep(f"  ✗ {e}")
     for w in r.get("warnings", []):
         ui.substep(f"  ⚠ {w}")
+
+
+def _show_file_policy_note(r: dict) -> None:
+    """Attribute this file's kind and its own suppressions, when there are any.
+
+    The run-level suppressed count cannot say *which* file was quietened, so
+    over several files a terminal reader could see that something was
+    suppressed and have no way to find out where.
+    """
+    kind = r.get("artifact_kind")
+    suppressed = int(r.get("suppressed_count") or 0)
+    if not kind and not suppressed:
+        return
+    note = f"kind {kind}" if kind else "no registered kind"
+    if suppressed:
+        note += f", {suppressed} finding(s) suppressed"
+    ui.substep(f"  ({note})")
 
 
 def _human_validate_toc_summary(data: dict) -> None:

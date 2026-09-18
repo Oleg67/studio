@@ -365,6 +365,38 @@ def _expand_blank_line_region(lines: List[str], start: int, end: int) -> Tuple[i
     return start, end
 
 
+def toc_max_level(value: str) -> int:
+    """Parse a `--max-level` argument, refusing a level Markdown does not have.
+
+    Unbounded, this is a silent false PASS rather than a wrong answer: a level
+    of 0 filters out every heading, `validate_toc` returns early on an empty
+    heading list, and the TOC-existence, anchor and completeness checks never
+    run at all. The kit-side option is bounded to 1-6 for the same reason, so
+    bounding it here also stops the flag and the configuration disagreeing
+    about what a valid depth is.
+    """
+    level = _toc_positive_int(value, "--max-level")
+    if level > 6:
+        raise argparse.ArgumentTypeError(
+            f"--max-level must be between 1 and 6 (Markdown has six heading levels), got {level}")
+    return level
+
+
+def toc_max_section_lines(value: str) -> int:
+    """Parse a `--max-section-lines` argument, refusing a non-positive length."""
+    return _toc_positive_int(value, "--max-section-lines")
+
+
+def _toc_positive_int(value: str, flag: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{flag} must be an integer, got {value!r}") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"{flag} must be 1 or more, got {parsed}")
+    return parsed
+
+
 def add_toc_max_level_argument(
     parser: argparse.ArgumentParser,
     *,
@@ -386,7 +418,7 @@ def add_toc_max_level_argument(
         help_text = f"Maximum heading level to include (default: {default})"
     parser.add_argument(
         "--max-level",
-        type=int,
+        type=toc_max_level,
         default=default,
         help=help_text,
     )

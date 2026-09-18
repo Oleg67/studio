@@ -387,7 +387,11 @@ max_level = 2
 max_section_lines = 150
 ```
 
-Both are optional, and an unset option means the kind has no opinion rather than that it asked for the default — which is what lets an explicit flag, a configured value and a fallback be told apart. Precedence per file is: an explicit command-line flag, else the artifact kind's configured value, else the engine default. When two kits configure the same kind, the stricter value wins: the deeper `max_level`, the smaller `max_section_lines`. Both bounds also govern structure validation inside `cfs validate`, which checked every kind at a fixed depth of 3 before.
+Both are optional, and an unset option means the kind has no opinion rather than that it asked for the default — which is what lets an explicit flag, a configured value and a fallback be told apart. Precedence per file is: an explicit command-line flag, else the artifact kind's configured value, else the engine default. When one kit binds several constraints files that configure the same kind, the stricter value wins: the deeper `max_level`, the smaller `max_section_lines`.
+
+Both bounds also govern structure validation inside `cfs validate`, which checked every kind at a fixed depth of 3 before, and the regeneration `cfs toc` performs — generating a table at one depth and judging it at another would make the documented way to repair a stale table hand back a file that fails validation.
+
+A kind that sets `toc = false` has no table-of-contents contract. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as `"status": "PASS"` with `"applicable": false` and a message naming the kind, rather than checking it anyway or passing it in silence.
 
 **Behavior**:
 1. Parse arguments; load the surrounding project's policy and registered artifact kinds when there is one.
@@ -395,9 +399,16 @@ Both are optional, and an unset option means the kind has no opinion rather than
 3. Restamp each finding at its configured severity, dropping those set to `off` and re-partitioning the rest between errors and warnings.
 4. Report per-file and overall counts, plus what the policy changed.
 
-**Output**: `{status, files_validated, error_count, warning_count, results}`. Each `results[]` entry carries `{file, status, error_count, warning_count}`, its `artifact_kind` when the registry knows the file, and its `suppressed_count` when the policy removed findings from it; `errors` and `warnings` arrays appear when non-empty or under `--verbose`. The run adds `suppressed_count` and `severity_overrides` whenever either is non-empty, and `failed_on: "warnings"` when `--fail-on-warnings` or `fail_on_warnings = true` turned a warning-only run into a failure.
+**Output**: `{status, files_validated, error_count, warning_count, results}`. A checked `results[]` entry carries `{file, status, error_count, warning_count}`, its `artifact_kind` when the registry knows the file, and its `suppressed_count` when the policy removed findings from it; `errors` and `warnings` arrays appear when non-empty or under `--verbose`. The run adds `suppressed_count` and `severity_overrides` whenever either is non-empty, and `failed_on: "warnings"` when `--fail-on-warnings` or `fail_on_warnings = true` turned a warning-only run into a failure.
 
-`status` is `PASS`, `WARN` or `FAIL`. Unlike `validate` and `validate-kits`, this command keeps a third status: nothing keys off its `PASS`, so a warning-only run can say so rather than being flattened into one of two verdicts.
+Two `results[]` entries have a different shape, and a consumer indexing `error_count` unconditionally will not find it on either:
+
+- A file that is missing or cannot be read is `{file, status: "ERROR", message, code}` with no counts. One bad file does not abort the batch.
+- A file whose kind sets `toc = false` is `{file, status: "PASS", applicable: false, artifact_kind, message}` with both counts at zero.
+
+`status` is `PASS`, `WARN`, `FAIL` or `ERROR` — the last at the top level when the severity configuration cannot be read, and per file for the missing/unreadable case above. Unlike `validate` and `validate-kits`, this command keeps `WARN`: nothing keys off its `PASS`, so a warning-only run can say so rather than being flattened into one of two verdicts.
+
+**Scope**: the policy governs every registered artifact wherever on disk it resolves — a workspace source lives outside the project root by design. An *unregistered* file outside the project tree is validated as if there were no project at all, rather than being judged by the severity of whichever project the shell happened to be in. Unlike `cfs validate`, this command does not skip artifacts belonging to a kit in a legacy (non-CFS) format: it needs only the registry's kind, not a resolvable template, so the project's per-kind policy still reaches those files.
 
 **Exit**: 0=PASS or WARN, 2=FAIL, 1=ERROR (unreadable severity configuration).
 
