@@ -511,3 +511,55 @@ def test_a_judge_that_raises_is_still_reported_as_raising(monkeypatch) -> None:
     assert result.verdict == VERDICT_UNKNOWN
     assert "raised" in result.findings[0]
     assert "model refused" in result.findings[0]
+
+
+# --- a judge that hangs is an operational failure, not a wrong answer -------
+
+def test_calibrate_treats_a_timed_out_judge_like_a_crashing_one(monkeypatch) -> None:
+    """A slow judge must not deflate the accuracy it is being measured on.
+
+    `_score_case` recognised only "judge error", so the timeout path added beside the
+    crash path fell through: the forced UNKNOWN was compared against the gold verdict,
+    counted as a mismatch, and reported as the model being wrong (#234 review).
+    """
+    import threading
+
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 0.2)
+    release = threading.Event()
+
+    try:
+        cal = calibrate([(_scenario(), _run(), Gold(verdict="compliant"))],
+                        lambda _r: release.wait(30), runs=2)
+    finally:
+        release.set()
+
+    assert cal.accuracy is None, "nothing was measurable, and None is not 0.0"
+    assert cal.excluded == ["s"]
+
+
+def test_calibrate_still_scores_a_judge_that_answers(monkeypatch) -> None:
+    """The exclusion must not start swallowing real results."""
+    from studio.utils import eval_judge as ej
+
+    monkeypatch.setattr(ej, "_JUDGE_TIMEOUT_SECONDS", 5.0)
+    cal = calibrate([(_scenario(), _run(), Gold(verdict="compliant"))],
+                    _stub("compliant"), runs=2)
+
+    assert cal.accuracy == 1.0
+    assert cal.excluded == []
+
+
+def test_every_operational_coverage_literal_is_registered() -> None:
+    """The two strings `score()` writes and the tuple `calibrate` reads must not drift.
+
+    They drifted once already: the timeout literal was added without being registered,
+    which is the whole finding.
+    """
+    from studio.utils import eval_judge as ej
+
+    source = Path(ej.__file__).read_text(encoding="utf-8")
+    for mark in ("judge error", "judge timeout"):
+        assert f'"{mark}"' in source
+        assert mark in ej._JUDGE_OPERATIONAL_FAILURES

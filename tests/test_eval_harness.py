@@ -461,3 +461,25 @@ def test_a_non_finite_baseline_for_a_departed_scenario_is_not_reported() -> None
     diff = eh.diff_reports(report, baseline)
 
     assert diff["no_longer_scoreable"] == []
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), True, "0.9", None],
+                         ids=["nan", "inf", "bool", "string", "none"])
+def test_a_corrupt_aggregate_baseline_is_reported_as_missing(bad: object) -> None:
+    """The aggregate was left unguarded while the per-scenario values were hardened.
+
+    It is the number a reader *sees*: NaN rendered beside a real `aggregate_after` reads
+    as a measurement rather than as missing data, and `True` renders as `True` (#234
+    review).
+    """
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {"structural_compliance": bad}, "per_scenario": []}
+
+    assert eh.diff_reports(report, baseline)["aggregate_before"] is None
+
+
+def test_a_usable_aggregate_baseline_still_comes_through() -> None:
+    report = eh.run_suite(FIXTURES, [eh.ReferencePresenceScorer()])
+    baseline = {"summary": {"structural_compliance": 0.75}, "per_scenario": []}
+
+    assert eh.diff_reports(report, baseline)["aggregate_before"] == 0.75

@@ -382,7 +382,10 @@ def _declares_outputs(front: Dict[str, object]) -> bool:
     """
     for key in ("outputs", "output_files"):
         value = front.get(key)
-        if isinstance(value, (list, tuple)) and any(
+        # `all`, not `any`, over a non-empty container: `outputs = ["step.out", 1]` and
+        # `["step.out", ""]` passed an `any` check while still violating the contract.
+        # One good entry does not make the list a list of output names (#234 review).
+        if isinstance(value, (list, tuple)) and value and all(
                 isinstance(item, str) and item.strip() for item in value):
             return True
     return False
@@ -413,15 +416,23 @@ def _prose_headings(raw_body: str) -> str:
     front, normalised = _match_frontmatter(raw_body)
     body = normalised[front.end():] if front else normalised
     visible: List[str] = []
-    fence: str = ""
+    fence: Optional[Tuple[str, int]] = None
     for line in body.splitlines():
         stripped = line.lstrip()
-        if fence:
-            if stripped.startswith(fence):
-                fence = ""
+        if fence is not None:
+            # CommonMark: a closer is the same character, at least as long as the
+            # opener, and nothing but whitespace after it. Storing only three
+            # characters meant a ```` ~~~~ ```` block was closed by a later ``~~~``,
+            # and an info string (```` ```python ````) counted as a closer -- either
+            # way the `## Rules` below became visible again (#234 review).
+            char, opener_length = fence
+            run = len(stripped) - len(stripped.lstrip(char))
+            if run >= opener_length and not stripped[run:].strip():
+                fence = None
             continue
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            fence = stripped[0] * 3
+        if stripped.startswith(("```", "~~~")):
+            char = stripped[0]
+            fence = (char, len(stripped) - len(stripped.lstrip(char)))
             continue
         visible.append(line)
     return "\n".join(visible)

@@ -310,6 +310,17 @@ def load_gold(gold_path: Optional[Path]) -> Optional[Gold]:
 #: no verdict and no message.
 _JUDGE_TIMEOUT_SECONDS = 120.0
 
+#: Coverage strings that mark an *operational* failure of the injected judge rather
+#: than a disagreement with the gold verdict. `calibrate` excludes these cases instead
+#: of scoring their forced UNKNOWN as a mismatch, so a flaky or slow judge cannot
+#: silently deflate the accuracy numbers the calibration exists to report.
+#:
+#: A tuple rather than one literal because there are two ways to fail operationally and
+#: only one of them was recognised: the timeout path added alongside the crash path was
+#: not wired in here, so a judge that hung was counted as a model that was wrong
+#: (#234 review).
+_JUDGE_OPERATIONAL_FAILURES = ("judge error", "judge timeout")
+
 # @cpt-begin:cpt-studio-algo-eval-judge:p1:inst-judge-scorer
 class AdvisoryJudge:  # pylint: disable=too-few-public-methods
     """Score a run's rule-compliance via an injected model. ADVISORY: it can never gate.
@@ -476,12 +487,14 @@ def _score_case(judge: AdvisoryJudge, scenario: Scenario, run: Optional[RunArtif
                 gold: Gold, runs: int) -> "Tuple[bool, bool, float, Dict[str, object]]":
     """Judge one gold-backed case ``runs`` times → ``(errored, matched, consistency, report_row)``.
 
-    ``errored`` marks a ``judge_fn`` *crash* (a transient operational failure, e.g. an LLM API
-    error) as opposed to a model disagreement — the caller excludes it rather than scoring the
-    forced UNKNOWN as a mismatch, so a flaky judge does not silently deflate accuracy.
+    ``errored`` marks an *operational* failure of the ``judge_fn`` — a crash (an LLM API
+    error, say) or a call that never returned — as opposed to a model disagreement. The caller
+    excludes it rather than scoring the forced UNKNOWN as a mismatch, so a judge that is flaky
+    *or slow* does not silently deflate accuracy. See :data:`_JUDGE_OPERATIONAL_FAILURES`.
     """
     results = [judge.score(run, scenario) for _ in range(runs)]
-    errored = any("judge error" in (result.coverage or "") for result in results)
+    errored = any(mark in (result.coverage or "")
+                  for result in results for mark in _JUDGE_OPERATIONAL_FAILURES)
     majority, count = _majority([result.verdict for result in results])
     expected = _VERDICT_BY_LABEL.get(gold.verdict, VERDICT_UNKNOWN)
     matched = majority == expected

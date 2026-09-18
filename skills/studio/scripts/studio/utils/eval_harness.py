@@ -430,6 +430,26 @@ def report_to_dict(report: EvalReport) -> Dict[str, object]:
 
 
 # @cpt-begin:cpt-studio-algo-eval-harness-run:p1:inst-diff-reports
+def _aggregate_baseline(baseline_summary: object) -> Optional[float]:
+    """The baseline's overall compliance, or ``None`` when it is not a usable number."""
+    if not isinstance(baseline_summary, dict):
+        return None
+    value = baseline_summary.get("structural_compliance")
+    return value if _usable_baseline(value) else None
+
+
+def _usable_baseline(value: object) -> bool:
+    """Whether a baseline number can be compared against at all.
+
+    Excludes bool (an int subclass) and the non-finite floats, which survive an
+    ``isinstance`` check and then fail every comparison silently. Shared by the
+    per-scenario values and the aggregate, which were hardened separately and so
+    disagreed about what counted as a number (#234 review).
+    """
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
 def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, object]:
     """Per-scenario compliance change vs a baseline report, bucketed.
 
@@ -464,8 +484,7 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         # joined neither `regressed` nor `improved` and `has_regression` stayed False even
         # for a drop to zero. A corrupt or hand-edited baseline switched the gate off and
         # said nothing.
-        if (not isinstance(before, (int, float)) or isinstance(before, bool)
-                or not math.isfinite(before)):
+        if not _usable_baseline(before):
             before = None
         if before is None:
             if now is not None:
@@ -478,8 +497,7 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         elif now > before:
             improved.append({"scenario": scenario_id, "from": before, "to": now})
     for scenario_id, before in prev.items():
-        if (scenario_id not in seen and isinstance(before, (int, float))
-                and not isinstance(before, bool) and math.isfinite(before)):
+        if scenario_id not in seen and _usable_baseline(before):
             # gone from the suite entirely — surfaced, but not a gate-worthy regression.
             no_longer_scoreable.append({"scenario": scenario_id, "from": before})
     baseline_summary = baseline.get("summary", {})
@@ -488,8 +506,10 @@ def diff_reports(report: EvalReport, baseline: Dict[str, object]) -> Dict[str, o
         "improved": improved,
         "newly_scoreable": newly_scoreable,
         "no_longer_scoreable": no_longer_scoreable,
-        "aggregate_before": (baseline_summary.get("structural_compliance")
-                             if isinstance(baseline_summary, dict) else None),
+        # Guarded like the per-scenario values above: a corrupt baseline's aggregate is
+        # a number the report *shows a reader*, and NaN rendered beside a real
+        # `aggregate_after` reads as a measurement rather than as missing data.
+        "aggregate_before": _aggregate_baseline(baseline_summary),
         "aggregate_after": structural_compliance(report),
         "has_regression": bool(regressed),   # removals are surfaced, not gated
     }

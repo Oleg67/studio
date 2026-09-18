@@ -506,3 +506,57 @@ def test_real_sections_after_a_tilde_fence_are_still_found() -> None:
                manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
 
     assert "required-sections-present" not in _findings_for(run)
+
+
+@pytest.mark.parametrize("declared", ['["step.out", 1]', '["step.out", ""]', '["", ""]'],
+                         ids=["mixed-types", "empty-entry", "all-empty"])
+def test_one_good_entry_does_not_make_a_valid_output_list(declared: str) -> None:
+    """`any` accepted a list whose *other* entries violated the contract.
+
+    A list of output names is a list of output names; one usable entry beside a `1` or
+    an empty string is malformed frontmatter, and giving it structural credit hides the
+    authoring error (#234 review).
+    """
+    body = (f'```toml\n[phase]\nnumber = 1\ntotal = 1\noutputs = {declared}\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "every-phase-declares-an-output" in _findings_for(run)
+
+
+def test_a_longer_tilde_fence_is_not_closed_by_a_shorter_one() -> None:
+    """CommonMark: a closer is at least as long as its opener.
+
+    Storing only three characters meant a `~~~~` block was closed by a later `~~~`, and
+    the `## Rules` after it became visible again.
+    """
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\n'
+            '~~~~\nnot a closer: ~~~\n## Rules\nstill inside the four-tilde block\n~~~~\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "Rules" in _findings_for(run)["required-sections-present"]
+
+
+def test_an_info_string_does_not_close_a_fence() -> None:
+    """A closer carries nothing but whitespace, so ```` ```python ```` opens, never closes."""
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n## What\n\n'
+            '```\nsample\n```python\n## Rules\n```\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "Rules" in _findings_for(run)["required-sections-present"]
+
+
+def test_a_longer_closer_than_the_opener_still_closes() -> None:
+    """"At least as long" — a `~~~~~` closer for a `~~~` opener is valid, and the
+    sections after it must be found again."""
+    body = ('```toml\n[phase]\nnumber = 1\ntotal = 1\noutput_files = ["x"]\n```\n\n'
+            '## Preamble\n\nx\n\n~~~\nsample\n~~~~~\n\n## What\n\nx\n\n## Rules\n\nx\n')
+    run = _run(phase_texts={"phase-1.md": body},
+               manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
+
+    assert "required-sections-present" not in _findings_for(run)
