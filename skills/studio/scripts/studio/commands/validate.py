@@ -795,7 +795,7 @@ def _validate_one_artifact(
         policy=session.policy,
     )
     results.suppressed_count += int(report.get("suppressed") or 0)
-    _record_refusals(results, report.get("refusals") or [])
+    _record_refusals(results.refusals, report.get("refusals") or [])
     artifact_report = _build_artifact_report(
         artifact_path=artifact_path,
         artifact_type=artifact_type,
@@ -1533,7 +1533,10 @@ def _show_explained_rules(rules: List[Dict[str, object]]) -> None:
 
 
 # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-apply-policy
-def _record_refusals(results: _ValidateResults, rows: List[Dict[str, object]]) -> None:
+def _record_refusals(
+    collected: List[Dict[str, object]],
+    rows: List[Dict[str, object]],
+) -> None:
     """Collect refusals across passes, once per refused rule.
 
     The per-artifact pass and the command-level pass both meet the same
@@ -1541,14 +1544,17 @@ def _record_refusals(results: _ValidateResults, rows: List[Dict[str, object]]) -
     produced. Deduplicating on the rule rather than the finding keeps one
     refused rule reading as one line however many findings it covered, and
     however many passes saw them.
+
+    Takes the list rather than the results object so `validate-toc`, whose
+    passes are per file, accumulates refusals under the same rule.
     """
-    seen = {(row.get("code"), row.get("kind"), row.get("entry")) for row in results.refusals}
+    seen = {(row.get("code"), row.get("kind"), row.get("entry")) for row in collected}
     for row in rows:
         identity = (row.get("code"), row.get("kind"), row.get("entry"))
         if identity in seen:
             continue
         seen.add(identity)
-        results.refusals.append(row)
+        collected.append(row)
 
 
 def _apply_run_policy(session: _ValidateSession, results: _ValidateResults) -> None:
@@ -1557,7 +1563,7 @@ def _apply_run_policy(session: _ValidateSession, results: _ValidateResults) -> N
     results.all_errors = outcome.errors
     results.all_warnings = outcome.warnings
     results.suppressed_count += outcome.suppressed
-    _record_refusals(results, outcome.refusals)
+    _record_refusals(results.refusals, outcome.refusals)
     _reconcile_artifact_reports(results)
 
 

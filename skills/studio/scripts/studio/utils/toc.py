@@ -33,6 +33,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+
+#: How deep TOC checking goes when nobody says otherwise. Named rather than
+#: written as a bare 3 at each site: the CLI default and the depth structure
+#: validation applies are the same decision, and they drifted apart silently
+#: while it was spelled twice.
+DEFAULT_TOC_MAX_LEVEL = 3
 # @cpt-end:cpt-studio-algo-traceability-validation-toc-utils:p1:inst-toc-util-datamodel
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-toc-utils:p1:inst-toc-util-fence-update
@@ -359,13 +365,30 @@ def _expand_blank_line_region(lines: List[str], start: int, end: int) -> Tuple[i
     return start, end
 
 
-def add_toc_max_level_argument(parser: argparse.ArgumentParser) -> None:
-    """Register the shared TOC max-level CLI argument."""
+def add_toc_max_level_argument(
+    parser: argparse.ArgumentParser,
+    *,
+    default: Optional[int] = DEFAULT_TOC_MAX_LEVEL,
+) -> None:
+    """Register the shared TOC max-level CLI argument.
+
+    ``default=None`` lets a caller tell "not given" from "given as 3", which is
+    what a configured per-kind depth needs: with a real default in place the
+    flag is always set, so configuration could never be reached and an explicit
+    ``--max-level 3`` could never be distinguished from silence.
+    """
+    if default is None:
+        help_text = (
+            "Maximum heading level to include (default: the artifact kind's "
+            f"configured level, else {DEFAULT_TOC_MAX_LEVEL})"
+        )
+    else:
+        help_text = f"Maximum heading level to include (default: {default})"
     parser.add_argument(
         "--max-level",
         type=int,
-        default=3,
-        help="Maximum heading level to include (default: 3)",
+        default=default,
+        help=help_text,
     )
 
 
