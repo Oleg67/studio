@@ -802,7 +802,7 @@ def test_prompt_runtime_references_use_cf_studio_path() -> None:
 # this set has to declare a TYPE.
 # Shrink this set as menus are typed; never add to it.
 UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
-    "architecture/specs/PDSL.md#13::SubAgentApprovalMenu",
+    "architecture/specs/PDSL.md#14::SubAgentApprovalMenu",
     "architecture/specs/PDSL.md#7::ApprovalMenu",
     "requirements/auto-config.md#2::ExistingRulesRefreshMenu",
     "requirements/storytelling-modes.md#0::ModeSelectionMenu",
@@ -923,14 +923,17 @@ UNTYPED_MENU_BASELINE_CEILING = 111
 
 
 
-def _menu_type_declarations() -> dict[str, str | None]:
-    """Map every `<path>::<MenuName>` in the prompt roots to its declared TYPE.
+def _menu_declaration_scan(header: str, valid_tokens: tuple[str, ...]) -> dict[str, str | None]:
+    """Map every `<path>::<MenuName>` in the prompt roots to its declared *header* value.
 
-    Built from the validator's own block scanner and regexes rather than a
-    second parser, so this guard cannot disagree with the checker it guards
+    Shared by `_menu_type_declarations()` (TYPE) and `_menu_shape_declarations()`
+    (SHAPE, issue #186): both read the same MENU declaration region and differ
+    only in which header's value they extract, so the scan itself is written
+    once. Built from the validator's own block scanner and regexes rather than
+    a second parser, so this guard cannot disagree with the checker it guards
     about what a MENU is or where a declaration is read. A private
     reimplementation previously missed indented MENU headers and headers with
-    trailing text, and read `TYPE:` out of prose outside the fence.
+    trailing text, and read a declaration out of prose outside the fence.
     """
     declarations: dict[str, str | None] = {}
     seen_declaration: set[str] = set()
@@ -968,31 +971,46 @@ def _menu_type_declarations() -> dict[str, str | None]:
                 section = head.group("section")
                 # Mirrors the validator's continuation rule: a line indented
                 # deeper than this menu's first sub-header is that header's own
-                # text. Without it an over-indented `TYPE:` counted here while
-                # the validator ignored it, so a newly added menu could leave
-                # the untyped set with no declaration the validator can see.
+                # text. Without it an over-indented declaration counted here
+                # while the validator ignored it, so a newly added menu could
+                # leave the baseline with no declaration the validator can see.
                 if sub_header_indent is None:
                     sub_header_indent = indent
                 elif section not in pdsl.MENU_SUB_HEADERS and indent > sub_header_indent:
                     continue
-                if section == pdsl.GATE_HEADER:
+                if section == header:
                     # Latch on the FIRST declaration, mirroring the validator's
-                    # `state.menu_type_line`: it flags every later TYPE line as a
-                    # duplicate whatever its value, so a menu whose first
-                    # declaration is invalid stays untyped no matter what follows.
+                    # own per-header state: it flags every later line of this
+                    # header as a duplicate whatever its value, so a menu whose
+                    # first declaration is invalid stays undeclared no matter
+                    # what follows.
                     if current in seen_declaration:
                         continue
                     seen_declaration.add(current)
-                    value = stripped[len(pdsl.GATE_HEADER) + 1:].strip()
+                    value = stripped[len(header) + 1:].strip()
                     # A value the validator would reject is not a declaration.
-                    if value in pdsl.GATE_TYPES:
+                    if value in valid_tokens:
                         declarations[current] = value
                     continue
-                # Mirrors the validator: only a recognized section other than
-                # TITLE or TYPE ends the region. Prose does not.
-                if section in pdsl.SECTION_HEADERS and section != "TITLE":
+                # Mirrors the validator's own DECLARED_HEADER_NON_TERMINATORS
+                # (imported, not re-derived as a separate literal): only a
+                # recognized section outside that set ends the region, so the
+                # *other* declared header can never end this one's region --
+                # a TYPE/SHAPE pair declared in either order would otherwise
+                # leave the second one unread. Prose does not end it either.
+                if section in pdsl.SECTION_HEADERS and section not in pdsl.DECLARED_HEADER_NON_TERMINATORS:
                     in_region = False
     return declarations
+
+
+def _menu_type_declarations() -> dict[str, str | None]:
+    """Map every `<path>::<MenuName>` in the prompt roots to its declared TYPE."""
+    return _menu_declaration_scan(pdsl.GATE_HEADER, pdsl.GATE_TYPES)
+
+
+def _menu_shape_declarations() -> dict[str, str | None]:
+    """Map every `<path>::<MenuName>` in the prompt roots to its declared SHAPE (issue #186)."""
+    return _menu_declaration_scan(pdsl.MENU_SHAPE_HEADER, pdsl.MENU_SHAPE_TYPES)
 
 
 #: The paths that auto-resolve a gate by runtime judgement rather than by reading
@@ -1118,6 +1136,182 @@ def test_the_untyped_menu_surface_does_not_grow() -> None:
     stale = sorted(UNTYPED_MENU_BASELINE - set(declarations))
     assert not stale, (
         "UNTYPED_MENU_BASELINE lists MENU(s) that no longer exist:\n  "
+        + "\n  ".join(stale)
+        + "\n\nRemove them from the baseline."
+    )
+
+
+# Every MENU that does not yet declare a shape, frozen 2026-09-17 (issue #186).
+# `SHAPE` is new: only the PDSL.md spec's own illustrative example (issue #186)
+# declares it, so this baseline currently covers nearly the entire corpus. The
+# surface migrates menu by menu and must not grow -- anything not in this set
+# has to declare a SHAPE. Shrink this set as menus are shaped; never add to it.
+#
+# Grouped by file (one entry per file, listing that file's undeclared menu
+# suffixes) rather than one flat `"path#idx::Name"` string per line: almost
+# every path here also appears in UNTYPED_MENU_BASELINE above, since neither
+# TYPE nor SHAPE is declared on most of the corpus yet, and a flat list in the
+# same shape as that one showed up as duplicate code against it. Grouping
+# changes nothing this baseline asserts -- `UNSHAPED_MENU_BASELINE` below is
+# still the same flat frozenset of `"path#idx::Name"` strings every test in
+# this module already expects.
+UNSHAPED_MENU_BASELINE_BY_FILE: dict[str, frozenset[str]] = {
+    "architecture/specs/PDSL.md": frozenset({"14::SubAgentApprovalMenu", "7::ApprovalMenu", "8::PlanApprovalGate"}),
+    "requirements/auto-config.md": frozenset({"2::ExistingRulesRefreshMenu"}),
+    "requirements/storytelling-modes.md": frozenset({
+        "0::ModeSelectionMenu", "5::ChallengePostRoundMenu", "5::ChallengeReactionMenu",
+    }),
+    "skills/studio/agents/cf-code-bug-finder.md": frozenset({"3::TerminalStates"}),
+    "skills/studio/agents/cf-generate-author.md": frozenset({"1::DomainClassification"}),
+    "skills/studio/agents/cf-migrate-migrator.md": frozenset({"3::SpecialCaseAItems"}),
+    "skills/studio/agents/cf-migrate-planner.md": frozenset({"0::FindingClassification"}),
+    "skills/studio/agents/cf-prompt-bug-finder.md": frozenset({"3::TerminalStates"}),
+    "skills/studio/agents/cf-ralphex.md": frozenset({
+        "2::DelegationOutcomeMenu", "4::BootstrapApprovalMenu", "4::RetryOrAbortMenu",
+    }),
+    "skills/studio/agents/cf-semantic-reviewer-code.md": frozenset({"2::OutputShape"}),
+    "skills/studio/agents/cf-semantic-reviewer-consistency.md": frozenset({"3::FindingClassificationRules"}),
+    "skills/studio/agents/storytelling-gate.md": frozenset({"4::GenerateRoutingMenu", "6::PlanApprovalMenu"}),
+    "skills/studio/migrate-from-cypilot.md": frozenset({
+        "4::E1_ScannerMenu", "5::E2_PlannerMenu", "6::E3_MigratorMenu",
+        "7::E4_VerifierMenu", "8::E5_MigratorMenu",
+    }),
+    "skills/studio/modules/analyze-routing-menus.md": frozenset({"1::AnalyzeIntentOffer", "2::AnalyzeLoadOffer"}),
+    "skills/studio/modules/analyze-skill-fallbacks.md": frozenset({
+        "0::AnalyzeOtherSkillsMenu", "1::AnalyzeNoMatchMenu",
+    }),
+    "skills/studio/modules/auto-config-detect.md": frozenset({"0::DetectConfirmMenu"}),
+    "skills/studio/modules/auto-config-docs.md": frozenset({"0::DocsConfirmMenu"}),
+    "skills/studio/modules/auto-config-generate.md": frozenset({"0::GenerateConfirmMenu"}),
+    "skills/studio/modules/auto-config-integrate-validate.md": frozenset({"0::IntegrateConfirmMenu"}),
+    "skills/studio/modules/auto-config-precheck.md": frozenset({"0::ExistingRulesRefreshMenu"}),
+    "skills/studio/modules/auto-config-scan-docs.md": frozenset({"0::ScanConfirmMenu"}),
+    "skills/studio/modules/brainstorm-panel-render.md": frozenset({"0::PanelEditMenu"}),
+    "skills/studio/modules/brainstorm-rounds.md": frozenset({"0::PostRoundMenu", "0::QuestionMenu"}),
+    "skills/studio/modules/brainstorm-wrap.md": frozenset({"0::WrapMenu"}),
+    "skills/studio/modules/ci-discovery-run.md": frozenset({"0::CiDiscoveryFailureMenu", "0::CiDiscoverySkipMenu"}),
+    "skills/studio/modules/coding-prep-gates.md": frozenset({"0::CodingExploreMenu", "1::CodingBrainstormMenu"}),
+    "skills/studio/modules/debug-prompts-command-menu-nav.md": frozenset({"0::DebuggerMenu"}),
+    "skills/studio/modules/debug-prompts-failures.md": frozenset({
+        "0::DebugRunFailureMenu", "0::DebugStepFailureMenu",
+    }),
+    "skills/studio/modules/explain-intent-explore.md": frozenset({"2::ExplainExploreMenu"}),
+    "skills/studio/modules/explore-clarify.md": frozenset({"0::ExploreClarifyMenu"}),
+    "skills/studio/modules/explore-save.md": frozenset({"0::ExploreSaveMenu"}),
+    "skills/studio/modules/gates/migrate-from-cypilot-offer.md": frozenset({"0::MigrateFromCypilotConfirm"}),
+    "skills/studio/modules/gates/plan-first.md": frozenset({"0::PlanFirstConfirm", "1::PlanStorageChoice"}),
+    "skills/studio/modules/gates/simple-mode-simple.md": frozenset({"2::SimpleModeBraveNewWorldChoice"}),
+    "skills/studio/modules/gates/simple-mode.md": frozenset({"0::SimpleModeChoice"}),
+    "skills/studio/modules/gates/workflow-prep.md": frozenset({"1::WorkflowPrepExploreRepeatMenu"}),
+    "skills/studio/modules/generate-routing-menus.md": frozenset({"1::GenerateIntentOffer", "2::GenerateLoadOffer"}),
+    "skills/studio/modules/generate-skill-fallbacks.md": frozenset({
+        "0::GenerateOtherSkillsMenu", "1::GenerateNoMatchMenu",
+    }),
+    "skills/studio/modules/kit-discovery-proposal.md": frozenset({"0::KitInitDiscoveryApprovalMenu"}),
+    "skills/studio/modules/kit-discovery-run.md": frozenset({"0::KitInitDiscoveryFailureMenu"}),
+    "skills/studio/modules/kit-edit-render.md": frozenset({"0::KitInitEditRetryMenu"}),
+    "skills/studio/modules/kit-existing-manifest.md": frozenset({"0::KitInitExistingManifestMenu"}),
+    "skills/studio/modules/kit-legacy-preview-menus.md": frozenset({
+        "0::KitInitLegacyApprovalMenu", "0::KitInitPreviewFailureMenu",
+    }),
+    "skills/studio/modules/kit-manual-guidance-preview.md": frozenset({"0::KitInitManualGuidanceRetryMenu"}),
+    "skills/studio/modules/kit-target-entry.md": frozenset({"0::KitInitTargetMenu"}),
+    "skills/studio/modules/kit-target-preflight-route.md": frozenset({"0::KitInitTargetRetryMenu"}),
+    "skills/studio/modules/kit-target-validation.md": frozenset({"0::KitInitValidationFailureMenu"}),
+    "skills/studio/modules/map-config-palette.md": frozenset({
+        "0::ConfigAssistActionMenu", "0::PaletteMenu", "0::UncategorizedMenu",
+    }),
+    "skills/studio/modules/map-execute.md": frozenset({"0::ConfigAssistOfferMenu", "0::MapConfigMenu"}),
+    "skills/studio/modules/map-intent.md": frozenset({"0::MapIntentMenu"}),
+    "skills/studio/modules/map-next.md": frozenset({"0::MapNextStepsMenu"}),
+    "skills/studio/modules/map-preflight.md": frozenset({"2::MapScopeMenu"}),
+    "skills/studio/modules/plan-compile.md": frozenset({"0::PlanProduceChoice"}),
+    "skills/studio/modules/plan-compiler-dispatch.md": frozenset({"2::PlanCompilerFailureMenu"}),
+    "skills/studio/modules/plan-discovery.md": frozenset({"1::PlanGateMenu"}),
+    "skills/studio/modules/plan-validate-finalize.md": frozenset({
+        "0::OversizedPhaseRecoveryMenu", "1::Phase4NextStepsMenu",
+    }),
+    "skills/studio/modules/planning-runtime.md": frozenset({"8::PlanSaveGateMenu"}),
+    "skills/studio/modules/review/fix-approval.md": frozenset({
+        "0::ReviewFindingsNavigation", "12::ReviewFixPartialIdsRetryMenu", "3::ReviewFixScope",
+    }),
+    "skills/studio/modules/review/semantic-loop-skeleton.md": frozenset({"0::ReviewGranularityMenu"}),
+    "skills/studio/modules/routing/companion-skills.md": frozenset({
+        "1::CompanionSkillOfferMenu", "2::CompanionRoutingMenuOptions",
+    }),
+    "skills/studio/modules/routing/root-intent-routing.md": frozenset({
+        "1::IntentSkillMenu", "1::MatchedIntentSkillMenu", "9::AllCfSkillsMenu",
+    }),
+    "skills/studio/modules/runtime/blocked-next-actions.md": frozenset({"2::BlockedNextActionsMenu"}),
+    "skills/studio/modules/session/shutdown.md": frozenset({"0::StudioShutdownConfirm"}),
+    "skills/studio/modules/subagents/dispatch.md": frozenset({
+        "1::SubAgentApprovalRequest", "1::SubAgentFallbackLimitRequest", "1::SubAgentFallbackRequest",
+    }),
+    "skills/studio/modules/subagents/git-commit-mode.md": frozenset({"5::GitCommitModeMenu"}),
+    "skills/studio/modules/ui/next-actions.md": frozenset({"0::NextActionsMenu"}),
+    "skills/studio/modules/workspace-configure.md": frozenset({"0::SourceConfirmMenu"}),
+    "skills/studio/modules/workspace-discover.md": frozenset({
+        "0::RepoSelectionMenu", "0::StorageModeMenu", "0::ZeroResultsMenu",
+    }),
+    "skills/studio/modules/workspace-generate.md": frozenset({"2::GenerateFailureMenu"}),
+    "skills/studio/modules/workspace-next-dispatch.md": frozenset({"0::WorkspaceNextStepsMenu"}),
+    "skills/studio/modules/workspace-router-quick.md": frozenset({
+        "0::WorkspaceIntentMenu", "3::WorkspaceForceSyncConfirm",
+    }),
+    "skills/studio/modules/workspace-validate.md": frozenset({"1::ValidationFailureMenu"}),
+    "skills/studio/modules/write-docs-author-dispatch.md": frozenset({"2::WriteDocsAuthorTargetMissingMenu"}),
+    "skills/studio/modules/write-docs-prep-gates.md": frozenset({
+        "0::WriteDocsExploreMenu", "1::WriteDocsBrainstormMenu",
+    }),
+    "skills/studio/modules/write-skills-author-dispatch.md": frozenset({"2::WriteSkillsNoOutputMenu"}),
+    "skills/studio/modules/write-skills-prep-gates.md": frozenset({
+        "0::WriteSkillsExploreMenu", "1::WriteSkillsBrainstormMenu",
+    }),
+}
+UNSHAPED_MENU_BASELINE: frozenset[str] = frozenset(
+    f"{path}#{suffix}"
+    for path, suffixes in UNSHAPED_MENU_BASELINE_BY_FILE.items()
+    for suffix in suffixes
+)
+
+# The unshaped surface may only shrink. Raising this is a deliberate, reviewable
+# act; a rename does not need it, because a rename leaves the count unchanged.
+UNSHAPED_MENU_BASELINE_CEILING = 113
+
+
+def test_the_unshaped_menu_surface_does_not_grow() -> None:
+    """A newly introduced MENU must declare a SHAPE (issue #186).
+
+    Mirrors `test_the_untyped_menu_surface_does_not_grow` exactly. The tail
+    recorded in UNSHAPED_MENU_BASELINE is grandfathered so the surface can
+    migrate one menu at a time; it is not grandfathered because an undeclared
+    shape is harmless -- an undeclared menu falls back to the existing
+    prose-based shape-compatibility heuristic, which is exactly the ambiguity
+    #186 was filed about. This test freezes the existing unshaped inventory:
+    what must not happen is that inventory growing, so a MENU neither shaped
+    nor in the baseline fails here.
+    """
+    declarations = _menu_shape_declarations()
+    unshaped_now = {key for key, value in declarations.items() if value is None}
+
+    new_unshaped = sorted(unshaped_now - UNSHAPED_MENU_BASELINE)
+    assert not new_unshaped, (
+        "New MENU(s) without a declared SHAPE:\n  "
+        + "\n  ".join(new_unshaped)
+        + "\n\nDeclare `SHAPE: fixed-choice | free-form` on each, or, if the "
+        "menu was renamed or moved, update UNSHAPED_MENU_BASELINE."
+    )
+
+    assert len(UNSHAPED_MENU_BASELINE) <= UNSHAPED_MENU_BASELINE_CEILING, (
+        f"UNSHAPED_MENU_BASELINE holds {len(UNSHAPED_MENU_BASELINE)} entries, above the "
+        f"recorded ceiling of {UNSHAPED_MENU_BASELINE_CEILING}. The unshaped surface may "
+        "only shrink: declare a SHAPE on the new menu rather than grandfathering it. A "
+        "rename swaps one key for another and leaves the count unchanged."
+    )
+
+    stale = sorted(UNSHAPED_MENU_BASELINE - set(declarations))
+    assert not stale, (
+        "UNSHAPED_MENU_BASELINE lists MENU(s) that no longer exist:\n  "
         + "\n  ".join(stale)
         + "\n\nRemove them from the baseline."
     )
@@ -1540,13 +1734,15 @@ def test_the_runtime_judgement_guard_reports_an_unreadable_path(kind: str, messa
     assert message in report, f"the reader's reason is not reported:\n{report}"
 
 
-def _declarations_for(tmp_path: Path, name: str, body: str) -> dict[str, str | None]:
+def _declarations_for(
+    tmp_path: Path, name: str, body: str, scanner=_menu_type_declarations,
+) -> dict[str, str | None]:
     """Run the guard's scanner over a single fixture file."""
     fixture = tmp_path / name
     fixture.write_text(body, encoding="utf-8")
     with mock.patch(f"{__name__}._prompt_files", return_value=[fixture]), \
             mock.patch(f"{__name__}.REPO_ROOT", tmp_path):
-        return _menu_type_declarations()
+        return scanner()
 
 
 def test_the_guard_classifies_declared_and_undeclared_menus(tmp_path: Path) -> None:
@@ -1626,6 +1822,39 @@ def test_the_guard_does_not_accept_a_declaration_the_validator_rejects(tmp_path:
         "  OPTIONS:\n    1 a -> RUN Y\n```\n"
     )
     assert list(_declarations_for(tmp_path, "c.md", valid_then_valid).values()) == ["decision"]
+
+
+def test_the_guard_does_not_let_one_declared_header_truncate_the_others_scan(tmp_path: Path) -> None:
+    """A `SHAPE` before `TYPE` (or vice versa) must not end the other's region.
+
+    `_menu_declaration_scan` is shared by both scanners (issue #186); each
+    must treat the *other* declared header as staying inside the declaration
+    region, not as a section that ends it -- mirroring the validator's own
+    `gate_scope` check, which keeps TITLE/TYPE/SHAPE all non-terminating. An
+    earlier, non-shared version of the TYPE scanner predated SHAPE and had no
+    reason to exempt it, which would have silently truncated this exact case.
+    """
+    shape_then_type = (
+        "```pdsl\nMENU X:\n  TITLE: t\n  SHAPE: fixed-choice\n  TYPE: blocking\n"
+        "  OPTIONS:\n    1 a -> RUN Y\n```\n"
+    )
+    assert list(_declarations_for(tmp_path, "a.md", shape_then_type, _menu_type_declarations).values()) == [
+        "blocking"
+    ]
+    assert list(_declarations_for(tmp_path, "a.md", shape_then_type, _menu_shape_declarations).values()) == [
+        "fixed-choice"
+    ]
+
+    type_then_shape = (
+        "```pdsl\nMENU X:\n  TITLE: t\n  TYPE: decision\n  SHAPE: free-form\n"
+        "  OPTIONS:\n    1 a -> RUN Y\n```\n"
+    )
+    assert list(_declarations_for(tmp_path, "b.md", type_then_shape, _menu_type_declarations).values()) == [
+        "decision"
+    ]
+    assert list(_declarations_for(tmp_path, "b.md", type_then_shape, _menu_shape_declarations).values()) == [
+        "free-form"
+    ]
 
 
 def test_the_guard_ignores_an_over_indented_declaration_like_the_validator(tmp_path: Path) -> None:
