@@ -744,6 +744,19 @@ def test_e2e_cfs_toc_still_writes_a_table_for_a_kind_that_does_not_require_one(t
     assert "toc = false" in validation["reason"]
 
 
+def test_e2e_cfs_toc_says_at_a_terminal_that_it_did_not_check_its_own_output(tmp_path):
+    """The JSON carries `validation.status`; a terminal reader sees neither key."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"toc": False}},
+    )
+    exit_code, text = _run_human(tmp_path, ["toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert "not validated" in text
+    assert "toc = false" in text
+
+
 def test_e2e_a_kind_that_keeps_its_toc_contract_is_still_checked_after_generating(tmp_path):
     """The control for the test above: the skip must be the kind's doing."""
     _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC)

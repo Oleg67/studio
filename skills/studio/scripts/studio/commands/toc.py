@@ -166,27 +166,35 @@ def cmd_toc(argv: List[str]) -> int:
     return 1 if output["status"] == "ERROR" else 0
 
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-format
-def _human_toc(data: dict) -> None:
-    ui.header("Table of Contents")
-    for r in data.get("results", []):
-        path = r.get("file", "?")
-        status = r.get("status", "?")
-        if status == "UPDATED":
-            ui.file_action(path, "updated")
-        elif status == "CREATED":
-            ui.file_action(path, "created")
-        elif status == "UNCHANGED":
-            ui.file_action(path, "unchanged")
-        elif status == "ERROR":
-            ui.warn(f"{path}: {r.get('message', 'error')}")
-        else:
-            ui.substep(f"{path}: {status}")
-        val = r.get("validation", {})
-        if val.get("status") == "SKIPPED":
-            ui.substep(f"  (not validated: {val.get('reason', 'not applicable')})")
-        if val.get("status") == "FAIL":
-            for detail in val.get("details", []):
-                ui.warn(f"  {detail}")
+def _human_toc_file(r: dict) -> None:
+    """Render what happened to one file."""
+    path = r.get("file", "?")
+    status = r.get("status", "?")
+    if status == "UPDATED":
+        ui.file_action(path, "updated")
+    elif status == "CREATED":
+        ui.file_action(path, "created")
+    elif status == "UNCHANGED":
+        ui.file_action(path, "unchanged")
+    elif status == "ERROR":
+        ui.warn(f"{path}: {r.get('message', 'error')}")
+    else:
+        ui.substep(f"{path}: {status}")
+    _human_toc_validation(r.get("validation", {}))
+
+
+def _human_toc_validation(val: dict) -> None:
+    """Render the post-generation check, including the case where it did not run."""
+    status = val.get("status")
+    if status == "SKIPPED":
+        ui.substep(f"  (not validated: {val.get('reason', 'not applicable')})")
+    elif status == "FAIL":
+        for detail in val.get("details", []):
+            ui.warn(f"  {detail}")
+
+
+def _human_toc_summary(data: dict) -> None:
+    """Render the run's closing line."""
     n = data.get("files_processed", 0)
     overall = data.get("status", "")
     if overall in ("OK", "PASS"):
@@ -195,5 +203,12 @@ def _human_toc(data: dict) -> None:
         ui.error(f"{n} file(s) processed, validation errors found.")
     else:
         ui.warn(f"{n} file(s) processed ({overall}).")
+
+
+def _human_toc(data: dict) -> None:
+    ui.header("Table of Contents")
+    for r in data.get("results", []):
+        _human_toc_file(r)
+    _human_toc_summary(data)
     ui.blank()
 # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-format
