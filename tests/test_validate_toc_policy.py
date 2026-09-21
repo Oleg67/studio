@@ -861,6 +861,109 @@ def test_e2e_cfs_toc_shows_warning_details_at_a_terminal_not_only_failures(tmp_p
     assert "toc-section-too-long" in text
 
 
+def test_e2e_cfs_toc_grades_its_own_output_through_the_project_policy(tmp_path):
+    """Same rule, same file, same kind — one verdict, whichever command asks.
+
+    `cfs toc` asks "will the validators accept what I wrote", and that is the
+    graded answer. Reporting a rule the project switched off would describe a
+    failure that is never going to happen at the gate.
+    """
+    kind_tables = {"PRD": {"validation": {"toc": {"max_section_lines": 1}}}}
+    _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC, kind_tables=kind_tables)
+    warned, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert (warned, report["results"][0]["validation"]["status"]) == (0, "WARN")
+    raw_warnings = report["results"][0]["validation"]["warnings"]
+    assert raw_warnings >= 1
+
+    # The same project, with that one rule switched off.
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables=kind_tables,
+        core_validation={"severity": {"toc-section-too-long": "off"}},
+    )
+    quiet_code, quiet = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert quiet_code == 0
+    validation = quiet["results"][0]["validation"]
+    assert validation["status"] == "PASS"
+    # Everything that warned a moment ago is now accounted for as suppressed,
+    # rather than having quietly disappeared from the report.
+    assert validation["suppressed"] == raw_warnings
+    assert quiet["status"] == "OK"
+    # And `validate-toc` agrees on the same file, which is the whole point.
+    _, checked = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert "toc-section-too-long" not in _codes(checked, "warnings")
+
+
+def test_e2e_a_broken_severity_config_does_not_take_away_cfs_toc(tmp_path):
+    """`validate-toc` refuses the run; the command that repairs files must not.
+
+    But it says so, rather than quietly reporting a run as graded when the
+    configuration it would have been graded by could not be read.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_level": 2}}}},
+        core_validation={"severity": {"toc-missing": "advisory"}},
+    )
+    refused, _ = _run(tmp_path, ["--json", "validate-toc", "architecture/PRD.md"])
+    assert refused == 1
+
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    body = (tmp_path / "architecture" / "PRD.md").read_text(encoding="utf-8")
+    assert "<!-- toc -->" in body
+    # The kind's structural configuration is not collateral damage: depth
+    # comes from `constraints.toml`, and an unreadable `[validation]` table in
+    # `core.toml` is no reason to regenerate at the wrong one.
+    assert "(#detail)" not in body
+    assert any("advisory" in message for message in report["policy_errors"])
+
+
+def test_e2e_a_warning_only_toc_run_does_not_close_with_an_unqualified_success(tmp_path):
+    """The renderer has just listed the warnings; the summary must not contradict it."""
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_section_lines": 1}}}},
+    )
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    assert report["status"] == "VALIDATION_WARN"
+    assert report["warning_count"] >= 1
+
+    _, text = _run_human(tmp_path, ["toc", "architecture/PRD.md"])
+    assert "warning(s)" in text
+    assert "file(s) processed." not in text
+
+
+def test_e2e_cfs_toc_attributes_a_warning_to_the_file_that_produced_it(tmp_path):
+    """Two files, one noisy: the detail must sit under the right header.
+
+    A single-file "is the string anywhere in the buffer" assertion cannot
+    tell a correct renderer from one that prints every file's findings under
+    the first file, or under all of them.
+    """
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables={"PRD": {"validation": {"toc": {"max_section_lines": 1}}}},
+    )
+    # FEATURE keeps the default section size, so only the PRD warns.
+    exit_code, text = _run_human(
+        tmp_path, ["toc", "architecture/PRD.md", "architecture/FEATURE.md"])
+    assert exit_code == 0
+
+    lines = text.splitlines()
+    prd_at = next(i for i, line in enumerate(lines) if "PRD.md" in line)
+    feature_at = next(i for i, line in enumerate(lines) if "FEATURE.md" in line)
+    warned_at = [i for i, line in enumerate(lines) if "toc-section-too-long" in line]
+    assert warned_at, text
+    # Every warning line falls between the PRD's header and the FEATURE's.
+    assert all(prd_at < i < feature_at for i in warned_at), text
+
+
 def test_e2e_cfs_toc_says_at_a_terminal_that_it_did_not_check_its_own_output(tmp_path):
     """The JSON carries `validation.status`; a terminal reader sees neither key."""
     _write_toc_project(

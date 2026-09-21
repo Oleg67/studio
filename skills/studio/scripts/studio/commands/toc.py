@@ -9,13 +9,14 @@ Thin CLI wrapper around the unified ``studio.utils.toc`` module.
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-imports
 import argparse
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 
 from studio.utils.toc import (
     add_toc_max_level_argument,
     process_file as _process_file,
     validate_toc as _validate_toc,
 )
+from ..utils.severity import SeverityPolicy, apply_policy
 from ..utils.ui import ui
 
 if TYPE_CHECKING:  # pragma: no cover - for the annotation only
@@ -43,8 +44,17 @@ def _process_toc_file(
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-process
 
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
-def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> dict:
+def _post_generation_validation(
+    filepath: Path,
+    resolution: "TocResolution",
+    policy: "Optional[SeverityPolicy]" = None,
+) -> dict:
     """Check what was just written — unless nothing validates this kind's TOC.
+
+    Graded through the project's severity policy, like every other TOC check.
+    The question this answers is "will the validators accept what I wrote",
+    and that is the graded verdict, not the raw one: reporting a rule the
+    project switched off would describe a failure that is not going to happen.
 
     A kind declaring `toc = false` is skipped by `cfs validate` and reported
     as not applicable by `cfs validate-toc`. Writing the table is still the
@@ -79,16 +89,21 @@ def _post_generation_validation(filepath: Path, resolution: "TocResolution") -> 
         max_heading_level=resolution.max_level,
         max_section_lines=resolution.max_section_lines,
     )
-    errs = report.get("errors", [])
-    warns = report.get("warnings", [])
-    if not errs and not warns:
-        return {"status": "PASS"}
-    return {
+    outcome = apply_policy(
+        policy,
+        list(report.get("errors", [])) + list(report.get("warnings", [])),
+        kind=resolution.kind,
+    )
+    errs, warns = outcome.errors, outcome.warnings
+    result: dict = {"status": "PASS"} if not errs and not warns else {
         "status": "FAIL" if errs else "WARN",
         "errors": len(errs),
         "warnings": len(warns),
         "details": errs + warns,
     }
+    if outcome.suppressed:
+        result["suppressed"] = outcome.suppressed
+    return result
 
 
 def _unverified_count(validation: dict) -> int:
@@ -104,9 +119,42 @@ def _unverified_count(validation: dict) -> int:
 # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-validate
 
 
-def cmd_toc(argv: List[str]) -> int:
-    """Generate/update Table of Contents in markdown files."""
-    # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
+def _generate_and_check(
+    filepath_str: str,
+    args: argparse.Namespace,
+    toc_targets: dict,
+    policy: Optional[SeverityPolicy],
+) -> "tuple[dict, int, int]":
+    """Regenerate one file, then check what was written.
+
+    Returns the result plus how much it contributes to the run's error and
+    warning counts, so the caller stays a loop over files rather than a
+    second copy of the validation rules.
+    """
+    from .validate_toc import resolve_toc
+
+    filepath = Path(filepath_str).resolve()
+    resolution = resolve_toc(toc_targets, filepath, args.max_level)
+    result = _process_toc_file(
+        filepath_str,
+        max_level=resolution.max_level,
+        dry_run=args.dry_run,
+        indent_size=args.indent,
+    )
+    # Auto-validate after generation (unless skipped or dry-run)
+    if (args.skip_validate
+            or args.dry_run
+            or not filepath.is_file()
+            or result.get("status") in ("ERROR", "SKIP")):
+        return result, 0, 0
+    validation = _post_generation_validation(filepath, resolution, policy)
+    result["validation"] = validation
+    return result, _unverified_count(validation), int(validation.get("warnings") or 0)
+
+
+# @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
+def _build_toc_parser() -> argparse.ArgumentParser:
+    """The `cfs toc` argument surface."""
     p = argparse.ArgumentParser(
         prog="cfs toc",
         description="Generate or update Table of Contents in Markdown files",
@@ -133,8 +181,13 @@ def cmd_toc(argv: List[str]) -> int:
         action="store_true",
         help="Skip post-generation validation",
     )
-    args = p.parse_args(argv)
-    # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
+    return p
+# @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
+
+
+def cmd_toc(argv: List[str]) -> int:
+    """Generate/update Table of Contents in markdown files."""
+    args = _build_toc_parser().parse_args(argv)
 
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
     # Generate to the depth the checks will judge the result at. Regenerating
@@ -142,54 +195,62 @@ def cmd_toc(argv: List[str]) -> int:
     # shallower one produces a TOC listing headings that `validate-toc` then
     # reports as anchors to nothing — the documented way to fix a stale TOC
     # would hand back a file that fails validation.
-    from .validate_toc import resolve_toc, resolve_toc_targets
+    from .validate_toc import resolve_toc_project_lenient
 
-    toc_targets = resolve_toc_targets()
+    project, policy_errors = resolve_toc_project_lenient()
+    toc_targets = project.targets if project is not None else {}
+    policy = project.policy if project is not None else None
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
 
     results = []
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
     validation_errors = 0
+    validation_warnings = 0
     for filepath_str in args.files:
-        filepath = Path(filepath_str).resolve()
-        resolution = resolve_toc(toc_targets, filepath, args.max_level)
-        result = _process_toc_file(
-            filepath_str,
-            max_level=resolution.max_level,
-            dry_run=args.dry_run,
-            indent_size=args.indent,
-        )
-
-        # Auto-validate after generation (unless skipped or dry-run)
-        if (not args.skip_validate
-                and not args.dry_run
-                and filepath.is_file()
-                and result.get("status") not in ("ERROR", "SKIP")):
-            validation = _post_generation_validation(filepath, resolution)
-            result["validation"] = validation
-            validation_errors += _unverified_count(validation)
-
+        result, errs, warns = _generate_and_check(filepath_str, args, toc_targets, policy)
+        validation_errors += errs
+        validation_warnings += warns
         results.append(result)
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
 
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-return
-    output = {
-        "status": "OK",
-        "files_processed": len(results),
-        "results": results,
-    }
-
-    if validation_errors:
-        output["status"] = "VALIDATION_FAIL"
-    elif any(r["status"] == "ERROR" for r in results):
-        output["status"] = "PARTIAL" if len(results) > 1 else "ERROR"
-
+    output = _toc_output(results, validation_errors, validation_warnings, policy_errors)
     ui.result(output, human_fn=_human_toc)
 
     if validation_errors:
         return 2
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-return
     return 1 if output["status"] == "ERROR" else 0
+
+
+def _toc_output(
+    results: List[dict],
+    validation_errors: int,
+    validation_warnings: int,
+    policy_errors: List[str],
+) -> dict:
+    """Assemble the run's report and settle its overall status."""
+    output: dict = {
+        "status": "OK",
+        "files_processed": len(results),
+        "results": results,
+    }
+    if validation_warnings:
+        output["warning_count"] = validation_warnings
+    if policy_errors:
+        # Generation went ahead unguided by the policy rather than being
+        # refused, so the reader is told which is which.
+        output["policy_errors"] = policy_errors
+
+    if validation_errors:
+        output["status"] = "VALIDATION_FAIL"
+    elif any(r["status"] == "ERROR" for r in results):
+        output["status"] = "PARTIAL" if len(results) > 1 else "ERROR"
+    elif validation_warnings:
+        # Not "OK". The renderer has just listed these warnings line by line;
+        # closing with an unqualified success contradicts what it printed.
+        output["status"] = "VALIDATION_WARN"
+    return output
 
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-format
 def _human_toc_file(r: dict) -> None:
@@ -232,8 +293,12 @@ def _human_toc_summary(data: dict) -> None:
         ui.success(f"{n} file(s) processed.")
     elif overall == "VALIDATION_FAIL":
         ui.error(f"{n} file(s) processed, validation errors found.")
+    elif overall == "VALIDATION_WARN":
+        ui.warn(f"{n} file(s) processed, {data.get('warning_count', 0)} warning(s).")
     else:
         ui.warn(f"{n} file(s) processed ({overall}).")
+    for message in data.get("policy_errors", []):
+        ui.warn(f"  severity configuration ignored: {message}")
 
 
 def _human_toc(data: dict) -> None:

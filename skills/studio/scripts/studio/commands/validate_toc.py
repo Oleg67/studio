@@ -32,6 +32,12 @@ from ..utils.toc import (
     validate_toc,
 )
 from ..utils.ui import ui
+# Deliberate, and documented at the definition site in `validate.py`. This
+# command must read one project's severity exactly the way `validate` does, and
+# the assembler cannot move to `utils/severity.py` — it calls into
+# `utils/constraints.py`, which already imports `severity`, so that direction is
+# an import cycle. The underscores mark them private to `commands/`, not to the
+# module; the tests in `tests/test_validate_toc_policy.py` cover all three.
 from .validate import (
     _build_severity_policy,
     _emit_policy_config_error,
@@ -146,20 +152,29 @@ def _load_toc_project(args: argparse.Namespace) -> Tuple[Optional[_TocProject], 
     ), None
 
 
-def resolve_toc_targets() -> Dict[str, _TocTarget]:
-    """Index the surrounding project's artifacts, or return nothing outside one.
+def resolve_toc_project_lenient() -> Tuple[Optional[_TocProject], List[str]]:
+    """The project as a *generating* command needs it: never fatal.
 
-    Exists so `cfs toc` can regenerate a TOC to the same depth the checks will
-    judge it at. It deliberately does not build a severity policy: regenerating
-    a table of contents is not a verdict, and a project whose `[validation]`
-    table cannot be read should not lose the command that fixes documents.
+    `cfs toc` repairs documents. Refusing to run because `[validation]` has a
+    typo would take away the tool you fix things with, so a policy that cannot
+    be read is dropped and its errors handed back for the caller to report —
+    rather than either aborting or silently pretending the run was graded.
+
+    Everything else is the same context `validate-toc` builds, so a file's
+    depth, its section bound and the severity its findings are graded at all
+    come from one place.
     """
     from ..utils.context import get_context
 
     ctx = get_context()
     if ctx is None:
-        return {}
-    return _collect_toc_targets(ctx)
+        return None, []
+    policy, policy_errors = _build_severity_policy(ctx, ctx.project_root, argparse.Namespace())
+    return _TocProject(
+        policy=policy if not policy_errors else SeverityPolicy(),
+        targets=_collect_toc_targets(ctx),
+        root=Path(ctx.project_root).resolve(),
+    ), policy_errors
 
 
 @dataclass(frozen=True)

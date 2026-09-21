@@ -259,7 +259,9 @@ max_section_lines = 150     # warn above this section length (default 300)
 
 Leave an option out and the kind has no opinion about it. That matters because `cfs validate-toc` takes both as flags too, and the order is: an explicit `--max-level` / `--max-section-lines` on the command line, else the artifact kind's configured value, else the default. If "unset" were stored as 3, a kit could never be overridden and an explicit `--max-level 3` could never be told from silence.
 
-`cfs toc` regenerates to the same depth, so the fix-it workflow and the check agree: regenerating at a fixed 3 in a project whose kind asks for 2 would produce a table listing headings the check then reports as anchors to nothing.
+`cfs toc` regenerates to the same depth, so the fix-it workflow and the check agree: regenerating at a fixed 3 in a project whose kind asks for 2 would produce a table listing headings the check then reports as anchors to nothing. Its post-generation check is graded by the same severity settings too — the question it answers is "will the validators accept this", so a rule you switched off is silent there as well.
+
+One difference: a `[validation]` table that cannot be read stops `cfs validate` and `cfs validate-toc`, but not `cfs toc`. Losing the command that repairs documents to a typo in the config would take away the tool you fix things with, so it generates anyway, ungraded, and tells you the configuration was ignored.
 
 `toc = false` means the kind has no table-of-contents contract at all. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as passing but **not applicable** rather than checking it anyway — and says so, so a file nobody examined does not read like a file that came back clean.
 
