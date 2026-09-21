@@ -1007,6 +1007,22 @@ def test_e2e_cfs_toc_says_at_a_terminal_that_it_did_not_check_its_own_output(tmp
     assert "toc = false" in text
 
 
+def test_e2e_a_file_that_was_never_processed_carries_no_verdict(tmp_path):
+    """A document with no headings is skipped, and must not report a PASS.
+
+    The short-circuit ordering matters and nothing else pins it: without it
+    the check runs on a file that was never written, finds nothing to object
+    to in a heading-less document, and stamps `validation: PASS` on a result
+    whose own status says SKIP. A check that never ran is not a pass.
+    """
+    _write_toc_project(tmp_path, prd_body="# PRD\n\nJust a paragraph.\n")
+    exit_code, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 0
+    result = report["results"][0]
+    assert result["status"] == "SKIP"
+    assert "validation" not in result
+
+
 def test_e2e_a_kind_that_keeps_its_toc_contract_is_still_checked_after_generating(tmp_path):
     """The control for the test above: the skip must be the kind's doing."""
     _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC)
