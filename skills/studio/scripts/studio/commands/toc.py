@@ -16,7 +16,7 @@ from studio.utils.toc import (
     process_file as _process_file,
     validate_toc as _validate_toc,
 )
-from ..utils.severity import SeverityPolicy, apply_policy
+from ..utils.severity import RunVerdict, SeverityPolicy, apply_policy, run_verdict
 from ..utils.ui import ui
 
 if TYPE_CHECKING:  # pragma: no cover - for the annotation only
@@ -152,6 +152,25 @@ def _generate_and_check(
     return result, _unverified_count(validation), int(validation.get("warnings") or 0)
 
 
+# @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
+def _run_over_files(
+    args: argparse.Namespace,
+    toc_targets: dict,
+    policy: Optional[SeverityPolicy],
+) -> "tuple[List[dict], int, int]":
+    """Regenerate and check every requested file, totalling what they found."""
+    results: List[dict] = []
+    validation_errors = 0
+    validation_warnings = 0
+    for filepath_str in args.files:
+        result, errs, warns = _generate_and_check(filepath_str, args, toc_targets, policy)
+        validation_errors += errs
+        validation_warnings += warns
+        results.append(result)
+    return results, validation_errors, validation_warnings
+# @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
+
+
 # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-parse-args
 def _build_toc_parser() -> argparse.ArgumentParser:
     """The `cfs toc` argument surface."""
@@ -202,32 +221,32 @@ def cmd_toc(argv: List[str]) -> int:
     policy = project.policy if project is not None else None
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-kind-depth
 
-    results = []
-    # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
-    validation_errors = 0
-    validation_warnings = 0
-    for filepath_str in args.files:
-        result, errs, warns = _generate_and_check(filepath_str, args, toc_targets, policy)
-        validation_errors += errs
-        validation_warnings += warns
-        results.append(result)
-    # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-foreach-file
+    results, validation_errors, validation_warnings = _run_over_files(args, toc_targets, policy)
 
     # @cpt-begin:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-return
-    output = _toc_output(results, validation_errors, validation_warnings, policy_errors)
+    # The shared verdict helper the validators use. Having adopted the
+    # project's severity, this command adopts the rule the project stated
+    # about warnings too — honouring one half of a policy and not the other
+    # is the inconsistency that reading the policy at all was meant to end.
+    verdict = run_verdict(
+        validation_errors,
+        validation_warnings,
+        fail_on_warnings=bool(policy is not None and policy.fail_on_warnings),
+    )
+    output = _toc_output(results, validation_warnings, policy_errors, verdict)
     ui.result(output, human_fn=_human_toc)
 
-    if validation_errors:
-        return 2
+    if verdict.exit_code:
+        return verdict.exit_code
     # @cpt-end:cpt-studio-flow-developer-experience-toc:p1:inst-toc-gen-return
     return 1 if output["status"] == "ERROR" else 0
 
 
 def _toc_output(
     results: List[dict],
-    validation_errors: int,
     validation_warnings: int,
     policy_errors: List[str],
+    verdict: RunVerdict,
 ) -> dict:
     """Assemble the run's report and settle its overall status."""
     output: dict = {
@@ -241,8 +260,10 @@ def _toc_output(
         # Generation went ahead unguided by the policy rather than being
         # refused, so the reader is told which is which.
         output["policy_errors"] = policy_errors
+    if verdict.failed_on:
+        output["failed_on"] = verdict.failed_on
 
-    if validation_errors:
+    if verdict.exit_code == 2:
         output["status"] = "VALIDATION_FAIL"
     elif any(r["status"] == "ERROR" for r in results):
         output["status"] = "PARTIAL" if len(results) > 1 else "ERROR"
@@ -291,6 +312,13 @@ def _human_toc_summary(data: dict) -> None:
     overall = data.get("status", "")
     if overall in ("OK", "PASS"):
         ui.success(f"{n} file(s) processed.")
+    elif data.get("failed_on") == "warnings":
+        # Otherwise a run that failed on warnings is told "validation errors
+        # found" and given no reason, having reported zero errors.
+        ui.error(
+            f"{n} file(s) processed, {data.get('warning_count', 0)} warning(s) "
+            "— failing because the project sets fail_on_warnings."
+        )
     elif overall == "VALIDATION_FAIL":
         ui.error(f"{n} file(s) processed, validation errors found.")
     elif overall == "VALIDATION_WARN":

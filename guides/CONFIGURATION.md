@@ -261,6 +261,8 @@ Leave an option out and the kind has no opinion about it. That matters because `
 
 `cfs toc` regenerates to the same depth, so the fix-it workflow and the check agree: regenerating at a fixed 3 in a project whose kind asks for 2 would produce a table listing headings the check then reports as anchors to nothing. Its post-generation check is graded by the same severity settings too — the question it answers is "will the validators accept this", so a rule you switched off is silent there as well.
 
+`fail_on_warnings` reaches it as well: set it, and a `cfs toc` run whose generated table produces only warnings exits 2 — the file is still written, but the run reports a failure, the same way the validators would.
+
 One difference: a `[validation]` table that cannot be read stops `cfs validate` and `cfs validate-toc`, but not `cfs toc`. Losing the command that repairs documents to a typo in the config would take away the tool you fix things with, so it generates anyway, ungraded, and tells you the configuration was ignored.
 
 `toc = false` means the kind has no table-of-contents contract at all. `cfs validate` skips the phase, and `cfs validate-toc` reports the file as passing but **not applicable** rather than checking it anyway — and says so, so a file nobody examined does not read like a file that came back clean.

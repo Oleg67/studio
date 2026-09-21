@@ -132,7 +132,11 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 
 **Error Scenarios**:
 - File not found → ERROR per file
+- File written but not readable back → per-file `validation.status` ERROR, counted as a failure, because a check that never ran must not be reported as a pass
 - Post-generation validation fails → VALIDATION_FAIL with details
+- Post-generation validation finds only warnings, after the project severity policy has graded them → VALIDATION_WARN with `warning_count`; the run does not fail, because warnings gate nothing here unless the project asks
+- The same, in a project setting `fail_on_warnings` → VALIDATION_FAIL with `failed_on: "warnings"` and exit 2; the file is still written, since the gate is about the verdict rather than the work
+- Severity configuration unreadable → generation proceeds ungraded and the configuration is reported under `policy_errors`, rather than refusing the one command that repairs documents
 
 **Steps**:
 1. [x] - `p1` - User invokes `cfs toc <files> [--max-level N] [--indent N] [--dry-run] [--skip-validate]` - `inst-toc-gen-parse-args`
@@ -140,7 +144,7 @@ Reduces friction in daily Studio usage. `doctor` catches environment issues befo
 3. [x] - `p1` - **FOR EACH** file - `inst-toc-gen-foreach-file`
    1. [x] - `p1` - Process file: extract headings, generate TOC, insert/update between `<!-- toc -->` markers - `inst-toc-gen-process`
    2. [x] - `p1` - **IF** not dry-run and not skip-validate, validate generated TOC at the severity the project configured, counting what the policy suppressed — unless the file's artifact kind declares it has no table-of-contents contract, in which case the check is reported as skipped with its reason. The table is still written, because that switch says a table is not required and has no way to say one is forbidden, but this command must not be the only one in the toolchain that judges a table the validators decline to judge, nor grade raw what they grade by policy - `inst-toc-gen-validate`
-4. [x] - `p1` - **RETURN** JSON: `{status, files_processed, results}` - `inst-toc-gen-return`
+4. [x] - `p1` - **RETURN** JSON: `{status, files_processed, results}`, plus `warning_count` when the graded check produced warnings, `failed_on` when the project's setting turned those warnings into the failure, and `policy_errors` when the severity configuration could not be read and generation therefore went ungraded. Each `results[]` entry carries its own `validation` object once the file has been generated and checked, which is absent when nothing was validated — a dry run, an explicitly skipped check, or a file that was never processed - `inst-toc-gen-return`
 
 **Supporting**:
 - [x] - `p1` - Imports and module setup for toc command - `inst-toc-gen-imports`

@@ -938,6 +938,36 @@ def test_e2e_a_warning_only_toc_run_does_not_close_with_an_unqualified_success(t
     assert "file(s) processed." not in text
 
 
+def test_e2e_a_project_that_fails_on_warnings_fails_cfs_toc_too(tmp_path):
+    """Having adopted the project's severity, this command adopts its gate.
+
+    Honouring half a policy — which rules are warnings, but not the rule
+    about what warnings mean — is the inconsistency reading the policy at
+    all was meant to end.
+    """
+    kind_tables = {"PRD": {"validation": {"toc": {"max_section_lines": 1}}}}
+    _write_toc_project(tmp_path, prd_body=_PRD_WITHOUT_TOC, kind_tables=kind_tables)
+    lenient, report = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert (lenient, report["status"]) == (0, "VALIDATION_WARN")
+    assert "failed_on" not in report
+
+    _write_toc_project(
+        tmp_path,
+        prd_body=_PRD_WITHOUT_TOC,
+        kind_tables=kind_tables,
+        core_validation={"fail_on_warnings": True},
+    )
+    exit_code, strict = _run(tmp_path, ["--json", "toc", "architecture/PRD.md"])
+    assert exit_code == 2
+    assert strict["status"] == "VALIDATION_FAIL"
+    assert strict["failed_on"] == "warnings"
+    # The file was still written: the gate is about the verdict, not the work.
+    assert "<!-- toc -->" in (tmp_path / "architecture" / "PRD.md").read_text(encoding="utf-8")
+
+    _, text = _run_human(tmp_path, ["toc", "architecture/PRD.md"])
+    assert "fail_on_warnings" in text
+
+
 def test_e2e_cfs_toc_attributes_a_warning_to_the_file_that_produced_it(tmp_path):
     """Two files, one noisy: the detail must sit under the right header.
 
