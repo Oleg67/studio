@@ -277,9 +277,15 @@ the section it has to be moved after and the line that section is on:
 Section `prd-requirements` (line 24) in PRD artifact must come after `prd-context` (line 61)
 ```
 
-Its subsections move with it, so they are not reported separately. If two kits
-bound to one project order the same pair of sections in opposite directions,
-the load fails naming the pair rather than silently picking one.
+Its subsections move with it, so they are not reported separately — unless one
+of them stayed behind, in which case *that* subsection is reported as missing
+from the section it is declared under, which is where it genuinely is not.
+
+Two kits bound to one project add their orders together, including what follows
+from both of them at once: one kit's "context before design" and another's
+"design before risks" means context before risks. If they order the same pair
+in opposite directions the load fails naming the pair, rather than silently
+picking one.
 
 ### Table of contents rules
 

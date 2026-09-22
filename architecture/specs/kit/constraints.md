@@ -257,7 +257,10 @@ that declares no `order` accepts its constrained sections in any sequence.
   `heading-requires-multiple`, whose default severity is `off` — "at least two"
   is true of a kit's repeated-block sections and false of every document with a
   single flow, state or definition of done, so a kind that means it raises the
-  rule in its own `[artifacts.<KIND>.validation.severity]` table
+  rule in its own `[artifacts.<KIND>.validation.severity]` table. The count is
+  taken over the whole parent section, not the run of consecutive matches
+  `multiple = false` looks at: a section that genuinely repeats carries its own
+  subsections between the copies
 - `multiple` omitted: any number allowed
 
 **Numbering**:
@@ -295,11 +298,16 @@ are checked. A kit that wants a different sequence reorders its headings.
 **`"declared"` is every heading, in declaration order** — the strictness the
 matcher used to impose on every kit, now a one-line opt-in.
 
-**Merging.** When two kits bind the same artifact kind, their orders add up:
-the lists concatenate, each constraining the ids it names. Two kits that
-sequence one pair of sections in opposite directions fail the load naming the
-pair, because keeping either kit's word would enforce an order the other kit's
-author would read as already satisfied.
+**Merging.** When two kits bind the same artifact kind, their orders add up as
+the union of what each kit stated, closed under transitivity: one kit's "a
+before c" and another's "c before b" together mean a before b. What the merge
+must not do is splice the two lists into one sequence — `["a", "c"]` spliced
+onto `["b", "c"]` gives `["a", "c", "b"]`, which states c before b, the reverse
+of what the second kit wrote, and a before b, which neither kit wrote. Two kits
+that sequence one pair in opposite directions fail the load naming the pair,
+because keeping either kit's word would enforce an order the other kit's author
+would read as already satisfied. A cycle that only closes across three kits is
+one such pair once the relations are closed, so it fails the same way.
 
 **How a violation is found and reported.** The matcher walks the document
 forward. Where a constraint finds no match ahead of the cursor, a *rescue pass*
@@ -321,7 +329,12 @@ matched is one this section is supposed to follow; there is no already-matched
 section it was supposed to precede.
 
 A displaced section carries its subsections with it, so the descendants of a
-reported section are not reported again — one move, one finding.
+reported section are not reported again — one move, one finding. A subsection
+that did *not* travel with its parent is a different matter: it is looked for
+inside the parent it is declared under, where it is not, and is reported as
+`heading-missing`. That is the section that really is out of place. Before the
+rescue pass the same document reported the *parent* missing, which was false —
+the parent was present, just early.
 
 **One behaviour change to be aware of.** A section written out of declaration
 order used to be reported as absent, and nothing else about it was ever looked

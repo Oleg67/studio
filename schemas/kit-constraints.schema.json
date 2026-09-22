@@ -113,7 +113,8 @@
           "oneOf": [
             {
               "type": "array",
-              "items": { "type": "string", "minLength": 1 }
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
             },
             { "const": "declared" }
           ]

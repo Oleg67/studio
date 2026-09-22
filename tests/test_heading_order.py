@@ -116,7 +116,7 @@ _ABC = [_heading("Alpha", "sec-alpha"), _heading("Beta", "sec-beta"), _heading("
 
 def test_a_section_written_before_the_one_it_must_follow_names_both(tmp_path):
     path = _doc(tmp_path, _SWAPPED)
-    report = _report(path, _kind(_ABC, order=C.HeadingOrder(ids=("sec-alpha", "sec-beta"))))
+    report = _report(path, _kind(_ABC, order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta"))))
 
     assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
     finding = _finding(report, EC.HEADING_ORDER_VIOLATION)
@@ -130,7 +130,7 @@ def test_a_section_written_before_the_one_it_must_follow_names_both(tmp_path):
 def test_the_finding_carries_the_line_of_both_sections(tmp_path):
     """A line number for the displaced section alone is not a diagnosis."""
     path = _doc(tmp_path, _SWAPPED)
-    report = _report(path, _kind(_ABC, order=C.HeadingOrder(ids=("sec-alpha", "sec-beta"))))
+    report = _report(path, _kind(_ABC, order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta"))))
 
     finding = _finding(report, EC.HEADING_ORDER_VIOLATION)
     assert finding["heading_line"] == 3          # `## Beta`
@@ -155,7 +155,7 @@ def test_the_finding_names_the_nearest_section_that_has_to_be_cleared(tmp_path):
 ## Beta
 """)
     report = _report(path, _kind(
-        _ABC, order=C.HeadingOrder(ids=("sec-alpha", "sec-beta", "sec-gamma"))))
+        _ABC, order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta", "sec-gamma"))))
 
     assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
     finding = _finding(report, EC.HEADING_ORDER_VIOLATION)
@@ -187,7 +187,7 @@ def test_and_no_longer_calls_the_displaced_section_missing(tmp_path):
 
 def test_an_in_order_document_is_untouched_by_any_of_this(tmp_path):
     path = _doc(tmp_path, _IN_ORDER)
-    for order in (None, C.HeadingOrder(ids=("sec-alpha", "sec-beta", "sec-gamma"))):
+    for order in (None, C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta", "sec-gamma"))):
         assert _codes(_report(path, _kind(_ABC, order=order))) == []
 
 
@@ -206,7 +206,7 @@ def test_sections_outside_the_order_may_appear_anywhere(tmp_path):
 
 ## Alpha
 """)
-    report = _report(path, _kind(_ABC, order=C.HeadingOrder(ids=("sec-alpha", "sec-beta"))))
+    report = _report(path, _kind(_ABC, order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta"))))
 
     assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
     assert _finding(report, EC.HEADING_ORDER_VIOLATION)["heading_id"] == "sec-beta"
@@ -229,8 +229,8 @@ def test_declared_expands_to_every_section_in_declaration_order(tmp_path):
         },
     })
     assert errors == []
-    assert kit.by_kind["PRD"].order == C.HeadingOrder(
-        ids=("sec-alpha", "sec-beta", "sec-gamma"))
+    assert kit.by_kind["PRD"].order == C.HeadingOrder.from_sequence(
+        ("sec-alpha", "sec-beta", "sec-gamma"))
     assert _codes(_report(path, kit.by_kind["PRD"])) == [EC.HEADING_ORDER_VIOLATION]
 
 
@@ -324,7 +324,7 @@ def test_only_the_displaced_parent_is_reported_not_its_subsections(tmp_path):
             _heading("Beta", "sec-beta"),
             _heading("Detail", "sec-detail", level=3),
         ],
-        order=C.HeadingOrder(ids=("sec-alpha", "sec-beta", "sec-detail")),
+        order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta", "sec-detail")),
     ))
     assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
     assert _finding(report, EC.HEADING_ORDER_VIOLATION)["heading_id"] == "sec-beta"
@@ -503,7 +503,7 @@ def test_an_order_list_selects_the_sections_it_names(tmp_path):
             heading_ids=("sec-alpha", "sec-beta", "sec-gamma"),
         )}})
     assert errors == []
-    assert kit.by_kind["PRD"].order == C.HeadingOrder(ids=("sec-alpha", "sec-gamma"))
+    assert kit.by_kind["PRD"].order == C.HeadingOrder.from_sequence(("sec-alpha", "sec-gamma"))
 
 
 def test_an_order_may_not_re_sequence_the_declared_headings(tmp_path):
@@ -542,7 +542,7 @@ def test_order_entries_are_matched_case_insensitively_like_every_heading_id(tmp_
     kit, errors = _load(tmp_path, {
         "artifacts": {"PRD": _kind_toml(order=["SEC-ALPHA", "sec-beta"])}})
     assert errors == []
-    assert kit.by_kind["PRD"].order == C.HeadingOrder(ids=("sec-alpha", "sec-beta"))
+    assert kit.by_kind["PRD"].order == C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta"))
 
 
 # ---------------------------------------------------------------------------
@@ -566,8 +566,8 @@ def test_two_kits_orders_add_up(tmp_path):
         _kind_toml(order=["sec-beta", "sec-gamma"], heading_ids=("sec-beta", "sec-gamma")),
     )
     assert errors == []
-    assert kit.by_kind["PRD"].order == C.HeadingOrder(
-        ids=("sec-alpha", "sec-beta", "sec-gamma"))
+    assert kit.by_kind["PRD"].order == C.HeadingOrder.from_sequence(
+        ("sec-alpha", "sec-beta", "sec-gamma"))
 
 
 def test_two_kits_that_contradict_each_other_fail_the_load(tmp_path):
@@ -612,7 +612,7 @@ def test_one_kit_with_an_order_and_one_without_keeps_the_order(tmp_path):
     kit, errors = _two_kits(
         tmp_path, _kind_toml(order=["sec-alpha", "sec-beta"]), _kind_toml())
     assert errors == []
-    assert kit.by_kind["PRD"].order == C.HeadingOrder(ids=("sec-alpha", "sec-beta"))
+    assert kit.by_kind["PRD"].order == C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta"))
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +632,114 @@ def test_one_kit_with_an_order_and_one_without_keeps_the_order(tmp_path):
     ],
 )
 def test_relates_answers_only_for_pairs_it_was_given(first, second, expected):
-    assert C.HeadingOrder(ids=("a", "b")).relates(first, second) is expected
+    assert C.HeadingOrder.from_sequence(("a", "b")).relates(first, second) is expected
 
 
 def test_an_empty_order_relates_nothing():
     assert C.HeadingOrder().relates("a", "b") is False
+
+
+def test_merging_never_reverses_what_either_kit_wrote():
+    """The failure a spliced sequence cannot avoid.
+
+    `("a", "c")` spliced onto `("b", "c")` is `("a", "c", "b")`, which states c
+    before b — the opposite of the second kit's list — and a before b, which
+    neither kit wrote. Held as pairs, the sum says exactly what they said.
+    """
+    merged = C._merge_heading_order(
+        C.HeadingOrder.from_sequence(("a", "c")),
+        C.HeadingOrder.from_sequence(("b", "c")),
+        "PRD",
+        [],
+    )
+    assert merged.relates("b", "c") is True
+    assert merged.relates("c", "b") is False
+    assert merged.relates("a", "b") is False
+    assert merged.relates("b", "a") is False
+
+
+def test_a_relation_neither_kit_wrote_but_both_imply_is_enforced():
+    """a before c and c before b is a before b, whoever said which half."""
+    merged = C._merge_heading_order(
+        C.HeadingOrder.from_sequence(("a", "c")),
+        C.HeadingOrder.from_sequence(("c", "b")),
+        "PRD",
+        [],
+    )
+    assert merged.relates("a", "b") is True
+
+
+# ---------------------------------------------------------------------------
+# What the rescue pass does not promise
+# ---------------------------------------------------------------------------
+
+def test_a_repeated_section_is_repeated_even_with_subsections_between(tmp_path):
+    """"At least two" counts the scope, not the run.
+
+    The matcher collects only the first consecutive run, because
+    `multiple = false` has always meant "not twice in a row". A section that
+    genuinely repeats almost always has its own subsections between the
+    copies, so counting the run would report every one of them as appearing
+    once.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Flow
+
+### Step
+
+## Flow
+
+### Step
+""")
+    constraints = _kind([_heading("Flow", "sec-flow", multiple=True)], toc=False)
+    policy = _policy({"PRD": {EC.HEADING_REQUIRES_MULTIPLE: S.ERROR}})
+
+    report = C.validate_artifact_file(
+        artifact_path=path, artifact_kind="PRD", constraints=constraints, policy=policy)
+    assert _codes(report) == []
+
+
+def test_a_section_that_appears_once_is_still_reported_when_it_has_subsections(tmp_path):
+    """The other half of the same count — widening it must not silence the rule."""
+    path = _doc(tmp_path, "# Doc\n\n## Flow\n\n### Step\n")
+    report = C.validate_artifact_file(
+        artifact_path=path,
+        artifact_kind="PRD",
+        constraints=_kind([_heading("Flow", "sec-flow", multiple=True)], toc=False),
+        policy=_policy({"PRD": {EC.HEADING_REQUIRES_MULTIPLE: S.ERROR}}),
+    )
+    assert _codes(report) == [EC.HEADING_REQUIRES_MULTIPLE]
+
+
+def test_a_subsection_left_behind_by_its_displaced_parent_is_reported_missing(tmp_path):
+    """A rescued parent takes its own scope with it, and the child is judged there.
+
+    Deliberate, and the reason the per-level anchor is *not* guarded the way
+    the cursor is: guarding it would point a rescued section's children at
+    whichever sibling happened to match last, which is the case
+    `test_children_of_a_rescued_section_are_scoped_under_it` covers.
+
+    Before the rescue pass this document reported `sec-c` missing — a section
+    plainly present on line 3. It now reports the section that really is not
+    where the kit puts it. Either way the document fails; only the sentence
+    changed, and the new one is true.
+    """
+    path = _doc(tmp_path, """
+# A
+
+## C
+
+## B
+
+### D
+""")
+    report = _report(path, _kind([
+        _heading("A", "sec-a", level=1),
+        _heading("B", "sec-b"),
+        _heading("C", "sec-c"),
+        _heading("D", "sec-d", level=3),
+    ]))
+    assert _codes(report) == [EC.HEADING_MISSING]
+    assert _finding(report, EC.HEADING_MISSING)["heading_id"] == "sec-d"

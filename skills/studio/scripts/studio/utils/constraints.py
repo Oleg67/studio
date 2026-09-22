@@ -11,7 +11,7 @@ import logging
 # constraint parsers, and shadowing the dataclasses helper there reads as a bug.
 from dataclasses import dataclass, field as dataclass_field, replace
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 from . import error_codes as EC
 from .severity import (
@@ -118,27 +118,40 @@ _TOC_OPTION_KEYS = frozenset({"max_level", "max_section_lines"})
 
 @dataclass(frozen=True)
 class HeadingOrder:
-    """The section order one artifact kind declares, if it declares one.
+    """Which sections must precede which, held as the pairs the kits stated.
 
-    ``ids`` is a partial order: only the listed headings are constrained, and
-    only relative to each other. The shorthand ``order = "declared"`` expands
-    here into every heading id in declaration order — the strictness the
-    matcher used to impose on every kit implicitly, now an explicit opt-in.
+    A kit writes a list, and a list is a chain: every id in it precedes every
+    id after it. The shorthand ``order = "declared"`` is the chain of every
+    heading the kind declares — the strictness the matcher used to impose on
+    every kit implicitly, now an explicit opt-in.
+
+    Pairs rather than a sequence, because two kits' orders have to be added up
+    and a sequence cannot hold the sum. Splicing ``("a", "c")`` onto
+    ``("b", "c")`` gives ``("a", "c", "b")``, which says c precedes b — the
+    reverse of what the second kit wrote — and says a precedes b, which
+    neither kit wrote. The union of their pairs says exactly what they said.
 
     Absent (``ArtifactKindConstraints.order is None``) means the kind imposes
     no order at all. That is the default, because a rule a kit cannot state
     is a rule a kit cannot relax either.
     """
 
-    ids: Tuple[str, ...] = ()
+    pairs: FrozenSet[Tuple[str, str]] = frozenset()
+
+    @classmethod
+    def from_sequence(cls, ids: Sequence[str]) -> "HeadingOrder":
+        """Build the chain one ``order`` list states."""
+        return cls(pairs=frozenset(
+            (earlier, later)
+            for position, earlier in enumerate(ids)
+            for later in tuple(ids)[position + 1:]
+        ))
 
     def relates(self, first_id: Optional[str], second_id: Optional[str]) -> bool:
         """Whether this order says ``first_id`` must come before ``second_id``."""
         if not first_id or not second_id or first_id == second_id:
             return False
-        if first_id not in self.ids or second_id not in self.ids:
-            return False
-        return self.ids.index(first_id) < self.ids.index(second_id)
+        return (first_id, second_id) in self.pairs
 
 
 #: The one non-list value ``order`` accepts.
@@ -3355,7 +3368,7 @@ def _parse_kind_order(
             errors.append(
                 f"field 'order' must be a list of heading ids or \"{ORDER_DECLARED}\"")
             return None
-        return HeadingOrder(ids=declared_ids)
+        return HeadingOrder.from_sequence(declared_ids)
     if not isinstance(raw, list):
         errors.append(f"field 'order' must be a list of heading ids or \"{ORDER_DECLARED}\"")
         return None
@@ -3405,7 +3418,7 @@ def _order_following_declarations(
                 f"constrained, it does not re-sequence them; reorder the headings instead"
             )
             return None
-    return HeadingOrder(ids=tuple(ids))
+    return HeadingOrder.from_sequence(ids)
 # @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-follows-declarations
 
 
@@ -3862,20 +3875,26 @@ def _merge_heading_order(
     kind: str,
     errors: List[str],
 ) -> Optional[HeadingOrder]:
-    """Concatenate two kits' section orders, refusing a contradiction.
+    """Add two kits' section orders together, refusing a contradiction.
 
     Two kits that bind one artifact kind are both authorities over it, so
     their orders add up — each constrains the ids it names and leaves the rest
-    free. What cannot be added up is a pair the two sequence in opposite
-    directions: keeping either kit's word would enforce an order the other
-    kit's author would read as already satisfied. That fails the load naming
-    the pair, the same posture an unreadable severity takes.
+    free. The sum is the union of what they stated, closed under transitivity:
+    one kit's "a before c" and another's "c before b" together mean a before
+    b, and a merge that did not say so would leave a relation both kits imply
+    unenforced.
+
+    What cannot be added up is a pair the two sequence in opposite directions.
+    Keeping either kit's word would enforce an order the other kit's author
+    would read as already satisfied, so that fails the load naming the pair,
+    the same posture an unreadable severity takes.
     """
     if base is None:
         return incoming
     if incoming is None:
         return base
-    conflict = _first_order_conflict(base, incoming)
+    merged = _order_closure(base.pairs | incoming.pairs)
+    conflict = _first_order_conflict(merged)
     if conflict is not None:
         first, second = conflict
         errors.append(
@@ -3883,30 +3902,42 @@ def _merge_heading_order(
             f"'{first}' is required both before and after '{second}'"
         )
         return base
-    return HeadingOrder(
-        ids=tuple(base.ids) + tuple(hid for hid in incoming.ids if hid not in base.ids),
-    )
+    return HeadingOrder(pairs=merged)
 
 
 # @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-merge-order
 
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-conflict
-def _first_order_conflict(
-    base: HeadingOrder,
-    incoming: HeadingOrder,
-) -> Optional[Tuple[str, str]]:
-    """Name the first id pair the two orders sequence in opposite directions.
+def _order_closure(pairs: FrozenSet[Tuple[str, str]]) -> FrozenSet[Tuple[str, str]]:
+    """Every precedence that follows from the given ones."""
+    after: Dict[str, Set[str]] = {}
+    for earlier, later in pairs:
+        after.setdefault(earlier, set()).add(later)
+    closed: Set[Tuple[str, str]] = set()
+    for start in after:
+        reached: Set[str] = set()
+        pending = list(after[start])
+        while pending:
+            node = pending.pop()
+            if node in reached:
+                continue
+            reached.add(node)
+            pending.extend(after.get(node, ()))
+        closed.update((start, node) for node in reached)
+    return frozenset(closed)
 
-    Checking every shared pair rather than adjacent ones catches a cycle that
-    only closes across three kits, because the merge folds left: by the time
-    the third order arrives the first two are already one list.
+
+def _first_order_conflict(pairs: FrozenSet[Tuple[str, str]]) -> Optional[Tuple[str, str]]:
+    """Name the first id pair the merged order requires in both directions.
+
+    Run over the closure, so a cycle that only closes across three kits is one
+    symmetric pair here rather than three relations nobody compared. Sorted,
+    because which pair gets named must not depend on set iteration order.
     """
-    shared = [hid for hid in incoming.ids if hid in base.ids]
-    for position, first in enumerate(shared):
-        for second in shared[position + 1:]:
-            if base.relates(second, first):
-                return first, second
+    for earlier, later in sorted(pairs):
+        if earlier != later and (later, earlier) in pairs:
+            return earlier, later
     return None
 # @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-conflict
 
@@ -4455,7 +4486,7 @@ def _find_heading_matches_in_scope(
     ):
         match_idx += 1
     if match_idx >= scope_end:
-        return [], scope_start, scope_start
+        return [], scope_start, scope_start, 0
     matches = [headings[match_idx]]
     next_idx = match_idx + 1
     if heading_constraint.multiple is not False:
@@ -4466,7 +4497,36 @@ def _find_heading_matches_in_scope(
         ):
             matches.append(headings[next_idx])
             next_idx += 1
-    return matches, match_idx, next_idx
+    return matches, match_idx, next_idx, _count_matches_in_scope(
+        headings=headings,
+        heading_constraint=heading_constraint,
+        scope_start=scope_start,
+        scope_end=scope_end,
+        claimed=claimed,
+    )
+
+
+def _count_matches_in_scope(
+    *,
+    headings: Sequence[Dict[str, object]],
+    heading_constraint: HeadingConstraint,
+    scope_start: int,
+    scope_end: int,
+    claimed: Set[int],
+) -> int:
+    """How many unclaimed headings anywhere in this scope the constraint matches.
+
+    Deliberately not the same number as ``len(matches)``. The run above stops
+    at the first heading that does not match, because ``multiple = false`` has
+    always meant "not twice in a row" and widening it would report duplicates
+    in documents that pass today. "At least two" asks a different question —
+    does this section repeat within its scope at all — and a section that
+    repeats will almost always have its own subsections between the copies.
+    """
+    return sum(
+        1 for idx in range(scope_start, scope_end)
+        if idx not in claimed and _match_heading_constraint(headings[idx], heading_constraint)
+    )
 # @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-match-headings-scope
 
 
@@ -4785,7 +4845,7 @@ def _validate_single_heading_match(
         cursor=cursor,
         last_match_idx_by_level=last_match_idx_by_level,
     )
-    matches, match_idx, next_idx = _find_heading_matches_in_scope(
+    matches, match_idx, next_idx, scope_count = _find_heading_matches_in_scope(
         headings=headings,
         heading_constraint=heading_constraint,
         scope_start=scope_start,
@@ -4802,7 +4862,7 @@ def _validate_single_heading_match(
         )
         if rescued is None:
             return cursor
-        matches, match_idx, next_idx = rescued
+        matches, match_idx, next_idx, scope_count = rescued
     _claim_heading_matches(
         heading_ctx=heading_ctx,
         heading_constraint=heading_constraint,
@@ -4824,6 +4884,7 @@ def _validate_single_heading_match(
         heading_constraint=heading_constraint,
         idx=idx,
         matches=matches,
+        scope_count=scope_count,
     )
     return cursor
 
@@ -4836,7 +4897,7 @@ def _rescue_unmatched_heading(
     heading_constraint: HeadingConstraint,
     idx: int,
     last_match_idx_by_level: Dict[int, int],
-) -> Optional[Tuple[List[Dict[str, object]], int, int]]:
+) -> Optional[Tuple[List[Dict[str, object]], int, int, int]]:
     """Look behind the cursor for a section that is present but out of place.
 
     The forward-only cursor cannot tell "this section is missing" from "this
@@ -4855,7 +4916,7 @@ def _rescue_unmatched_heading(
         cursor=0,
         last_match_idx_by_level=last_match_idx_by_level,
     )
-    matches, match_idx, next_idx = _find_heading_matches_in_scope(
+    matches, match_idx, next_idx, scope_count = _find_heading_matches_in_scope(
         headings=headings,
         heading_constraint=heading_constraint,
         scope_start=scope_start,
@@ -4877,7 +4938,7 @@ def _rescue_unmatched_heading(
         idx=idx,
         match_idx=match_idx,
     )
-    return matches, match_idx, next_idx
+    return matches, match_idx, next_idx, scope_count
 
 
 # @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-rescue-unmatched
@@ -4907,6 +4968,7 @@ def _check_matched_heading_rules(
     heading_constraint: HeadingConstraint,
     idx: int,
     matches: List[Dict[str, object]],
+    scope_count: int,
 ) -> None:
     """Apply the count and numbering rules to one constraint's matched run."""
     if heading_constraint.multiple is False and len(matches) > 1:
@@ -4917,7 +4979,7 @@ def _check_matched_heading_rules(
             match_count=len(matches),
             line=int(matches[1].get("line", 1) or 1),
         )
-    elif heading_constraint.multiple is True and len(matches) == 1:
+    elif heading_constraint.multiple is True and scope_count < 2:
         _append_requires_multiple_heading_error(
             heading_ctx=heading_ctx,
             heading_constraint=heading_constraint,
