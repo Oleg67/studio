@@ -468,7 +468,13 @@ def _rule_ids(text: str, source: str = "gate.md") -> list[str]:
 
 
 def test_gate_type_accepts_each_declared_risk_in_both_menu_shapes() -> None:
-    """All three risk types are recognized, indented or at column 0."""
+    """All three risk types are recognized, indented or at column 0.
+
+    This is about the *vocabulary*: each literal token is understood in both menu shapes.
+    An earlier version had to register `GateMenu` for the duration, because a withdrawn
+    rule refused any unregistered `confirmation`; with that rule gone the three tokens are
+    judged on nothing but being one of the three.
+    """
     for indent in ("  ", ""):
         for declared in ("confirmation", "decision", "blocking"):
             assert _rule_ids(_gate_menu(declared=declared, indent=indent)) == [], (indent, declared)
@@ -916,7 +922,66 @@ GENERATED_DIRECTORIES = frozenset({
 # GENERATED_DIRECTORIES fails here with an explanation rather than as an
 # unexplained tally change.
 AUTHORED_CORPUS_CEILING = 600
+#: Every gate-risk rule, so a filter built from it cannot quietly stop covering one.
+#: A rule once existed in this band and not in this tuple, which left the read-slot
+#: property test below generating declarations and dropping the very findings they
+#: produced -- a test passing because it could not see the answer. That rule has since
+#: been withdrawn, but the hazard is the tuple's, not that rule's: the assertion beneath
+#: is what keeps this list and the module in step.
 _GATE_FINDINGS = ("PDSL700", "PDSL701", "PDSL702", "PDSL703")
+#: The `SHAPE` rules (issue #186), which share the `PDSL700` band but not the subject:
+#: they are about how a menu collects a reply, not about the risk a gate carries, so the
+#: gate property tests below must not filter on them. Named rather than excluded by a
+#: narrower `PDSL70\d` pattern, so that a rule added anywhere in the band still fails the
+#: assertion below until somebody says which of the two it belongs to.
+_MENU_SHAPE_FINDINGS = ("PDSL710", "PDSL711", "PDSL712", "PDSL713")
+
+
+def test_every_rule_in_the_band_is_classified() -> None:
+    """The filters are derived from the source, not from memory.
+
+    A property test filtered by a hand-written tuple stops covering any rule added to the
+    band afterwards, silently and in the safe-looking direction. This reads the rules the
+    module actually emits in the `PDSL700` band and requires every one of them to be
+    claimed by exactly one of the two tuples above.
+
+    It fired for real on a rebase: `SHAPE` arrived in this band from another change, and an
+    assertion that simply required `_GATE_FINDINGS` to hold everything would have been
+    "fixed" by adding shape rules to the gate filter — which would have had the gate
+    property tests generating shape findings and counting them as gate risk.
+    """
+    import re  # noqa: PLC0415
+
+    # Anchored at the repository root, not relative: a relative read makes this depend on
+    # pytest's working directory and raises `FileNotFoundError` before a single assertion
+    # runs. The corpus helper next door was already anchored; this one was missed. Raised
+    # in review.
+    #
+    # Guarded too, following the convention the same change introduced next door: a bare
+    # `OSError` naming a path says nothing about which guard just lost its subject, and
+    # this one loses it silently -- the rules it classifies would simply stop being read.
+    # Also raised in review, as an inconsistency within one diff.
+    repo_root = Path(__file__).resolve().parent.parent
+    relative = "skills/studio/scripts/studio/utils/pdsl.py"
+    try:
+        source = (repo_root / relative).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise AssertionError(
+            f"{relative} could not be read ({type(exc).__name__}), so the rule catalogue "
+            "this classifies cannot be checked; it was renamed, moved or removed"
+        ) from exc
+    emitted = set(re.findall(r'"(PDSL7\d\d)"', source))
+    assert emitted, "no PDSL700-band rule ids found; this guard has lost its subject"
+
+    overlap = set(_GATE_FINDINGS) & set(_MENU_SHAPE_FINDINGS)
+    assert not overlap, f"a rule is claimed by both filters: {sorted(overlap)}"
+
+    unclaimed = sorted(emitted - set(_GATE_FINDINGS) - set(_MENU_SHAPE_FINDINGS))
+    assert not unclaimed, (
+        f"rules emitted in the PDSL700 band that no filter claims: {unclaimed}. Add each to "
+        "_GATE_FINDINGS if it describes the risk a gate carries, or to "
+        "_MENU_SHAPE_FINDINGS if it describes how a menu collects a reply."
+    )
 
 
 def _gate_rule_ids(text: str) -> list[str]:
@@ -1042,7 +1107,13 @@ def test_property_an_undeclared_menu_never_yields_a_gate_finding() -> None:
 
 
 def test_property_a_declaration_in_a_read_slot_is_accepted() -> None:
-    """A valid declaration at the menu's own sub-header level must validate clean."""
+    """A valid declaration at the menu's own sub-header level must validate clean.
+
+    This is about *placement*. An earlier version had to substitute a stand-in registry
+    that accepted every name, because the generated menus carry random names and a
+    withdrawn rule refused any unregistered `confirmation`; with that rule gone the
+    declaration is judged on where it sits and nothing else.
+    """
     rng = random.Random(20260910)
     for _ in range(PROPERTY_ITERATIONS):
         text = _generated_menu(

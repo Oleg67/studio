@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import functools
 import re
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Tuple
 from unittest import mock
 
 import pytest
@@ -15,6 +17,229 @@ import pytest
 from studio.utils import pdsl
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: Directory names that never hold authored PDSL, matching the sibling suite in
+#: `test_pdsl_validate_cli.py` so the two agree about what "the corpus" means.
+CORPUS_GENERATED_DIRECTORIES = frozenset({
+    "node_modules", "vendor", "dist", "build", "__pycache__", "htmlcov",
+    ".cache", ".venv", "site-packages", ".bootstrap",
+})
+#: A tripwire on the scan's subject, not a cost bound. Its value is the error message: a
+#: generated tree landing under a directory this does not know fails here with an
+#: explanation rather than as an unexplained slowdown. Raised in review, which also noted
+#: that three tests below were each walking the tree independently with only a floor.
+#:
+#: **Deliberately not shared with `AUTHORED_CORPUS_CEILING` in `test_pdsl_validate_cli.py`,
+#: and not claimed to match it.** An earlier version of this comment said "the same
+#: convention and the same number", which was misleading: the two cover different corpora.
+#: This one scans `workflows/` + `skills/` and excludes `.bootstrap` — **264 sources**;
+#: that one scans `skills/`, `workflows/`, `requirements/` and `architecture/` and does not
+#: exclude `.bootstrap` — **371**. Both happening to sit at 600 is coincidence, and sharing
+#: one constant would tie two unrelated subjects together. Raised in review.
+CORPUS_CEILING = 600
+
+
+#: Cached for the whole pytest process, and safe to be, for one reason worth stating rather
+#: than assuming: **no test in this suite writes to `workflows/` or `skills/`.** Every
+#: fixture is built under `tmp_path`, so the tree these read is the checked-out working
+#: copy and cannot change while the process runs — there is nothing a stale snapshot could
+#: be stale against. `cache_clear()` is therefore never called, and the first caller's view
+#: is the only view.
+#:
+#: If a test ever does modify the authored tree, this is what it breaks and where to look:
+#: it would be reading a snapshot from before its own change. Raised in review, which asked
+#: for the policy rather than the behaviour.
+#:
+#: **And the policy is now enforced rather than promised.** Review's second point was that a
+#: docstring explaining why staleness cannot happen is not a thing that fails when it does:
+#: a test added anywhere later could break the invariant, and every scan here would keep
+#: reporting confidently on a tree that no longer exists. `_corpus_is_not_mutated_underneath`
+#: below records what the tree looked like when the cache was filled and checks it again
+#: afterwards, so the assumption breaks loudly at its own boundary.
+@functools.lru_cache(maxsize=1)
+def _authored_sources() -> Tuple[Tuple[str, str], ...]:
+    """Every authored markdown source under `workflows/` and `skills/`, read once.
+
+    Cached for the module because three tests each ran their own full-tree walk, reading
+    every file again. Anchored at `REPO_ROOT` rather than a relative `Path("workflows")`,
+    which quietly made those tests depend on the working directory.
+
+    Reads are guarded: an unreadable file is collected and reported together rather than
+    aborting the walk with a bare `OSError` naming one path, and decoding replaces rather
+    than raises, so a corpus file with a stray byte fails on what it says instead of on
+    being read at all. Raised in review.
+    """
+    sources, unreadable, empty = [], [], []
+    for folder in ("workflows", "skills"):
+        root = REPO_ROOT / folder
+        before = len(sources)
+        for path in sorted(root.rglob("*.md")):
+            if CORPUS_GENERATED_DIRECTORIES & set(path.relative_to(REPO_ROOT).parts):
+                continue
+            try:
+                sources.append((str(path.relative_to(REPO_ROOT)),
+                                path.read_text(encoding="utf-8-sig", errors="replace")))
+            except OSError as exc:
+                unreadable.append(f"{path.relative_to(REPO_ROOT)}: {type(exc).__name__}")
+        if len(sources) == before:
+            empty.append(folder)
+    assert not unreadable, f"corpus files could not be read: {unreadable}"
+    # Per root, not over the total. `rglob` on a renamed or deleted directory yields nothing
+    # and raises nothing, so one root disappearing left the other still producing sources,
+    # the combined assertion below still passing, and every scan in this file quietly
+    # covering half the corpus -- a guard reporting a clean result over a subject it had
+    # lost. Contributing nothing is checked rather than merely existing, since an empty
+    # directory loses exactly as much scope as a missing one. Raised in review.
+    assert not empty, (
+        f"these authored corpus roots contributed no sources: {empty}. Every scan in this "
+        "file has silently lost that part of its subject; if the tree really was "
+        "restructured, update the root list deliberately.")
+    assert sources, "no authored PDSL sources found; every scan below has lost its subject"
+    assert len(sources) <= CORPUS_CEILING, (
+        f"the authored corpus has grown to {len(sources)} sources against a ceiling of "
+        f"{CORPUS_CEILING}; if it has genuinely grown, raise the ceiling deliberately, and "
+        "if a generated tree has appeared, add its directory to "
+        "CORPUS_GENERATED_DIRECTORIES instead"
+    )
+    global _CORPUS_AS_CACHED  # pylint: disable=global-statement
+    _CORPUS_AS_CACHED = _corpus_fingerprint()
+    return tuple(sources)
+
+
+#: What the authored tree looked like at the moment the cache above was filled, or `None`
+#: if nothing has read it yet. Compared after the fact; never read by the scans themselves.
+_CORPUS_AS_CACHED = None
+
+
+def _corpus_fingerprint() -> Tuple[Tuple[str, int, int], ...]:
+    """``(path, size, mtime_ns)`` for the authored tree — enough to notice a write.
+
+    Deliberately not a hash of the contents: this runs twice per session, and the point is
+    to detect that something changed, not to say what. A same-size same-timestamp rewrite
+    would slip through, which is a trade accepted for a tripwire that costs nothing.
+    """
+    seen = []
+    for folder in ("workflows", "skills"):
+        for path in sorted((REPO_ROOT / folder).rglob("*.md")):
+            if CORPUS_GENERATED_DIRECTORIES & set(path.relative_to(REPO_ROOT).parts):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                seen.append((str(path.relative_to(REPO_ROOT)), -1, -1))
+                continue
+            seen.append((str(path.relative_to(REPO_ROOT)), stat.st_size, stat.st_mtime_ns))
+    return tuple(seen)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _corpus_is_not_mutated_underneath():
+    """Fail if the authored tree changes after the process-lifetime cache was filled.
+
+    The cache above is only safe because no test writes to `workflows/` or `skills/`. That
+    was true when written and argued in a comment, which review correctly said is not
+    enforcement: the invariant belongs to the whole suite, anyone can break it from a file
+    far away, and the failure is silent — every scan keeps passing against a snapshot of a
+    tree that has moved.
+
+    Compared only if something actually filled the cache, so this reports a broken
+    assumption and never a merely unused one.
+    """
+    yield
+    if _CORPUS_AS_CACHED is None:
+        return
+    now = _corpus_fingerprint()
+    if now == _CORPUS_AS_CACHED:
+        return
+    was, has = dict((p, (s, m)) for p, s, m in _CORPUS_AS_CACHED), dict(
+        (p, (s, m)) for p, s, m in now)
+    changed = sorted(set(was) ^ set(has)) + sorted(
+        p for p in set(was) & set(has) if was[p] != has[p])
+    raise AssertionError(
+        f"the authored corpus changed while this module ran: {changed[:10]}. Every scan in "
+        "this file read a cached snapshot from before that change, so their results are "
+        "about a tree that no longer exists. Whatever wrote to `workflows/` or `skills/` "
+        "should build its fixture under `tmp_path` instead.")
+
+
+def _required_source(relative: str) -> str:
+    """One named corpus file, read with its absence reported as itself.
+
+    Anchored at `REPO_ROOT`, because a relative `Path("skills/...")` makes the test depend
+    on the working directory, and guarded, because a bare `OSError` naming a path says
+    nothing about which guard just lost its subject. Raised in review.
+    """
+    path = REPO_ROOT / relative
+    try:
+        return path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise AssertionError(
+            f"{relative} could not be read ({type(exc).__name__}), so the guard that reads "
+            "it is not checking anything; it was renamed, moved or removed"
+        ) from exc
+
+
+def _declared_only(text: str) -> str:
+    """``text`` with everything outside a ```pdsl fence blanked, line count preserved.
+
+    PDSL lives in fenced blocks and prose lives around them, so the fence is what separates
+    a declaration from someone writing about one. Without it a `MENU` quoted in prose, or
+    shown inside a ```bash block as an illustration, counts as a real declaration — and this
+    scan feeds a corpus measurement that a design decision rests on.
+
+    **Zero instances today**: all 106 declarations in `workflows/` + `skills/` are already
+    fenced, so the count does not move. Added because the sibling helper in this file goes
+    through the checker's own block scan for exactly this reason, and a scanner that
+    disagrees with the checker about what a declaration is will eventually disagree about
+    the number. Raised in review.
+
+    Lines are blanked rather than removed so any line number derived from the result still
+    points at the right place in the file.
+    """
+    out, fence = [], None
+    for line in text.splitlines():
+        opening = re.match(r"^```(\w*)", line)
+        if opening is not None:
+            fence = None if fence is not None else (opening.group(1) or "")
+            out.append("")
+            continue
+        out.append(line if fence == "pdsl" else "")
+    return "\n".join(out) + "\n"
+
+
+def _declarations_in(text: str) -> list:
+    """``(name, block)`` for every `MENU` declared in one source.
+
+    Split out from the tree walk so both halves are testable on a crafted source: the
+    corpus has no unfenced declaration and no tab-separated header, so measuring the real
+    tree cannot tell a correct scan from a blind one. Removing the fence filter from the
+    walk left every test green until this was a function.
+    """
+    return [
+        (match.group(1), match.group(0))
+        for match in re.finditer(
+            # The lookahead accepts the same separators the pattern itself does. It read
+            # `^MENU ` with a literal space, so a tab-separated declaration did not
+            # terminate the block before it -- the previous menu's body swallowed it whole
+            # and the declaration vanished from the count. Raised in review.
+            r"^MENU[ \t]+([A-Za-z][\w-]*)(.*?)(?=^MENU[ \t]+|^UNIT[ \t]+|\Z)",
+            _declared_only(text), re.M | re.S)
+    ]
+
+
+@functools.lru_cache(maxsize=1)
+def _menu_declarations() -> Tuple[Tuple[str, str, str], ...]:
+    """``(path, name, body)`` for every `MENU` declared in the corpus.
+
+    A tuple of triples, not a dict keyed by name: `TerminalStates` is declared in two
+    files, so keying by name silently dropped one and measured the survivor twice.
+    """
+    found = []
+    for path, body in _authored_sources():
+        found.extend((path, name, block) for name, block in _declarations_in(body))
+    return tuple(found)
+
+
 STUDIO_PY = REPO_ROOT / "skills" / "studio" / "scripts" / "studio.py"
 
 PROMPT_ROOTS = (
@@ -1099,6 +1324,129 @@ def test_the_runtime_judgement_paths_named_in_the_baseline_comment_still_exist()
         ]
     )
 
+
+class TestWhyNoLintDecidesWhichGateMayAnswerForTheUser:
+    """The evidence that a declared gate type is a human judgement, not a lintable one.
+
+    `confirmation` is the one type that auto-proceeds, so a wrong label on it is the one
+    that could answer a question the user never saw. The obvious guard is to cross-check
+    the label against the blocked-action invariants — and this measures why that cannot
+    work: those invariants are written as *categories* (destructive operations,
+    credentials, git mutation, unknown blast radius), and matching them by their own
+    vocabulary refuses **every menu declaration in the tree**. A lint built that way
+    disables the type rather than guarding it.
+
+    An earlier attempt inverted it into a registry of gates reviewed as safe to
+    auto-proceed. Review found that unsound — it keys on a bare menu name, and a name
+    declared twice authorises the copy nobody read — and it was withdrawn rather than
+    patched, because the inversion answered the wrong question. The frozen design contract
+    for these types and the labelling issue (GH #219) say the same thing: which type a gate
+    carries is a judgement made by a person at labelling time *so that it is reviewable*.
+    The protection belongs where the type is **consumed** — a filter that reads these same
+    invariants while the workflow runs and forces a stop — not where it is written.
+
+    The measurement is kept because it is that argument's evidence: it says plainly that no
+    lint can make this call, so nobody rebuilds one from the same instinct.
+    """
+
+    def test_only_fenced_pdsl_counts_as_a_declaration(self) -> None:
+        """A `MENU` shown as an illustration is not a menu.
+
+        The scan read raw file text, so a declaration quoted in prose or shown inside a
+        ```bash block counted as real — and this scan feeds the corpus measurement a design
+        decision rests on. The sibling helper in this file goes through the checker's own
+        block scan for exactly this reason; this one did not. Raised in review.
+
+        **Zero instances in the tree**, so the published count is unchanged at 106. Pinned
+        on crafted sources for that reason: measuring the corpus cannot tell a fence-aware
+        scan from a blind one when every declaration is already fenced.
+        """
+        assert "MENU" not in _declared_only(
+            "```bash\nMENU Illustration\n  OPTIONS:\n    1 go -> CONTINUE X\n```\n")
+        assert "MENU" not in _declared_only("MENU InProse is how you declare one.\n")
+        # And a real one survives, or the filter would be a silent deletion.
+        kept = _declared_only("```pdsl\nMENU Real\n  OPTIONS:\n    1 go -> CONTINUE X\n```\n")
+        assert "MENU Real" in kept, kept
+        # Blanked, not removed, so a line number taken from the result still points true.
+        assert len(kept.splitlines()) == 5, kept.splitlines()
+
+        # And the extraction actually applies it. Asserted through `_declarations_in`
+        # rather than the filter alone: removing the filter from the walk left every test
+        # green, because no corpus file has an unfenced declaration to notice with.
+        assert _declarations_in("```bash\nMENU Illustration\n  OPTIONS:\n```\n") == []
+        assert [n for n, _b in _declarations_in(
+            "```pdsl\nMENU Real\n  OPTIONS:\n    1 go -> CONTINUE X\n```\n")] == ["Real"]
+
+    def test_a_tab_separated_declaration_still_ends_the_block_before_it(self) -> None:
+        """The corpus scan's lookahead must accept what its own pattern accepts.
+
+        The pattern matches `MENU[ \\t]+name`, but the lookahead that ends a block read
+        `^MENU ` with a literal space. So a tab-separated declaration did not terminate the
+        block before it: the previous menu's body swallowed it whole, and one declaration
+        disappeared from the count entirely. Zero instances in the tree today — this is
+        pinned because a pattern that disagrees with itself is the defect, not how often it
+        fires. Raised in review.
+
+        Asserted on a literal body rather than the corpus, precisely because the corpus has
+        none: measuring the real tree cannot tell this fix from its absence.
+        """
+        body = ("MENU First\n  OPTIONS:\n    1 a -> CONTINUE X\n"
+                "MENU\tSecond\n  OPTIONS:\n    1 b -> CONTINUE Y\n")
+        found = re.findall(
+            r"^MENU[ \t]+([A-Za-z][\w-]*)(.*?)(?=^MENU[ \t]+|^UNIT[ \t]+|\Z)",
+            body, re.M | re.S)
+        assert [name for name, _ in found] == ["First", "Second"], found
+        # And the first block stops where the second begins, rather than absorbing it.
+        assert "Second" not in found[0][1], found[0][1]
+
+    def test_matching_the_invariants_by_vocabulary_refuses_every_gate(self) -> None:
+        """One number carries the whole argument, so the number is pinned.
+
+        The claim is that cross-checking a declared type against the blocked-action
+        categories is *indiscriminate*, not merely imperfect. Nothing reproduced it when it
+        was first asserted, so a corpus that drifted would have left the rationale quietly
+        false. Raised in review.
+
+        Asserted as the relationship rather than the exact count: what matters is that
+        vocabulary-matching is indiscriminate, not that the tree has a particular number
+        of menus. Counted as *declarations* rather than names: two files declare
+        `TerminalStates`, and keying by name measured the survivor twice.
+        """
+        stop = {"prompts", "prompt", "confirmations", "or", "any", "that", "authorize",
+                "auto-answer", "never", "the", "a", "an", "and", "of", "in", "to", "which",
+                "may", "be", "fixed", "selects", "changes", "operations", "controls",
+                "approvals", "choices", "state", "rules", "needs", "human", "judgment",
+                "judgement", "result", "acceptance", "final", "review", "other"}
+        invariants = [
+            line.strip()[2:]
+            for line in _required_source(
+                "skills/studio/modules/brave-new-world-eligibility.md").splitlines()
+            if line.strip().startswith("- NEVER")]
+        terms = {word for line in invariants for fragment in re.split(r",| or ", line)
+                 for word in re.findall(r"[a-z][a-z-]{3,}", fragment.lower())
+                 if word not in stop}
+        assert len(terms) > 50, f"the invariant vocabulary has collapsed to {len(terms)} terms"
+
+        # A list, not a dict keyed by name: `TerminalStates` is declared in two files, so
+        # keying by name silently dropped one of them and measured the survivor twice
+        # over. Raised in review — and it is precisely what the duplicate-name tripwire
+        # beside this test exists to catch, written into the measurement itself.
+        declarations = _menu_declarations()
+        assert len(declarations) > 50, (
+            f"only {len(declarations)} menu declarations found; the corpus scan is wrong")
+        # Matched on **word boundaries**, not substrings. Review asked, fairly, whether the
+        # result was an artefact of loose matching -- `state` hitting `statement`, and so
+        # on. Measured both ways before answering: substring refuses 106 of 106 and word
+        # boundary refuses 106 of 106, so the conclusion does not depend on the method. The
+        # stricter one is used here, because a claim that survives it needs no defending.
+        boundary = [re.compile(r"\b" + re.escape(term) + r"\b") for term in terms]
+        refused = [(path, name) for path, name, body in declarations
+                   if any(pattern.search((name + " " + body).lower()) for pattern in boundary)]
+        assert len(refused) == len(declarations), (
+            "vocabulary-matching no longer refuses every menu declaration, so a blocklist "
+            "may now be viable and the inversion is worth revisiting: "
+            f"{len(refused)} of {len(declarations)}"
+        )
 
 def test_the_untyped_menu_surface_does_not_grow() -> None:
     """A newly introduced MENU must declare a gate risk TYPE.
