@@ -1068,7 +1068,6 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "skills/studio/modules/ci-discovery-run.md#0::CiDiscoverySkipMenu",
     "skills/studio/modules/coding-prep-gates.md#0::CodingExploreMenu",
     "skills/studio/modules/coding-prep-gates.md#1::CodingBrainstormMenu",
-    "skills/studio/modules/debug-prompts-command-menu-nav.md#0::DebuggerMenu",
     "skills/studio/modules/debug-prompts-failures.md#0::DebugRunFailureMenu",
     "skills/studio/modules/debug-prompts-failures.md#0::DebugStepFailureMenu",
     "skills/studio/modules/explain-intent-explore.md#2::ExplainExploreMenu",
@@ -1107,20 +1106,15 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "skills/studio/modules/plan-validate-finalize.md#0::OversizedPhaseRecoveryMenu",
     "skills/studio/modules/plan-validate-finalize.md#1::Phase4NextStepsMenu",
     "skills/studio/modules/planning-runtime.md#8::PlanSaveGateMenu",
-    "skills/studio/modules/review/fix-approval.md#0::ReviewFindingsNavigation",
     "skills/studio/modules/review/fix-approval.md#12::ReviewFixPartialIdsRetryMenu",
-    "skills/studio/modules/review/fix-approval.md#3::ReviewFixScope",
     "skills/studio/modules/review/semantic-loop-skeleton.md#0::ReviewGranularityMenu",
     "skills/studio/modules/routing/companion-skills.md#1::CompanionSkillOfferMenu",
     "skills/studio/modules/routing/companion-skills.md#2::CompanionRoutingMenuOptions",
     "skills/studio/modules/routing/root-intent-routing.md#1::IntentSkillMenu",
     "skills/studio/modules/routing/root-intent-routing.md#1::MatchedIntentSkillMenu",
     "skills/studio/modules/routing/root-intent-routing.md#9::AllCfSkillsMenu",
-    "skills/studio/modules/runtime/blocked-next-actions.md#2::BlockedNextActionsMenu",
     "skills/studio/modules/session/shutdown.md#0::StudioShutdownConfirm",
     "skills/studio/modules/subagents/dispatch.md#1::SubAgentApprovalRequest",
-    "skills/studio/modules/subagents/dispatch.md#1::SubAgentFallbackLimitRequest",
-    "skills/studio/modules/subagents/dispatch.md#1::SubAgentFallbackRequest",
     "skills/studio/modules/subagents/git-commit-mode.md#5::GitCommitModeMenu",
     "skills/studio/modules/ui/next-actions.md#0::NextActionsMenu",
     "skills/studio/modules/workspace-configure.md#0::SourceConfirmMenu",
@@ -1255,8 +1249,14 @@ RUNTIME_JUDGEMENT_PATHS = {
 #: the bare type tokens, since `SUB_AGENT_GROUP_DECISION` would otherwise match
 #: "decision". A proxy, not a proof: a path could read a declaration in wording
 #: this misses.
+#: The third alternative requires a non-space character before it on the same line, so a
+#: menu's own `TYPE: <token>` **declaration** is not read as evidence that the file reads
+#: declared types. `dispatch.md` began declaring one when its two fallback gates were typed
+#: (GH #219), and this fired — while the file still resolves by runtime judgement exactly as
+#: the comment says. The proxy was wrong in the direction its own note did not anticipate:
+#: it warned that a read could be missed, and it was a declaration that was over-matched.
 DECLARED_TYPE_READ_RE = re.compile(
-    r"declared\s+TYPE|gate\s+risk|TYPE:\s*(?:confirmation|decision|blocking)\b",
+    r"declared\s+TYPE|gate\s+risk|\S[ \t]*TYPE:\s*(?:confirmation|decision|blocking)\b",
     re.IGNORECASE,
 )
 
@@ -3233,3 +3233,349 @@ def test_holding_a_phase_back_is_announced_not_silent() -> None:
             assert "held by status alone" in line, (
                 f"a by-hand hold would be announced as waiting on a key it has none of: {line}"
             )
+
+
+def _types_in(text: str) -> dict:
+    """``menu name -> declared TYPE`` for one source.
+
+    Split out from the tree walk so it can be exercised on a crafted source. The corpus has
+    no stray `TYPE:` and no tab-separated header, so measuring the real tree cannot tell a
+    correct scan from a loose one — the first version of this kept a menu "current" to the
+    end of the file and attributed a `TYPE:` belonging to no menu to whichever menu came
+    before it. Reproduced, and caught only once there was a fixture for it.
+    """
+    types: dict = {}
+    menu, sub_indent = None, None
+    for line in text.splitlines():
+        stripped = line.strip()
+        header = re.match(r"^\s*MENU\s+([A-Za-z][\w-]*)", line)
+        if header:
+            menu, sub_indent = header.group(1), None
+            continue
+        # The declaration region closes at the first sub-header that is not
+        # `TITLE`/`TYPE`/`SHAPE`, and at anything that opens a new block or ends the fence
+        # -- the same rule the validator applies.
+        if stripped.startswith("UNIT ") or stripped.startswith("```"):
+            menu = None
+            continue
+        section = re.match(r"^\s*([A-Z][A-Z_]*):\s*$", line)
+        if section and section.group(1) not in {"TITLE", "TYPE", "SHAPE"}:
+            menu = None
+            continue
+        # The menu's sub-header indent is learned from its *first* sub-header, and a line
+        # indented deeper is continuation text the validator ignores. Accepting any
+        # indentation let this report a type the validator does not see -- so a gate could
+        # look `blocking` here while being undeclared in the only place that matters, and
+        # the guard built on this would pass on nothing. Raised in review.
+        sub = re.match(r"^(\s*)([A-Z][A-Z_]*):", line)
+        if menu is not None and sub is not None:
+            if sub_indent is None:
+                sub_indent = len(sub.group(1))
+            elif len(sub.group(1)) > sub_indent:
+                continue                    # continuation text, not a sub-header
+        declared = re.match(r"^\s*TYPE:\s*(\S+)\s*$", line)
+        if declared and menu:
+            types[menu] = declared.group(1)
+            menu = None
+    return types
+
+
+#: Every root that holds authored PDSL. `workflows/` and `skills/` alone missed eight menu
+#: declarations in `requirements/` and `architecture/` -- including ones the frozen untyped
+#: baseline already tracks -- so a menu named there was invisible to every guard below, and
+#: a rename could not be told from a deletion. Raised in review.
+#:
+#: **These are not all the same kind of menu, and the counts differ because of it.** The
+#: shipped, reachable surface is `workflows/` + `skills/`: 106 declarations, which is the
+#: figure the story's sizing and GH #219 both use. `architecture/specs/PDSL.md` and
+#: `requirements/` hold a further 8, which are *specification examples* -- illustrations of
+#: the language, not gates any workflow reaches. Two of them carry a `TYPE:` as part of the
+#: illustration, so a naive count of declared types reads 9 where the shipped surface has
+#: 7. Scanned here for **existence**, so the rename check below is complete; never treated
+#: as evidence about how much of the reachable surface is typed.
+AUTHORED_ROOTS = ("workflows", "skills", "requirements", "architecture")
+
+
+def _declared_types() -> dict:
+    """``menu name -> declared TYPE`` across the authored tree.
+
+    Read from the source rather than through the validator, because the question here is
+    what an author wrote, not whether it parses -- the validator has its own tests for that.
+    """
+    types: dict = {}
+    for folder in AUTHORED_ROOTS:
+        for path in sorted((REPO_ROOT / folder).rglob("*.md")):
+            types.update(_types_in(path.read_text(encoding="utf-8-sig", errors="replace")))
+    return types
+
+
+def test_a_type_outside_a_menu_is_not_attributed_to_the_menu_before_it() -> None:
+    """The scan must stop where the menu's declaration region stops.
+
+    A menu with no `TYPE` used to stay "current" to the end of the file, so a `TYPE:` that
+    belongs to no menu -- one the validator would itself reject with `PDSL702` -- was read
+    as that menu's declaration. The consequence is not cosmetic: this scan backs the only
+    enforcement the labels have, so a misattributed type means the guard is checking the
+    wrong menu. Raised in review.
+
+    Crafted rather than measured, because the real tree contains no such line: removing the
+    region termination leaves every corpus answer identical, so only a fixture can tell the
+    two apart.
+    """
+    stray = ("MENU Alpha\nTITLE: first\nOPTIONS:\n  1 go -> CONTINUE X\n"
+             "\nUNIT Somewhere\nDO:\n  EMIT \"x\"\nTYPE: confirmation\n")
+    assert _types_in(stray) == {}, _types_in(stray)
+
+    # And the ordinary case still reads, or the fix above would be a silent deletion.
+    ordinary = "MENU Beta\nTITLE: second\nTYPE: blocking\nOPTIONS:\n  1 go -> CONTINUE X\n"
+    assert _types_in(ordinary) == {"Beta": "blocking"}, _types_in(ordinary)
+
+    # A second menu's declaration is its own, not the first one's.
+    two = ("MENU Gamma\nTITLE: a\nOPTIONS:\n  1 go -> CONTINUE X\n"
+           "MENU Delta\nTITLE: b\nTYPE: decision\nOPTIONS:\n  1 go -> CONTINUE Y\n")
+    assert _types_in(two) == {"Delta": "decision"}, _types_in(two)
+
+    # `OPTIONS:` alone must close the region. Kept as its own case because the first
+    # fixture also contains a `UNIT`, so the block rule caught it and the section rule
+    # could be deleted with everything still green -- found by mutation, not by reading.
+    after_options = ("MENU Epsilon\nTITLE: c\nOPTIONS:\n  1 go -> CONTINUE X\n"
+                     "TYPE: confirmation\n")
+    assert _types_in(after_options) == {}, _types_in(after_options)
+
+    # A `UNIT` closes it with no section header in between, and a fence close does too.
+    # Three cases rather than one because each rule needs an input only it can catch:
+    # with all of them folded into a single fixture, whichever rule fired first made the
+    # others deletable with everything still green. Found by mutating each half in turn.
+    after_unit = "MENU Zeta\nTITLE: d\nUNIT Elsewhere\nTYPE: confirmation\n"
+    assert _types_in(after_unit) == {}, _types_in(after_unit)
+
+    after_fence = "MENU Eta\nTITLE: e\n```\n\nTYPE: confirmation\n"
+    assert _types_in(after_fence) == {}, _types_in(after_fence)
+
+    # Indented deeper than the menu's own sub-headers, the validator reads a line as
+    # continuation text and sees no declaration. Accepting it here would report a type
+    # nothing else agrees exists — so the guard built on this scan would pass while the
+    # gate was, to the validator, undeclared. Raised in review. No corpus file is written
+    # this way, so only a crafted source can tell the rule from its absence.
+    nested = "MENU Theta\nTITLE: f\n    TYPE: blocking\nOPTIONS:\n  1 go -> CONTINUE X\n"
+    assert _types_in(nested) == {}, _types_in(nested)
+
+    # And a menu whose sub-headers are *all* indented is ordinary, not nested — the indent
+    # is learned per menu from its first sub-header, which is how `DebuggerMenu` is written.
+    indented = ("MENU Iota:\n  TITLE: g\n  TYPE: blocking\n  OPTIONS:\n"
+                "    1 go -> CONTINUE X\n")
+    assert _types_in(indented) == {"Iota": "blocking"}, _types_in(indented)
+
+
+#: CamelCase tokens that appear in the invariants and are not menu names. Listed, so that
+#: anything else which stops resolving to a menu fails loudly instead of being filtered out
+#: of the check. `ID` comes from "finding-ID capture"; the rest are PDSL keywords.
+_NOT_MENU_NAMES = frozenset({
+    "ID", "REQUIRE", "ALWAYS", "NEVER", "WAIT", "STOP_TURN", "INVARIANTS",
+})
+
+
+def _never_bullets() -> list:
+    """Each `- NEVER` invariant as one string, continuation lines included.
+
+    Read line by line, a bullet wrapped across two physical lines loses everything after
+    the first -- so a menu named on the second line would silently stop being checked.
+    None wrap today, which is exactly why the reading had to be fixed rather than measured:
+    the corpus cannot tell the two versions apart. Raised in review.
+    """
+    text = (REPO_ROOT / "skills/studio/modules/brave-new-world-eligibility.md").read_text(
+        encoding="utf-8-sig", errors="replace")
+    bullets, current = [], None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- NEVER"):
+            if current is not None:
+                bullets.append(current)
+            current = stripped[2:]
+        elif current is not None:
+            # A continuation is indented and is not itself a new bullet or a fence.
+            if stripped and not stripped.startswith(("- ", "```")) and line[:1].isspace():
+                current += " " + stripped
+            else:
+                bullets.append(current)
+                current = None
+    if current is not None:
+        bullets.append(current)
+    return bullets
+
+
+def test_every_menu_the_invariants_name_is_declared_blocking() -> None:
+    """A gate the never-auto-answer list names by name must never be anything weaker.
+
+    Derived from the invariants rather than listed here, so a menu added to that list later
+    is covered without anyone remembering this test. Those invariants are mostly written as
+    *categories*, which no check can match — matching them by vocabulary refuses every menu
+    in the tree (GH #223) — but where one names a menu outright, the label is mechanical and
+    is pinned here.
+
+    This is the only enforcement there is. The lint that would have refused a weaker
+    declaration was withdrawn as unsound, so between an author's label and the behaviour it
+    authorises there is review and this test. Part of GH #219.
+    """
+    never = _never_bullets()
+    assert len(never) > 5, f"the invariant list has collapsed to {len(never)} entries"
+
+    declared = _declared_types()
+    known = _menu_names()
+    candidates = {
+        word for line in never
+        for word in re.findall(r"\b([A-Z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]*)+)\b", line)
+    } - _NOT_MENU_NAMES
+
+    # A name that no longer resolves to a menu **fails**, rather than being filtered out.
+    # The previous version kept only candidates it could find, so renaming or deleting a
+    # menu the invariants name by hand would have quietly shrunk the set this checks and
+    # left the test green with nothing to say. Raised in review.
+    missing = sorted(candidates - known)
+    assert not missing, (
+        f"the never-auto-answer invariants name {missing}, which match no MENU in the "
+        "tree. Either the menu was renamed or removed and the invariant needs updating, "
+        "or the name belongs in _NOT_MENU_NAMES because it was never a menu."
+    )
+
+    named = sorted(candidates)
+    assert named, "no invariant names a menu any more; this guard has lost its subject"
+
+    wrong = {name: declared.get(name, "(undeclared)") for name in named
+             if declared.get(name) != "blocking"}
+    assert not wrong, (
+        f"menus named outright in the never-auto-answer invariants must be declared "
+        f"`blocking`: {wrong}"
+    )
+
+
+def _menu_names() -> set:
+    """Every menu declared anywhere in the authored tree."""
+    found = set()
+    for folder in AUTHORED_ROOTS:
+        for path in sorted((REPO_ROOT / folder).rglob("*.md")):
+            found.update(re.findall(
+                r"^\s*MENU\s+([A-Za-z][\w-]*)",
+                path.read_text(encoding="utf-8-sig", errors="replace"), re.M))
+    return found
+
+
+def test_the_gates_covered_by_an_invariant_category_are_declared_blocking() -> None:
+    """Two gates the invariants cover by subject rather than by name.
+
+    Literals, because the match is a judgement rather than a derivation — and a judgement
+    recorded as a literal with its reasoning is honest, where one dressed up as a
+    derivation is not:
+
+    * `DebuggerMenu` — the invariants name *"debugger prompts, breakpoint controls,
+      step/continue approvals, debug-gate prompts"*, and this menu is all four.
+    * `BlockedNextActionsMenu` — the invariants name *"missing prerequisites"*, and its
+      `override` option exists to bypass the gates that are missing.
+
+    Part of GH #219. If either label is ever revisited, this test is where the argument for
+    it was written down.
+    """
+    declared = _declared_types()
+    for menu in ("DebuggerMenu", "BlockedNextActionsMenu"):
+        assert declared.get(menu) == "blocking", (
+            f"{menu} is declared {declared.get(menu, '(nothing)')}, but the "
+            "never-auto-answer invariants cover it by subject"
+        )
+
+
+def _menu_bodies() -> dict:
+    """``menu name -> the option lines of its body`` across the authored tree."""
+    bodies: dict = {}
+    # The same roots `_declared_types` walks. These disagreed: a menu declared
+    # `confirmation` under `requirements/` or `architecture/` had `bodies.get(menu, [])`
+    # return empty, so the session-wide-option guard below found nothing for it whatever its
+    # options actually said -- a guard silently inapplicable to part of what it checks.
+    # Raised in review.
+    for folder in AUTHORED_ROOTS:
+        for path in sorted((REPO_ROOT / folder).rglob("*.md")):
+            name, collecting = None, []
+            for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+                header = re.match(r"^\s*MENU\s+([A-Za-z][\w-]*)", line)
+                if header:
+                    if name:
+                        bodies[name] = collecting
+                    name, collecting = header.group(1), []
+                    continue
+                if line.strip().startswith("UNIT "):
+                    if name:
+                        bodies[name] = collecting
+                    name, collecting = None, []
+                    continue
+                if name is not None:
+                    collecting.append(line)
+            if name:
+                bodies[name] = collecting
+    return bodies
+
+
+def test_the_two_corpus_scans_cover_the_same_tree() -> None:
+    """`_declared_types` and `_menu_bodies` are read together, so they must see the same menus.
+
+    They did not: one walked all four authored roots and the other two, so a menu declared
+    `confirmation` outside `workflows/`/`skills/` had an empty body as far as the
+    session-wide-option guard was concerned — the guard would have passed it no matter what
+    its options said. A guard that is silently inapplicable to part of its subject is worse
+    than one that is absent, because it reads as coverage. Raised in review.
+
+    Asserted as a relationship between the two rather than on a fixed number, so it stays
+    true as the corpus grows: every menu with a declared type must have a body to check.
+    """
+    declared, bodies = _declared_types(), _menu_bodies()
+    missing = sorted(name for name in declared if name not in bodies)
+    assert not missing, (
+        f"these menus declare a type but have no body for the guards to read: {missing}. "
+        "The two scans are walking different roots again."
+    )
+
+
+def test_no_auto_proceeding_gate_offers_a_session_wide_option() -> None:
+    """A `confirmation` gate may answer for the user — but only for this turn.
+
+    `subagents/dispatch.md` already draws this line and draws it in the shipped rules: a
+    calling workflow **may** pre-set `approve-once` on the user's behalf, and may **never**
+    pre-set `approve-session` — *"session-wide preference must only be set by the user"*.
+    A `confirmation` label says "auto-proceed on the recommendation" without naming which
+    option, so a menu that offers a session-wide choice alongside a one-shot one could have
+    the session-wide one taken autonomously. That is the one thing those rules forbid.
+
+    So the invariant is derived rather than listed: no gate declared `confirmation` may
+    carry an option that sets a session-scoped preference. It is what keeps
+    `SubAgentApprovalRequest` — whose recommendation reads only *"Recommended: native"*,
+    ambiguous between its once and session options — from being labelled `confirmation`
+    until that ambiguity is resolved. Part of GH #219.
+    """
+    declared = _declared_types()
+    bodies = _menu_bodies()
+    offenders = {}
+    for menu, kind in declared.items():
+        if kind != "confirmation":
+            continue
+        session = [line.strip() for line in bodies.get(menu, [])
+                   if re.search(r"SET\s+\w+\s*=\s*\S*session\b", line)]
+        if session:
+            offenders[menu] = session[0][:90]
+    assert not offenders, (
+        "a gate declared `confirmation` offers a session-wide option, so auto-proceeding "
+        f"on its recommendation could set a session-wide preference the user never gave: "
+        f"{offenders}"
+    )
+
+
+def test_the_two_fallback_gates_are_declared_confirmation() -> None:
+    """The two sub-agent gates that offer no session-wide escalation.
+
+    Both state a recommendation in the menu itself (*"inline is suggested"*), every
+    alternative is reversible, and `stop` is always present — the shape `confirmation` is
+    defined for. Neither offers a session-scoped option, so the guard above holds for them
+    by construction rather than by luck. Part of GH #219.
+    """
+    declared = _declared_types()
+    for menu in ("SubAgentFallbackRequest", "SubAgentFallbackLimitRequest"):
+        assert declared.get(menu) == "confirmation", (
+            f"{menu} is declared {declared.get(menu, '(nothing)')}"
+        )
