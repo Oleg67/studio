@@ -436,8 +436,24 @@ def _build_validate_session(args: argparse.Namespace) -> Tuple[Optional[_Validat
 
 
 # @cpt-begin:cpt-studio-flow-traceability-validation-validate:p1:inst-build-policy
+#: Three helpers below — `_emit_policy_config_error`, `_build_severity_policy`
+#: and `_show_severity_overrides` — are also imported by `commands/validate_toc`,
+#: which must read one project's severity exactly the way this command does.
+#: Treat their signatures as a contract with that module, not as private detail.
+#:
+#: They stay here rather than moving to `utils/severity.py`: `_build_severity_policy`
+#: calls `build_severity_policy`, which lives in `utils/constraints.py`, and
+#: `constraints` already imports `severity` — so that direction is a cycle. The
+#: other two are presentation, which `utils/` has no business owning.
+#: `tests/test_validate_toc_policy.py` exercises all three through the real CLI,
+#: so a changed return shape fails loudly rather than silently.
+
+
 def _emit_policy_config_error(errors: List[str]) -> int:
-    """Refuse the run when the severity configuration cannot be read."""
+    """Refuse the run when the severity configuration cannot be read.
+
+    Also used by `validate-toc`; see the note above before changing its shape.
+    """
     ui.result({
         "status": "ERROR",
         "message": "validation severity configuration is invalid",
