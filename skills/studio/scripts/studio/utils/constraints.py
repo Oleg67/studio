@@ -4439,12 +4439,19 @@ def _find_heading_matches_in_scope(
     heading_constraint: HeadingConstraint,
     scope_start: int,
     scope_end: int,
-    claimed: Optional[Set[int]] = None,
+    claimed: Set[int],
 ) -> Tuple[List[Dict[str, object]], int, int]:
-    taken = claimed or frozenset()
+    """Find the first consecutive run of headings no other constraint holds.
+
+    ``claimed`` is what keeps the forward walk and the rescue pass from both
+    standing on one section. The forward walk cannot reach a claimed heading
+    today — every claim lies behind the cursor — but the rule belongs here
+    rather than in an invariant three call sites have to keep true.
+    """
     match_idx = scope_start
     while match_idx < scope_end and (
-        match_idx in taken or not _match_heading_constraint(headings[match_idx], heading_constraint)
+        match_idx in claimed
+        or not _match_heading_constraint(headings[match_idx], heading_constraint)
     ):
         match_idx += 1
     if match_idx >= scope_end:
@@ -4454,7 +4461,7 @@ def _find_heading_matches_in_scope(
     if heading_constraint.multiple is not False:
         while (
             next_idx < scope_end
-            and next_idx not in taken
+            and next_idx not in claimed
             and _match_heading_constraint(headings[next_idx], heading_constraint)
         ):
             matches.append(headings[next_idx])
@@ -4618,6 +4625,7 @@ def _matched_heading_info(
 def _order_offender(
     heading_ctx: HeadingValidationContext,
     headings: Sequence[Dict[str, object]],
+    order: HeadingOrder,
     heading_id: str,
     match_idx: int,
 ) -> Optional[Dict[str, object]]:
@@ -4632,7 +4640,6 @@ def _order_offender(
     that has already been matched is one this one is supposed to follow — there
     is no already-matched section it was supposed to precede.
     """
-    order = heading_ctx.order or HeadingOrder()
     offenders = [
         (other_idx, other_id)
         for other_id, other_idx in heading_ctx.matched_idx_by_id.items()
@@ -4659,16 +4666,19 @@ def _append_order_violation_error(
 
     Only a declared ``order`` can be violated. Without one the rescue stays
     silent: the kit never said where the section goes, so nothing in the
-    document contradicts it.
+    document contradicts it — and this is the only place that decides so, which
+    is why ``_order_offender`` takes the order as an argument rather than
+    reading it back off the context and defending itself against ``None``.
     """
-    if heading_ctx.order is None:
+    order = heading_ctx.order
+    if order is None:
         return
     parent_idx = _enclosing_heading_index(headings, match_idx)
     if parent_idx is not None and parent_idx in heading_ctx.reported_idx:
         heading_ctx.reported_idx.add(match_idx)
         return
     heading_id = str(getattr(heading_constraint, "id", "") or "")
-    after = _order_offender(heading_ctx, headings, heading_id, match_idx)
+    after = _order_offender(heading_ctx, headings, order, heading_id, match_idx)
     if after is None:
         return
     heading_ctx.reported_idx.add(match_idx)

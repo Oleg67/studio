@@ -140,25 +140,28 @@ def test_the_finding_carries_the_line_of_both_sections(tmp_path):
 
 
 def test_the_finding_names_the_nearest_section_that_has_to_be_cleared(tmp_path):
-    """Both Alpha and Gamma precede the displaced Beta; only the nearer is named.
+    """Gamma has to clear both Alpha and Beta; only the nearer one is named.
 
-    Listing every section the move has to clear would turn one move into a list
-    to reconcile.
+    Listing every section the move has to get past would turn one move into a
+    list to reconcile.
     """
     path = _doc(tmp_path, """
 # Doc
 
-## Beta
+## Gamma
 
 ## Alpha
 
-## Gamma
+## Beta
 """)
     report = _report(path, _kind(
         _ABC, order=C.HeadingOrder(ids=("sec-alpha", "sec-beta", "sec-gamma"))))
 
     assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
-    assert _finding(report, EC.HEADING_ORDER_VIOLATION)["expected_after"]["id"] == "sec-alpha"
+    finding = _finding(report, EC.HEADING_ORDER_VIOLATION)
+    assert finding["heading_id"] == "sec-gamma"
+    assert finding["expected_after"]["id"] == "sec-alpha"
+    assert finding["expected_after"]["line"] == 5
 
 
 # ---------------------------------------------------------------------------
