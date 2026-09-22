@@ -23,6 +23,7 @@ from ..utils.constraints import (
 from ..utils import error_codes as EC
 from ..utils.document import read_text_safe
 from ..utils.fixing import enrich_issues
+from ..utils.severity import apply_policy
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +497,29 @@ def _required_reference_heading_issue(  # pylint: disable=too-many-arguments
 # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-check-consistency
 
 
+def _extend_with_kit_policy(
+    issues: Dict[str, List[Dict[str, object]]],
+    report: Dict[str, List[Dict[str, object]]],
+    kit_constraints: object,
+    kind_u: str,
+) -> None:
+    """Settle a headings report against the kit's own severity table.
+
+    A kit is judged by the policy it publishes, the same one `cfs validate`
+    applies to the documents its templates produce. Without this a rule the kit
+    switched off — or one that ships off until a kit asks for it — would still
+    fail the kit's own template here, which is the kit being held to a standard
+    it never claimed.
+    """
+    settled = apply_policy(
+        _kit_only_policy(kit_constraints),
+        list(report.get("errors", []) or []) + list(report.get("warnings", []) or []),
+        kind=kind_u,
+    )
+    issues["errors"].extend(settled.errors)
+    issues["warnings"].extend(settled.warnings)
+
+
 def _check_template_constraints_consistency(
     *,
     template_path: Path,
@@ -525,8 +549,7 @@ def _check_template_constraints_consistency(
         constraints_path=_resolve_constraints_path(kit_base, constraints_path),
         kit_id=str(kit_id),
     )
-    issues["errors"].extend(list(report.get("errors", []) or []))
-    issues["warnings"].extend(list(report.get("warnings", []) or []))
+    _extend_with_kit_policy(issues, report, kit_constraints, kind_u)
     if issues["errors"]:
         return issues
     # @cpt-end:cpt-studio-algo-developer-experience-self-check:p1:inst-validate-headings

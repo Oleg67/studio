@@ -125,8 +125,12 @@ DEFAULT_SEVERITY: Dict[str, str] = {
     EC.DEF_WRONG_HEADINGS:                      ERROR,
     EC.HEADING_MISSING:                         ERROR,
     EC.HEADING_PROHIBITS_MULTIPLE:              ERROR,
-    EC.HEADING_REQUIRES_MULTIPLE:               ERROR,
+    # Off by default: "at least two" enforced everywhere would fail every
+    # document with a single flow, state or definition of done. A kit that
+    # means it turns the rule on for the kinds where it holds.
+    EC.HEADING_REQUIRES_MULTIPLE:               OFF,
     EC.HEADING_NUMBERING_MISMATCH:              ERROR,
+    EC.HEADING_ORDER_VIOLATION:                 ERROR,
     EC.REF_MISSING_FROM_KIND:                   ERROR,
     EC.REF_WRONG_HEADINGS:                      ERROR,
     EC.REF_MISSING_TASK_FOR_TRACKED:            ERROR,

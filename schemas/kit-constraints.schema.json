@@ -108,6 +108,16 @@
           "description": "Outline contract for markdown headings within this artifact kind.",
           "items": { "$ref": "#/$defs/heading_constraint_entry" }
         },
+        "order": {
+          "description": "Which declared sections must appear in the order they are declared. A list of heading ids constrains only those, relative to each other; \"declared\" constrains every heading this kind declares. Omitted means this kind imposes no order at all. List entries must follow the sequence of `headings`: `order` chooses what is enforced, it does not re-sequence the declarations.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            { "const": "declared" }
+          ]
+        },
         "identifiers": {
           "type": "object",
           "description": "Map of id kind to its constraint entry.",

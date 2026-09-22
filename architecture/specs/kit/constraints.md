@@ -20,6 +20,7 @@ drivers:
 - [Constraint Structure](#constraint-structure)
 - [File Format](#file-format)
   - [Root Structure](#root-structure)
+  - [Artifact Kind Keys](#artifact-kind-keys)
   - [Heading Constraints](#heading-constraints)
   - [ID Constraints](#id-constraints)
   - [Reference Rules](#reference-rules)
@@ -27,6 +28,7 @@ drivers:
   - [Severity](#severity)
   - [TOC Options](#toc-options)
   - [Heading Validation](#heading-validation)
+  - [Section Order](#section-order)
   - [ID Validation](#id-validation)
   - [Cross-Artifact Validation](#cross-artifact-validation)
 - [Artifact Scanning](#artifact-scanning)
@@ -112,6 +114,19 @@ level = 1
 required = true
 pattern = "DESIGN\\s*[—–-]\\s*.+"
 ```
+
+### Artifact Kind Keys
+
+Each `[artifacts.<KIND>]` table carries the kind's own keys alongside its
+`headings` and `identifiers` blocks.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | — | Human-readable name for the artifact kind |
+| `description` | string | — | Description of the artifact kind |
+| `toc` | boolean | `true` | Whether the TOC phase runs for this kind |
+| `order` | array of strings or `"declared"` | omit | Which declared sections must appear in declaration order — see [Section Order](#section-order). Omitted means no order is enforced |
+| `validation` | table | — | Severity and TOC options scoped to this kind |
 
 ### Heading Constraints
 
@@ -232,21 +247,89 @@ The validator walks the artifact's Markdown headings and checks against `[[artif
 - If numbered, the prefix is parsed as `^<num>(\.<num>)*\s+` and stripped before pattern matching
 - A constraint matches when `level` matches AND `pattern` matches the stripped title text
 
-**Ordering rules**:
-- Constrained headings MUST appear in the order declared in `[[headings]]`
-- Between two constrained headings `H_i` and `H_{i+1}`: deeper-level headings are allowed freely unless they are constrained elsewhere
-- Same-or-higher-level headings that don't match `H_{i+1}` are a mixing error
+**Ordering rules**: see [Section Order](#section-order) below. Order is opt-in: a kind
+that declares no `order` accepts its constrained sections in any sequence.
 
 **Presence and repetition**:
 - `required = true` (default): heading must exist
 - `multiple = false`: at most one match allowed
-- `multiple = true`: at least two matches required
+- `multiple = true`: at least two matches required. Reported as
+  `heading-requires-multiple`, whose default severity is `off` — "at least two"
+  is true of a kit's repeated-block sections and false of every document with a
+  single flow, state or definition of done, so a kind that means it raises the
+  rule in its own `[artifacts.<KIND>.validation.severity]` table
 - `multiple` omitted: any number allowed
 
 **Numbering**:
 - `numbered = true`: each matching heading MUST have a numbering prefix
 - `numbered = false`: MUST NOT have a numbering prefix
-- Numbering progression: consecutive numbered headings at the same level must increment by 1; nested numbering must be consistent with parent prefix
+- Numbering progression: consecutive numbered headings at the same level must increment by 1; nested numbering must be consistent with parent prefix. Reported as `heading-number-not-consecutive`, an ordinary rule code: a kind that numbers its sections by hand lowers or disables it in its own `[artifacts.<KIND>.validation.severity]` table
+
+### Section Order
+
+A kind says which of its sections must appear in the sequence the kit declares
+them:
+
+```toml
+[artifacts.PRD]
+order = ["prd-context", "prd-requirements", "prd-acceptance"]  # only these three
+# order = "declared"                                           # every declared heading
+```
+
+**Omitted means no order.** A kind that does not declare `order` accepts its
+constrained sections in any sequence. This is the default because a rule a kit
+cannot state is a rule a kit cannot relax either: before this key existed the
+order was enforced as a side effect of how the matcher walked the document, and
+a kit that genuinely wanted context before requirements had no way to say so —
+or to say that it did not care.
+
+**A list is partial.** Only the ids named are constrained, and only relative to
+each other. Every other section, constrained or not, may appear anywhere.
+
+**`order` chooses what is enforced; it does not re-sequence the declarations.**
+The entries must follow the sequence of the `[[headings]]` list, and an order
+that runs against it fails the load. The required sequence is therefore
+readable in one place — the headings list — and `order` says which parts of it
+are checked. A kit that wants a different sequence reorders its headings.
+
+**`"declared"` is every heading, in declaration order** — the strictness the
+matcher used to impose on every kit, now a one-line opt-in.
+
+**Merging.** When two kits bind the same artifact kind, their orders add up:
+the lists concatenate, each constraining the ids it names. Two kits that
+sequence one pair of sections in opposite directions fail the load naming the
+pair, because keeping either kit's word would enforce an order the other kit's
+author would read as already satisfied.
+
+**How a violation is found and reported.** The matcher walks the document
+forward. Where a constraint finds no match ahead of the cursor, a *rescue pass*
+re-searches that constraint's parent range from the start for an unclaimed
+heading that matches. A section found there exists — so it is no longer
+reported as `heading-missing`, and it is measured by its own `multiple` and
+`numbered` rules like any other match. Whether anything is *said* about where
+it sits depends on `order`:
+
+- No `order`: silence. The kit never said where the section goes.
+- `order` relates it to an already-matched section it now precedes: one
+  `heading-order-violation`, carrying `heading_id`, `heading_line` and
+  `expected_after` (the nearest section it must clear, with that section's own
+  line). The message names both sections and both lines.
+
+Only the "after" direction exists. Constraints are walked in declaration order
+and an `order` follows the declarations, so every related section already
+matched is one this section is supposed to follow; there is no already-matched
+section it was supposed to precede.
+
+A displaced section carries its subsections with it, so the descendants of a
+reported section are not reported again — one move, one finding.
+
+**One behaviour change to be aware of.** A section written out of declaration
+order used to be reported as absent, and nothing else about it was ever looked
+at. Finding it means checking it: an *optional* out-of-order section that also
+breaks its own `numbered` or `multiple` rule was silently unvalidated before and
+now produces those findings. `prev` and `next` are unaffected — they remain
+auto-linked from declaration order and used only to phrase the
+`heading-missing` message.
 
 ### ID Validation
 
@@ -315,16 +398,26 @@ See [examples/constraints-prd.toml](examples/constraints-prd.toml) — full `con
 
 ## Error Handling
 
-| Error | Cause | Resolution |
-|-------|-------|------------|
-| `CONSTRAINTS_HEADING_ORDER` | Constrained headings appear out of order in artifact | Reorder sections to match constraint order |
-| `CONSTRAINTS_HEADING_MISSING` | Required heading not found in artifact | Add the required section |
-| `CONSTRAINTS_HEADING_DUPLICATE` | `multiple = false` but heading matched more than once | Remove duplicate sections |
-| `CONSTRAINTS_HEADING_NOT_NUMBERED` | `numbered = true` but heading lacks numbering prefix | Add numbering prefix |
-| `CONSTRAINTS_ID_MISSING` | `required = true` but no IDs of this kind found | Add at least one ID definition |
-| `CONSTRAINTS_ID_NO_TASK` | `task = true` but ID definition has no checkbox | Add checkbox `[ ]` or `[x]` to definition |
-| `CONSTRAINTS_ID_NO_PRIORITY` | `priority = true` but ID definition has no priority token | Add priority marker (e.g., `` `p1` ``) |
-| `CONSTRAINTS_ID_WRONG_HEADING` | ID defined outside allowed heading sections | Move ID to a section under an allowed heading |
-| `CONSTRAINTS_COVERAGE_MISSING` | `coverage = true` but no reference found in target artifact kind | Add reference in target artifact |
-| `CONSTRAINTS_COVERAGE_PROHIBITED` | `coverage = false` but references found in target artifact kind | Remove references from target artifact |
-| `CONSTRAINTS_CHECKBOX_SYNC` | Reference marked done but definition not marked done | Mark definition as done or unmark reference |
+These are the rule codes the validator emits, as they appear in each finding's
+`code` field and in a `[validation.severity]` table. Every one of them is
+configurable per kind and per entry; the severity column is the built-in
+default.
+
+| Code | Default | Cause | Resolution |
+|------|---------|-------|------------|
+| `heading-missing` | error | `required = true` but no matching heading anywhere in the constraint's range | Add the required section |
+| `heading-order-violation` | error | The kind declares an `order` and this section precedes one it must follow | Move the section after the one named in `expected_after` |
+| `heading-prohibits-multiple` | error | `multiple = false` but the heading matched more than once | Remove the duplicate sections |
+| `heading-requires-multiple` | off | `multiple = true` but the heading matched exactly once | Add a second occurrence, or leave the rule off |
+| `heading-numbering-mismatch` | error | `numbered` is `true` and the prefix is absent, or `false` and it is present | Add or remove the numbering prefix |
+| `heading-number-not-consecutive` | error | Sibling numbered headings do not increment by 1 | Renumber the siblings, or lower the rule for this kind |
+| `toc-heading-depth-jump` | warning | A heading skips a level below its parent | Add the intermediate level, or lower the rule for this kind |
+| `required-id-kind-missing` | error | `required = true` but no ID of this kind is defined | Add at least one ID definition |
+| `def-missing-task` / `def-prohibited-task` | error | `task` is `true` and the definition has no checkbox, or `false` and it has one | Add or remove the `[ ]` / `[x]` checkbox |
+| `def-missing-priority` / `def-prohibited-priority` | error | `priority` is `true` and the definition has no priority token, or `false` and it has one | Add or remove the priority marker (e.g. `` `p1` ``) |
+| `def-wrong-headings` | error | An ID is defined outside the sections its `headings` list allows | Move the definition under an allowed heading |
+| `ref-missing-from-kind` | error | `coverage = true` but the target artifact kind references the ID nowhere | Add the reference in the target artifact |
+| `ref-from-prohibited-kind` | error | `coverage = false` but the target artifact kind references the ID | Remove the reference |
+| `ref-done-def-not-done` / `def-done-ref-not-done` | error | A reference and its definition disagree about being done | Mark the definition done, or unmark the reference |
+| `constraints-invalid` | error | `constraints.toml` could not be loaded | Fix the error the message names; the whole file is refused |
+| `constraints-unknown-key` | warning | A key under a `[validation]` table this engine does not read | Check the spelling, or ignore it if the kit targets a newer engine |

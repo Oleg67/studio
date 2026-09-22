@@ -86,6 +86,7 @@ HEADING_MISSING = "heading-missing"
 HEADING_PROHIBITS_MULTIPLE = "heading-prohibits-multiple"
 HEADING_REQUIRES_MULTIPLE = "heading-requires-multiple"
 HEADING_NUMBERING_MISMATCH = "heading-numbering-mismatch"
+HEADING_ORDER_VIOLATION = "heading-order-violation"
 
 # ---------------------------------------------------------------------------
 # Constraints — cross-reference coverage

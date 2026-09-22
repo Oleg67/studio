@@ -159,6 +159,11 @@ _REASONS: Dict[str, List[str]] = {
         "{artifact_kind} (e.g. repeated feature blocks)",
         "Only one `{heading_pattern}` instance was generated when the template expects multiple",
     ],
+    EC.HEADING_ORDER_VIOLATION: [
+        "Section `{heading_id}` of {artifact_kind} was written out of the order the kit declares",
+        "LLM emitted the sections of {artifact_kind} in a different sequence from the template",
+        "Sections of {artifact_kind} were moved during editing without updating the declared order",
+    ],
     EC.HEADING_NUMBERING_MISMATCH: [
         "Heading `{heading_pattern}` in {artifact_kind} has/lacks numbering "
         "prefix contrary to constraint (numbered={numbered})",
@@ -677,6 +682,13 @@ def _prompt_for_heading_contract(ctx: _FixPromptContext) -> Optional[str]:
         numbered = ctx.issue.get("numbered")
         verb = "is required but missing" if numbered is True else "is prohibited but present"
         return f"Open `{ctx.loc}`: heading numbering {verb}."
+    if ctx.code == EC.HEADING_ORDER_VIOLATION:
+        after = ctx.issue.get("expected_after") or {}
+        where = (
+            f"after `{after.get('id')}` (line {after.get('line')})" if after
+            else "into the order the kit declares"
+        )
+        return f"Open `{ctx.loc}`: move this section {where}."
     return None
 # @cpt-end:cpt-studio-algo-traceability-validation-fixing-prompts:p1:inst-fix-heading-contract
 
