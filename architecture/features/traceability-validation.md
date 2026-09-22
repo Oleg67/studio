@@ -740,9 +740,12 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 3. [x] - `p1` - Initialize validation context: load heading constraints, build helper lookups, scan document headings - `inst-validate-init`
 4. [x] - `p1` - Check numbering sequence: enforce that sibling sections under the same numeric parent progress consecutively - `inst-check-numbering`
 5. [x] - `p1` - Match headings against constraints: hierarchical scope matching, required/multiple/numbered enforcement, emit errors for missing/duplicate/misnumbered headings - `inst-match-headings`
-6. [x] - `p1` - Rescue a constraint the forward cursor left unmatched: re-search its parent range from the start for an unclaimed heading, **IF** one is found treat it as a match and check it like any other, **ELSE** report the section as missing - `inst-rescue-unmatched`
-7. [x] - `p1` - **IF** the kind declares an `order` and a rescued section sits on the wrong side of an already-matched one, emit `heading-order-violation` naming the nearest section it must clear, suppressing the descendants of a section already reported - `inst-order-violation`
-8. [x] - `p1` - **IF** a constraint declares `multiple = true` and matched exactly once, emit `heading-requires-multiple` (off by default) - `inst-requires-multiple`
+6. [x] - `p1` - Rescue a constraint the forward cursor left unmatched: re-search its parent range from the start for an unclaimed heading, **IF** one is found treat it as a match, **ELSE** report the section as missing - `inst-rescue-unmatched`
+7. [x] - `p1` - Claim the headings one constraint matched and record where it landed, so no two constraints stand on one section - `inst-claim-matches`
+8. [x] - `p1` - Apply the count and numbering rules to a constraint's matched run, whether it matched forward or was rescued - `inst-check-match-rules`
+9. [x] - `p1` - Find the nearest already-matched section a rescued one now precedes, according to the kind's declared order - `inst-order-offender`
+10. [x] - `p1` - **IF** the kind declares an `order` and an offender was found, emit `heading-order-violation` naming it, suppressing the descendants of a section already reported - `inst-order-violation`
+11. [x] - `p1` - **IF** a constraint declares `multiple = true` and matched exactly once, emit `heading-requires-multiple` (off by default) - `inst-requires-multiple`
 
 **Supporting**:
 - [x] - `p1` - Heading line regex, number prefix regex, and module exports - `inst-headings-datamodel`
@@ -776,7 +779,9 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 8. [x] - `p1` - Merge two entry severities by taking the stricter, and a lock by taking either - `inst-merge-entry-severity`
 9. [x] - `p1` - Assemble the severity policy from every loaded kit and the project's own table, indexing entries by heading id and by ID kind - `inst-build-policy`
 10. [x] - `p1` - Parse `order` for one kind: a list of declared heading ids, or `"declared"` meaning every heading in declaration order; an unknown or repeated id fails the load - `inst-parse-order`
-11. [x] - `p1` - Merge two kits' orders for one kind by concatenation, failing the load when they sequence one pair of sections in opposite directions - `inst-merge-order`
+11. [x] - `p1` - Refuse an `order` that puts the declared headings in a different sequence, naming the pair — `order` chooses what is enforced, it does not re-sequence declarations - `inst-order-follows-declarations`
+12. [x] - `p1` - Merge two kits' orders for one kind by concatenating the lists and dropping repeats - `inst-merge-order`
+13. [x] - `p1` - Name the first id pair two orders sequence in opposite directions, checking every shared pair so a cycle closing across three kits is caught at the fold - `inst-order-conflict`
 
 **Supporting**:
 - [x] - `p1` - Examples parser, heading-constraint ID slugifier, and references map parser - `inst-constraints-helpers`

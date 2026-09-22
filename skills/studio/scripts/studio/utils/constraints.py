@@ -3386,8 +3386,10 @@ def _parse_order_ids(
         seen.add(key)
         ids.append(known[key])
     return _order_following_declarations(ids, declared_ids, errors)
+# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-parse-order
 
 
+# @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-follows-declarations
 def _order_following_declarations(
     ids: List[str],
     declared_ids: Tuple[str, ...],
@@ -3404,7 +3406,7 @@ def _order_following_declarations(
             )
             return None
     return HeadingOrder(ids=tuple(ids))
-# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-parse-order
+# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-follows-declarations
 
 
 def _parse_artifact_kind_constraint_parts(
@@ -3886,6 +3888,10 @@ def _merge_heading_order(
     )
 
 
+# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-merge-order
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-conflict
 def _first_order_conflict(
     base: HeadingOrder,
     incoming: HeadingOrder,
@@ -3902,7 +3908,7 @@ def _first_order_conflict(
             if base.relates(second, first):
                 return first, second
     return None
-# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-merge-order
+# @cpt-end:cpt-studio-algo-traceability-validation-load-constraints:p1:inst-order-conflict
 
 
 def _merge_toc_options(base: TocOptions, incoming: TocOptions) -> TocOptions:
@@ -4605,6 +4611,10 @@ def _matched_heading_info(
     return {**info, "line": int(headings[other_idx].get("line", 1) or 1)}
 
 
+# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-order-violation
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-order-offender
 def _order_offender(
     heading_ctx: HeadingValidationContext,
     headings: Sequence[Dict[str, object]],
@@ -4633,6 +4643,10 @@ def _order_offender(
     return _matched_heading_info(heading_ctx, headings, min(offenders))
 
 
+# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-order-offender
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-order-violation
 def _append_order_violation_error(
     *,
     heading_ctx: HeadingValidationContext,
@@ -4856,6 +4870,10 @@ def _rescue_unmatched_heading(
     return matches, match_idx, next_idx
 
 
+# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-rescue-unmatched
+
+
+# @cpt-begin:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-claim-matches
 def _claim_heading_matches(
     *,
     heading_ctx: HeadingValidationContext,
@@ -4869,9 +4887,10 @@ def _claim_heading_matches(
     heading_id = str(getattr(heading_constraint, "id", "") or "").strip()
     if heading_id:
         heading_ctx.matched_idx_by_id[heading_id] = match_idx
-# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-rescue-unmatched
+# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-claim-matches
 
 
+# @cpt-begin:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-check-match-rules
 def _check_matched_heading_rules(
     *,
     heading_ctx: HeadingValidationContext,
@@ -4911,6 +4930,7 @@ def _check_matched_heading_rules(
             kit_id=heading_ctx.kit_id,
             errors=heading_ctx.errors,
         )
+# @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-check-match-rules
 
 
 def _update_heading_match_state(
