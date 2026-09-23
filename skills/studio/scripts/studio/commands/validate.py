@@ -2056,7 +2056,10 @@ def _human_validate(data: dict) -> None:
     # question; a run with fourteen rules switched off otherwise looks exactly
     # like a run with none to the reader who never thought to ask.
     if data.get("suppressed_count"):
-        ui.detail("Suppressed", f"{data['suppressed_count']} (rules set to off)")
+        # "off" covers both a rule this project switched off and one that ships
+        # off until a kit asks for it, so the wording names the state rather
+        # than an action nobody here necessarily took.
+        ui.detail("Suppressed", f"{data['suppressed_count']} (rules that are off)")
     _show_severity_overrides(data.get("severity_overrides") or [])
     # @cpt-end:cpt-studio-flow-traceability-validation-validate:p1:inst-human-suppressed
 

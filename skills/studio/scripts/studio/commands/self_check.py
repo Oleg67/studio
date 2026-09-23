@@ -23,6 +23,7 @@ from ..utils.constraints import (
 from ..utils import error_codes as EC
 from ..utils.document import read_text_safe
 from ..utils.fixing import enrich_issues
+from ..utils.severity import apply_policy
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +497,64 @@ def _required_reference_heading_issue(  # pylint: disable=too-many-arguments
 # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-check-consistency
 
 
+def _settle_with_kit_policy(
+    issues: Dict[str, object],
+    findings: List[Dict[str, object]],
+    policy: Optional[object],
+    kind_u: str,
+) -> None:
+    """Route findings about a kit's own template through the kit's severity table.
+
+    A kit is judged by the policy it publishes, the same one `cfs validate`
+    applies to the documents its templates produce. Without this a rule the kit
+    switched off — or one that ships off until a kit asks for it — would still
+    fail the kit's own template here, which is the kit being held to a standard
+    it never claimed. Every phase goes through it, not only the heading
+    contract: settling one and not the others would make self-check disagree
+    with `cfs validate` about the very same configured rule.
+
+    `suppressed` is carried rather than dropped. An uncounted suppression is
+    exactly the silence the severity model exists to prevent.
+    """
+    settled = apply_policy(policy, findings, kind=kind_u)
+    issues["errors"].extend(settled.errors)
+    issues["warnings"].extend(settled.warnings)
+    issues["suppressed"] = int(issues.get("suppressed") or 0) + int(settled.suppressed or 0)
+
+
+def _template_placeholder_findings(
+    *,
+    template_path: Path,
+    kit_id: str,
+    kind_u: str,
+    constraints_for_kind: object,
+    kit_constraints: object,
+    lines: List[str],
+    headings_at: object,
+) -> List[Dict[str, object]]:
+    """Every finding the placeholder and pattern-kind phases produce, unsettled."""
+    definition_issues = _check_defined_id_placeholders(
+        template_path=template_path,
+        kit_id=kit_id,
+        kind_u=kind_u,
+        constraints_for_kind=constraints_for_kind,
+        lines=lines,
+        headings_at=headings_at,
+    )
+    return (
+        list(definition_issues["errors"])
+        + list(definition_issues["warnings"])
+        + list(_check_template_pattern_kinds(
+            template_path=template_path,
+            kit_id=kit_id,
+            kind_u=kind_u,
+            constraints_for_kind=constraints_for_kind,
+            kit_constraints=kit_constraints,
+            lines=lines,
+        ))
+    )
+
+
 def _check_template_constraints_consistency(
     *,
     template_path: Path,
@@ -505,9 +564,9 @@ def _check_template_constraints_consistency(
     kit_constraints: object,
     artifacts_meta: ArtifactsMeta,
     constraints_path: Optional[Path] = None,
-) -> Dict[str, List[Dict[str, object]]]:
+) -> Dict[str, object]:
     """Validate template structure, placeholder kinds, and reference placeholders."""
-    issues: Dict[str, List[Dict[str, object]]] = {"errors": [], "warnings": []}
+    issues: Dict[str, object] = {"errors": [], "warnings": [], "suppressed": 0}
     if kit_constraints is None:
         return issues
 
@@ -515,6 +574,7 @@ def _check_template_constraints_consistency(
     constraints_for_kind = _get_constraints_for_kind(kit_constraints, kind_u)
     if constraints_for_kind is None:
         return issues
+    policy = _kit_only_policy(kit_constraints)
 
     # @cpt-begin:cpt-studio-algo-developer-experience-self-check:p1:inst-validate-headings
     report = validate_headings_contract(
@@ -525,8 +585,12 @@ def _check_template_constraints_consistency(
         constraints_path=_resolve_constraints_path(kit_base, constraints_path),
         kit_id=str(kit_id),
     )
-    issues["errors"].extend(list(report.get("errors", []) or []))
-    issues["warnings"].extend(list(report.get("warnings", []) or []))
+    _settle_with_kit_policy(
+        issues,
+        list(report.get("errors", []) or []) + list(report.get("warnings", []) or []),
+        policy,
+        kind_u,
+    )
     if issues["errors"]:
         return issues
     # @cpt-end:cpt-studio-algo-developer-experience-self-check:p1:inst-validate-headings
@@ -534,7 +598,7 @@ def _check_template_constraints_consistency(
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-template
     lines = _load_template_lines(template_path)
     if lines is None:
-        issues["errors"].append(constraints_error(
+        _settle_with_kit_policy(issues, [constraints_error(
             "template",
             "Template file could not be read",
             code=EC.TEMPLATE_READ_ERROR,
@@ -542,31 +606,22 @@ def _check_template_constraints_consistency(
             line=1,
             kit_id=str(kit_id),
             artifact_kind=kind_u,
-        ))
+        )], policy, kind_u)
         return issues
 
     headings_at = None
     if getattr(constraints_for_kind, "headings", None):
         headings_at = heading_constraint_ids_by_line(template_path, constraints_for_kind.headings)
 
-    definition_issues = _check_defined_id_placeholders(
-        template_path=template_path,
-        kit_id=str(kit_id),
-        kind_u=kind_u,
-        constraints_for_kind=constraints_for_kind,
-        lines=lines,
-        headings_at=headings_at,
-    )
-    issues["errors"].extend(definition_issues["errors"])
-    issues["warnings"].extend(definition_issues["warnings"])
-    issues["errors"].extend(_check_template_pattern_kinds(
+    _settle_with_kit_policy(issues, _template_placeholder_findings(
         template_path=template_path,
         kit_id=str(kit_id),
         kind_u=kind_u,
         constraints_for_kind=constraints_for_kind,
         kit_constraints=kit_constraints,
         lines=lines,
-    ))
+        headings_at=headings_at,
+    ), policy, kind_u)
 
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-template
 
@@ -583,8 +638,12 @@ def _check_template_constraints_consistency(
         lines=lines,
         headings_at=headings_at,
     )
-    issues["errors"].extend(reference_issues["errors"])
-    issues["warnings"].extend(reference_issues["warnings"])
+    _settle_with_kit_policy(
+        issues,
+        list(reference_issues["errors"]) + list(reference_issues["warnings"]),
+        policy,
+        kind_u,
+    )
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-check-consistency
     return issues
 
@@ -814,6 +873,7 @@ def _build_kind_result(
         )
         issues["errors"].extend(report["errors"])
         issues["warnings"].extend(report["warnings"])
+        issues["suppressed"] += int(report.get("suppressed") or 0)
     # @cpt-end:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-template
 
     # @cpt-begin:cpt-studio-flow-developer-experience-self-check:p1:inst-validate-example

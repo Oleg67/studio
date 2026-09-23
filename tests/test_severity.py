@@ -68,8 +68,9 @@ EXPECTED_DEFAULT_SEVERITY: Dict[str, str] = {
     "heading-missing": "error",
     "heading-number-not-consecutive": "error",
     "heading-numbering-mismatch": "error",
+    "heading-order-violation": "error",
     "heading-prohibits-multiple": "error",
-    "heading-requires-multiple": "error",
+    "heading-requires-multiple": "off",
     "id-kind-not-allowed": "error",
     "id-not-referenced": "error",
     "id-not-referenced-no-scope": "warning",
@@ -154,13 +155,21 @@ def test_every_default_is_a_member_of_the_vocabulary():
     assert set(sev.DEFAULT_SEVERITY.values()) <= set(sev.VALIDATION_SEVERITIES)
 
 
-def test_no_code_defaults_to_off_yet():
-    """``off`` is declared vocabulary; suppression arrives with configuration.
+def test_only_the_reviewed_codes_default_to_off():
+    """Which rules ship non-blocking is a reviewed list, not a side effect.
 
-    If this starts failing, a rule was made non-blocking by default — which is
-    a behaviour change, not a refactor, and belongs in its own review.
+    A default of ``off`` means the rule runs and nobody hears it, so the set is
+    pinned by name here. It is the negative form of the golden table: adding a
+    code to it takes an edit to this test and the argument that goes with it.
+
+    ``heading-requires-multiple`` is the only member. "At least two of this
+    section" is true of a kit's repeated-block constraints and false of every
+    document with a single flow, a single state or a single acceptance
+    criterion, so the kits that want it declare ``multiple = true`` and raise
+    it per kind.
     """
-    assert "off" not in set(sev.DEFAULT_SEVERITY.values())
+    off_codes = {code for code, value in sev.DEFAULT_SEVERITY.items() if value == sev.OFF}
+    assert off_codes == {EC.HEADING_REQUIRES_MULTIPLE}
 
 
 def test_the_module_refuses_to_import_when_the_registry_gains_an_unlisted_code(monkeypatch):

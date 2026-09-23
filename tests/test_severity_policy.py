@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scripts"))
 
 from studio.utils import constraints as C  # noqa: E402
+from studio.utils import error_codes as EC  # noqa: E402
 from studio.utils import severity as S  # noqa: E402
 from studio.utils import toml_utils  # noqa: E402
 
@@ -1164,6 +1165,149 @@ def test_e2e_a_suppressed_finding_in_a_kit_example_is_counted_per_kind(tmp_path)
     # Deliberately per-kind only: `suppressed_count` at the top level is part
     # of `validate`'s report contract, not `validate-kits`'.
     assert "suppressed_count" not in report
+
+
+def _kit_with_broken_template(tmp_path: Path, severity: dict | None = None) -> dict:
+    """A project whose PRD *template* breaks the heading contract it declares."""
+    constraints = _both_kinds()
+    if severity is not None:
+        constraints["PRD"] = {**constraints["PRD"], "validation": {"severity": severity}}
+    _write_project(tmp_path, kind_constraints=constraints, prd_template="# PRD\n")
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+    return constraints
+
+
+def test_e2e_a_kit_template_is_judged_by_the_kit_own_severity_table(tmp_path):
+    """A kit that relaxes a rule means it for its own template too.
+
+    Self-check reads a kit's templates against the very constraints that kit
+    ships. Holding them to the built-in defaults while every document the
+    template produces is graded by the kit's table would make `self-check` and
+    `cfs validate` disagree about one configured rule.
+    """
+    _kit_with_broken_template(tmp_path)
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert EC.HEADING_MISSING in [f.get("code") for f in prd["errors"]]
+
+
+def test_e2e_a_kit_can_lower_a_rule_for_its_own_template(tmp_path):
+    _kit_with_broken_template(tmp_path, severity={"heading-missing": "warning"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert [f.get("code") for f in prd["warnings"]] == [EC.HEADING_MISSING]
+    assert "errors" not in prd
+
+
+def test_e2e_a_suppressed_template_finding_is_still_counted(tmp_path):
+    """Switching a rule off must not make the template look clean.
+
+    The example path already counted its suppressions; the template path
+    dropped them, so a kit could silence a real defect in its own template with
+    nothing anywhere recording that anything had been silenced.
+    """
+    _kit_with_broken_template(tmp_path, severity={"heading-missing": "off"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 0
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert "errors" not in prd and "warnings" not in prd
+    assert prd["suppressed_count"] == 1
+
+
+def test_e2e_a_kit_severity_reaches_the_placeholder_phases_too(tmp_path):
+    """Not only the heading contract: every phase reads the same table.
+
+    A kit that lowers an optional-reference-placeholder rule for its own kind
+    is talking about its own template, which is the only thing this phase ever
+    looks at.
+    """
+    constraints = _both_kinds()
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "identifiers": {"fr": {"required": True, "template": "cpt-{system}-fr-{slug}"}},
+        "validation": {"severity": {"template-def-placeholder-missing": "off"}},
+    }
+    _write_project(tmp_path, kind_constraints=constraints,
+                   prd_template="# PRD\n\n## Metrics\n")
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert EC.TEMPLATE_DEF_PLACEHOLDER_MISSING not in [
+        f.get("code") for f in (prd.get("errors") or []) + (prd.get("warnings") or [])]
+    assert prd["suppressed_count"] >= 1
+    assert exit_code == 0
+
+
+def _kit_with_two_broken_phases(tmp_path: Path, severity: dict | None = None) -> None:
+    """A PRD template that fails the heading contract *and* the placeholder phase.
+
+    One defect in each of the two phases the early return sits between, so a
+    test can tell "the second phase ran" from "the second phase was skipped" —
+    which a template broken in only one place never can.
+    """
+    constraints = _both_kinds()
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "identifiers": {"fr": {"required": True, "template": "cpt-{system}-fr-{slug}"}},
+        **({"validation": {"severity": severity}} if severity else {}),
+    }
+    # No `## Metrics` (the heading contract) and no `fr` placeholder (the
+    # placeholder phase).
+    _write_project(tmp_path, kind_constraints=constraints, prd_template="# PRD\n")
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+
+def _prd_codes(report: dict) -> set:
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    return {f.get("code") for f in (prd.get("errors") or []) + (prd.get("warnings") or [])}
+
+
+def test_e2e_a_heading_error_stops_before_the_placeholder_phase(tmp_path):
+    """The early return is a contract, not an implementation detail.
+
+    An unsatisfied outline makes every later finding about placement suspect,
+    so the phases after it do not run. What that costs is a second finding the
+    author would have had to fix anyway; what it buys is never reporting an ID
+    as being in the wrong section of a document whose sections are wrong.
+    """
+    _kit_with_two_broken_phases(tmp_path)
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.HEADING_MISSING}
+
+
+def test_e2e_a_heading_lowered_to_a_warning_lets_the_placeholder_phase_run(tmp_path):
+    """The other side of the same gate, and the reason it counts errors not findings.
+
+    The kit downgraded the heading rule, so the outline is no longer a reason
+    to stop — and the placeholder defect behind it must surface rather than
+    stay hidden behind a rule its own kit called advisory.
+    """
+    _kit_with_two_broken_phases(tmp_path, severity={"heading-missing": "warning"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.HEADING_MISSING, EC.TEMPLATE_DEF_PLACEHOLDER_MISSING}
+
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert [f.get("code") for f in prd["warnings"]] == [EC.HEADING_MISSING]
+    assert [f.get("code") for f in prd["errors"]] == [EC.TEMPLATE_DEF_PLACEHOLDER_MISSING]
+
+
+def test_e2e_a_suppressed_heading_also_lets_the_placeholder_phase_run(tmp_path):
+    """Off is not an error either, and the count still has to survive the gate."""
+    _kit_with_two_broken_phases(tmp_path, severity={"heading-missing": "off"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.TEMPLATE_DEF_PLACEHOLDER_MISSING}
+
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert prd["suppressed_count"] == 1
 
 
 def test_e2e_an_empty_registry_still_reports_a_kit_warning(tmp_path):

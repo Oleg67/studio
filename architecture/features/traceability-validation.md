@@ -740,6 +740,12 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 3. [x] - `p1` - Initialize validation context: load heading constraints, build helper lookups, scan document headings - `inst-validate-init`
 4. [x] - `p1` - Check numbering sequence: enforce that sibling sections under the same numeric parent progress consecutively - `inst-check-numbering`
 5. [x] - `p1` - Match headings against constraints: hierarchical scope matching, required/multiple/numbered enforcement, emit errors for missing/duplicate/misnumbered headings - `inst-match-headings`
+6. [x] - `p1` - Rescue a constraint the forward cursor left unmatched: re-search its parent range from the start for an unclaimed heading, **IF** one is found treat it as a match, **ELSE** report the section as missing - `inst-rescue-unmatched`
+7. [x] - `p1` - Claim the headings one constraint matched and record where it landed, so no two constraints stand on one section - `inst-claim-matches`
+8. [x] - `p1` - Apply the count and numbering rules, whether the constraint matched forward or was rescued: `multiple = false` over the consecutive run, `numbered` and "at least two" over every unclaimed match in the parent scope - `inst-check-match-rules`
+9. [x] - `p1` - Find the nearest already-matched section a rescued one now precedes, according to the kind's declared order - `inst-order-offender`
+10. [x] - `p1` - **IF** the kind declares an `order` and an offender was found, emit `heading-order-violation` naming it, suppressing the descendants of a section already reported - `inst-order-violation`
+11. [x] - `p1` - **IF** a constraint declares `multiple = true` and its parent scope holds fewer than two unclaimed matches, emit `heading-requires-multiple` (off by default) - `inst-requires-multiple`
 
 **Supporting**:
 - [x] - `p1` - Heading line regex, number prefix regex, and module exports - `inst-headings-datamodel`
@@ -772,6 +778,10 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 7. [x] - `p1` - Parse `severity` and `locked` from one constraint entry, accepting a lock without a severity - `inst-parse-entry-severity`
 8. [x] - `p1` - Merge two entry severities by taking the stricter, and a lock by taking either - `inst-merge-entry-severity`
 9. [x] - `p1` - Assemble the severity policy from every loaded kit and the project's own table, indexing entries by heading id and by ID kind - `inst-build-policy`
+10. [x] - `p1` - Parse `order` for one kind: a list of declared heading ids, or `"declared"` meaning every heading in declaration order; an unknown or repeated id fails the load - `inst-parse-order`
+11. [x] - `p1` - Refuse an `order` that puts the declared headings in a different sequence, naming the pair — `order` chooses what is enforced, it does not re-sequence declarations - `inst-order-follows-declarations`
+12. [x] - `p1` - Merge two kits' orders for one kind by taking the union of the precedence pairs each states and closing it under transitivity, so a relation both kits imply is enforced and none they did not state is invented - `inst-merge-order`
+13. [x] - `p1` - Reject the merge when the closed pair set requires one pair in both directions, naming it; a cycle closing across three kits is one such pair once the relations are closed - `inst-order-conflict`
 
 **Supporting**:
 - [x] - `p1` - Examples parser, heading-constraint ID slugifier, and references map parser - `inst-constraints-helpers`

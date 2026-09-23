@@ -13,6 +13,7 @@
   - [ID kinds (in `constraints.toml`)](#id-kinds-in-constraintstoml)
   - [What `cfs validate` checks](#what-cfs-validate-checks)
   - [Severity — decide which rules gate the run](#severity--decide-which-rules-gate-the-run)
+  - [Section order](#section-order)
   - [Table of contents rules](#table-of-contents-rules)
   - [What `cfs validate` does not check](#what-cfs-validate-does-not-check)
   - [Nested identifiers](#nested-identifiers)
@@ -239,6 +240,52 @@ For a **kit**, the kind check needs to see every kit your project installs, sinc
 
 - 🖥 `cfs validate --explain-severity --kind PRD --rule heading-missing` — the effective severity and which layer set it
 - 🖥 `cfs validate --fail-on-warnings` — make a warning-only run fail
+
+### Section order
+
+Which sections a kind requires lives in its `[[headings]]` list. Whether they
+have to appear in that sequence is a separate question, and the kind answers it
+with one key:
+
+```toml
+[artifacts.PRD]
+order = ["prd-context", "prd-requirements", "prd-acceptance"]   # only these three
+# order = "declared"                                            # every declared section
+```
+
+**Leave `order` out and no order is enforced.** A section written earlier than
+the kit declares it is found where it actually is and checked there, and
+nothing is said about its position. That is the default because the alternative
+— the order being enforced as a side effect of how the document is walked —
+could be neither stated nor relaxed: a kit that wanted context before
+requirements had no way to say so, and a kit that did not care had no way to say
+that either.
+
+**A list constrains only the sections it names**, relative to each other.
+Everything else may appear anywhere, which is what lets a kit pin the two or
+three sections whose sequence carries meaning and leave the rest alone.
+
+**`order` chooses what is enforced; it does not re-sequence anything.** Its
+entries follow the `[[headings]]` list, and an order that runs against it is
+refused when the kit loads. The sequence a document must follow is therefore
+readable in one place. To change the sequence, reorder the headings.
+
+A section in the wrong place is reported as `heading-order-violation`, naming
+the section it has to be moved after and the line that section is on:
+
+```
+Section `prd-requirements` (line 24) in PRD artifact must come after `prd-context` (line 61)
+```
+
+Its subsections move with it, so they are not reported separately — unless one
+of them stayed behind, in which case *that* subsection is reported as missing
+from the section it is declared under, which is where it genuinely is not.
+
+Two kits bound to one project add their orders together, including what follows
+from both of them at once: one kit's "context before design" and another's
+"design before risks" means context before risks. If they order the same pair
+in opposite directions the load fails naming the pair, rather than silently
+picking one.
 
 ### Table of contents rules
 
