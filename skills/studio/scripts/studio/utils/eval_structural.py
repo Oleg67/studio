@@ -26,7 +26,8 @@ import tomllib
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
-from .eval_harness import (RunArtifacts, Scenario, ScorerKind, ScorerResult,
+from .eval_harness import (lost_run_finding, _lost_run_coverage,
+                           RunArtifacts, Scenario, ScorerKind, ScorerResult,
                            fence_closes, fence_delim,
                            VERDICT_FAIL, VERDICT_PASS, VERDICT_UNKNOWN)
 
@@ -544,6 +545,28 @@ class StructuralScorer:  # pylint: disable=too-few-public-methods
                     self.name, self.kind, VERDICT_FAIL, 0.0,
                     [f"phase-frontmatter-valid: {_capped(invalid)}"],
                     f"{len(invalid)} phase file(s) with broken [phase] frontmatter")
+            # `not run.phases`, not `not phases`. The outer branch is reached in two ways:
+            # the manifest declares nothing, or it declares files whose `[phase]` blocks would
+            # not parse. Only the first is "a manifest that has lost its run". Guarding on the
+            # parsed result instead reported `the plan declares no phases` for a plan that
+            # declared one perfectly well, naming a defect that did not exist while leaving the
+            # real one unnamed. Found in review.
+            # Routed through the skip set. The first version returned before `_active_checks`
+            # was consulted, so a caller configuring `skip=("manifest-matches-files",)` — the
+            # very rule this finding invokes — could not suppress it. A check that cannot be
+            # switched off is not part of the check registry, it is a second, hidden one.
+            # Found in review.
+            # One shared helper answers this for both scorers, and the skip set is honoured
+            # here as it is for every other check. Written separately, the two copies diverged
+            # three times running.
+            finding = lost_run_finding(run)
+            if finding is not None and "manifest-matches-files" in {
+                    c.name for c in self._active_checks()}:
+                return ScorerResult(
+                    self.name, self.kind, VERDICT_FAIL, 0.0, [finding],
+                    _lost_run_coverage(run))
+            # Nothing declared and nothing on disk: genuinely a different shape, and scoring
+            # it 0% would be the false failure this scorer is built never to produce.
             return self._unknown(
                 "no phase file carries a parseable [phase] frontmatter block",
                 "unscoreable: a different workflow shape, not a failing one")

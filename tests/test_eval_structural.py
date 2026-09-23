@@ -560,3 +560,83 @@ def test_a_longer_closer_than_the_opener_still_closes() -> None:
                manifest_phases=[{"number": 1}], plan_meta={"task": "t", "total_phases": 1})
 
     assert "required-sections-present" not in _findings_for(run)
+
+
+class TestAnEmptyManifestBesideRealPhaseFiles:
+    """The case QA found: the worse the break, the less it moved the number."""
+
+    def test_a_plan_declaring_nothing_while_phase_files_exist_fails(self) -> None:
+        """It scored UNKNOWN, and UNKNOWN is excluded from the denominator.
+
+        So a run broken badly enough to declare no phases at all left no trace in the result:
+        twelve scenarios in, eleven scored, and the headline computed over the eleven. The
+        scorer could read the manifest perfectly — it simply said nothing was there. That is
+        not "unscoreable", it is empty, and the file already draws exactly this line one
+        branch higher for phase files with broken frontmatter.
+
+        `manifest-matches-files` is the rule for this, and it cannot fire: it compares
+        declared entries against files on disk, and there are no entries to compare. So the
+        judgement is made where both facts are visible.
+        """
+        run = RunArtifacts(plan_meta={"task": "t", "total_phases": 2}, phases=[], phase_texts={},
+                           undeclared_phase_files=["phase-01.md", "phase-02.md"])
+        result = _score(run)
+
+        assert result.verdict == VERDICT_FAIL, result
+        assert result.score_pct == 0.0, result
+        assert any("manifest-matches-files" in f for f in result.findings), result.findings
+        assert any("phase-01.md" in f for f in result.findings), result.findings
+
+    def test_a_declared_but_unparseable_phase_is_not_reported_as_no_phases(self) -> None:
+        """The false finding the first version produced.
+
+        The FAIL branch was guarded on "nothing parsed" rather than "the manifest declares
+        nothing", so a plan that declared `phase-1.md` perfectly well — whose file simply had
+        no frontmatter — was reported as declaring no phases at all, while the real defect went
+        unnamed. Two different failures, one message, and the message belonged to neither.
+        """
+        # `declared_in_bounds` must be populated, as `load_run` would. Without it this
+        # describes a manifest whose every entry was rejected — a run the loader cannot
+        # produce — and the scorer answers a different question entirely. The narrow assertion
+        # below still passed, so the test silently stopped covering its own subject. Raised in
+        # review, and the reason the fixture helper mirrors the loader.
+        run = RunArtifacts(plan_meta={"task": "t"},
+                           phases=[{"number": 1, "file": "phase-1.md"}],
+                           phase_texts={"phase-1.md": "no frontmatter here"},
+                           undeclared_phase_files=["phase-2.md"])
+        result = _score(run)
+
+        assert result.verdict == VERDICT_UNKNOWN, result
+        assert not any("declares no phases" in f for f in result.findings), result.findings
+
+    @pytest.mark.parametrize("skip", [("manifest",), ("manifest-matches-files",)])
+    def test_the_empty_manifest_fail_can_be_switched_off_like_any_other_check(
+            self, skip) -> None:
+        """It returned before `_active_checks` was consulted, so nothing could suppress it.
+
+        The finding it reports is `manifest-matches-files`, and a caller configuring
+        `skip=("manifest-matches-files",)` — the rule itself — still got the FAIL. A check that
+        cannot be switched off is not part of the registry; it is a second, hidden one.
+        Raised in review.
+        """
+        run = RunArtifacts(plan_meta={"task": "t"}, phases=[], phase_texts={},
+                           undeclared_phase_files=["phase-1.md"])
+
+        assert _score(run, skip=skip).verdict == VERDICT_UNKNOWN, skip
+        assert _score(run).verdict == VERDICT_FAIL, "and it still fires when not skipped"
+
+    def test_a_plan_declaring_nothing_with_no_files_either_stays_unknown(self) -> None:
+        """The protection that makes the case above safe to fail.
+
+        A workflow that is not phase-based at all has no phases and no phase files, and
+        scoring it 0% would be the false failure this scorer is built never to produce — its
+        stated commitment is "unscoreable is not a zero". The distinguishing fact is files on
+        disk that the manifest ignores: with none, nothing has been lost, and UNKNOWN is
+        still the honest answer.
+        """
+        run = RunArtifacts(plan_meta={"task": "t"}, phases=[], phase_texts={},
+                           undeclared_phase_files=[])
+        result = _score(run)
+
+        assert result.verdict == VERDICT_UNKNOWN, result
+        assert result.score_pct is None, result
