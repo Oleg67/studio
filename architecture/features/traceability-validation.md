@@ -780,8 +780,8 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 9. [x] - `p1` - Assemble the severity policy from every loaded kit and the project's own table, indexing entries by heading id and by ID kind - `inst-build-policy`
 10. [x] - `p1` - Parse `order` for one kind: a list of declared heading ids, or `"declared"` meaning every heading in declaration order; an unknown or repeated id fails the load - `inst-parse-order`
 11. [x] - `p1` - Refuse an `order` that puts the declared headings in a different sequence, naming the pair — `order` chooses what is enforced, it does not re-sequence declarations - `inst-order-follows-declarations`
-12. [x] - `p1` - Merge two kits' orders for one kind by concatenating the lists and dropping repeats - `inst-merge-order`
-13. [x] - `p1` - Name the first id pair two orders sequence in opposite directions, checking every shared pair so a cycle closing across three kits is caught at the fold - `inst-order-conflict`
+12. [x] - `p1` - Merge two kits' orders for one kind by taking the union of the precedence pairs each states and closing it under transitivity, so a relation both kits imply is enforced and none they did not state is invented - `inst-merge-order`
+13. [x] - `p1` - Reject the merge when the closed pair set requires one pair in both directions, naming it; a cycle closing across three kits is one such pair once the relations are closed - `inst-order-conflict`
 
 **Supporting**:
 - [x] - `p1` - Examples parser, heading-constraint ID slugifier, and references map parser - `inst-constraints-helpers`

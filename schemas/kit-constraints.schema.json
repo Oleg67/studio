@@ -109,11 +109,11 @@
           "items": { "$ref": "#/$defs/heading_constraint_entry" }
         },
         "order": {
-          "description": "Which declared sections must appear in the order they are declared. A list of heading ids constrains only those, relative to each other; \"declared\" constrains every heading this kind declares. Omitted means this kind imposes no order at all. List entries must follow the sequence of `headings`: `order` chooses what is enforced, it does not re-sequence the declarations.",
+          "description": "Which declared sections must appear in the order they are declared. A list of heading ids constrains only those, relative to each other; \"declared\" constrains every heading this kind declares. Omitted means this kind imposes no order at all. This is deliberately a superset of what loads: whether each id is declared by this kind, whether two entries name one heading under different casing, and whether the list follows the sequence of `headings` are checks only the loader can make, because only it has the heading list. Nothing that fails this schema loads, so a preflight check built on it never contradicts Studio in the direction that matters.",
           "oneOf": [
             {
               "type": "array",
-              "items": { "type": "string", "minLength": 1 },
+              "items": { "type": "string", "minLength": 1, "pattern": "\\S" },
               "uniqueItems": true
             },
             { "const": "declared" }

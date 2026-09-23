@@ -10,6 +10,7 @@ because a single end-to-end assertion cannot tell one from the other.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -526,8 +527,10 @@ def test_an_order_may_not_re_sequence_the_declared_headings(tmp_path):
         (["sec-alpha", "sec-nope"], "unknown heading id 'sec-nope'"),
         (["sec-alpha", "sec-alpha"], "more than once"),
         (["sec-alpha", ""], "non-empty heading ids"),
+        (["sec-alpha", " "], "non-empty heading ids"),
         (["sec-alpha", 7], "non-empty heading ids"),
         ("first", 'must be a list of heading ids or "declared"'),
+        (" declared ", 'must be a list of heading ids or "declared"'),
         (7, 'must be a list of heading ids or "declared"'),
     ],
 )
@@ -536,6 +539,30 @@ def test_an_order_that_cannot_be_honoured_fails_the_load(tmp_path, order, expect
     kit, errors = _load(tmp_path, {"artifacts": {"PRD": _kind_toml(order=order)}})
     assert kit is None
     assert any(expected in message for message in errors), errors
+
+
+def test_nothing_the_published_schema_refuses_is_allowed_to_load(tmp_path):
+    """The one direction of schema/loader disagreement that misleads anybody.
+
+    `kit-constraints.schema.json` pins the string form with `const`, so a
+    padded `" declared "` is invalid there. If it loaded anyway, the schema —
+    which is what teams point their editors and preflight checks at — would be
+    calling a working file broken. The reverse (schema accepts, loader refuses)
+    is unavoidable: only the loader knows which ids the kind declares.
+    """
+    schema = json.loads(
+        (Path(__file__).parent.parent / "schemas" / "kit-constraints.schema.json").read_text())
+    order = schema["$defs"]["artifact_kind_constraints"]["properties"]["order"]
+    string_form = [branch for branch in order["oneOf"] if "const" in branch][0]
+    list_form = [branch for branch in order["oneOf"] if branch.get("type") == "array"][0]
+
+    assert string_form["const"] == "declared"
+    assert list_form["items"]["pattern"] == r"\S"
+    assert list_form["uniqueItems"] is True
+
+    kit, errors = _load(tmp_path, {
+        "artifacts": {"PRD": _kind_toml(order=string_form["const"])}})
+    assert errors == [] and kit is not None
 
 
 def test_order_entries_are_matched_case_insensitively_like_every_heading_id(tmp_path):

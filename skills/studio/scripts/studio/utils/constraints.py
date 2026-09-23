@@ -3364,7 +3364,14 @@ def _parse_kind_order(
         str(hc.id) for hc in (headings or []) if str(getattr(hc, "id", "") or "").strip()
     )
     if isinstance(raw, str):
-        if raw.strip() != ORDER_DECLARED:
+        # Compared verbatim, not stripped. `kit-constraints.schema.json` pins
+        # this value with `const`, so accepting a padded one would make the
+        # published schema call invalid a file that loads — the one direction
+        # of disagreement that matters, because it is the schema that teams
+        # write their editors and preflight checks against. Entries in the list
+        # form are still normalised, because they are lookup keys the schema
+        # says nothing about.
+        if raw != ORDER_DECLARED:
             errors.append(
                 f"field 'order' must be a list of heading ids or \"{ORDER_DECLARED}\"")
             return None
