@@ -154,7 +154,37 @@ or no trace to trust:
 | `result` with a non-success `subtype` | The turn stopped short (`error_max_turns`, `error_during_execution`), so `result` holds a fragment, not an answer — even when the skill did load. An *absent* subtype is not treated this way: an unfamiliar shape should not manufacture failures. |
 | A line that will not parse | Counted in `unparsed_lines` rather than dropped silently, because a lost line can be a lost `tool_result` and the verdict above is read off exactly those. |
 
-Metadata: `skill_state` (`ran` / `failed` / `absent`), `skills_invoked` (the
+`skill_state` has four values:
+
+| State | Meaning | Graded? |
+|---|---|---|
+| `ran` | The `cf` router was invoked and its call came back clean. | yes |
+| `bypassed` | A `cf-*` workflow ran **directly**, the router never did. Studio produced the answer, so it is worth grading — but no gate, menu or routing decision happened, which is what this suite measures. Counted as a pass by promptfoo's own tally, so the metadata and the `WARNING` in the log are where a bypass is actually visible. | yes |
+| `absent` | No `Skill` call at all — *and* no error mark in the raw text. The mark is checked first, so a transcript that made no call but whose prose contains `<error>Execute skill: cf</error>` is `failed`, not `absent`. | no |
+| `failed` | A `Skill` call that is neither of the above: it named nothing recognizable, came back an error, or came back not at all. | no |
+
+Order matters, and deliberately so. A router that was **tried and failed**
+outranks a bypass, because "the router failed" is a finding about the router and
+"the router was never invoked" is not a softer version of it — it is a different
+and false statement. That holds two ways: `<error>Execute skill: cf</error>`
+anywhere in the transcript is `failed` before anything else is considered, and
+so is an unambiguous `cf` call that came back an error or did not come back.
+The workflow is still named in `skills_invoked`, so the bypass is ranked rather
+than lost.
+
+"Unambiguous" carries weight there: a call naming `cf` *among other candidates*
+is the documented false positive, and letting that outrank a bypass would hide a
+real one behind an unrelated error. Only a call that names `cf` and nothing else
+suppresses the bypass — and when the bypass is reported despite some `cf` match
+existing, the detail says "no unambiguous `cf` call" rather than "never
+invoked".
+
+No `Skill` call at all is `absent` before the rest. `skill_match_other_candidates` is populated for `ran`
+and for `bypassed`, and is empty whenever the verdict rested on a single name.
+
+A bypass needs the *whole* call to name `cf-` identifiers and nothing else. `_invoked_names` reports every identifier-shaped string at any depth, so a rival skill carrying a `cf-` name in an unrelated field would otherwise read as one — the loose match the name matcher exists to avoid, widened across a whole prefix.
+
+Metadata: `skill_state` (above), `skills_invoked` (the
 names), `skill_call_inputs` (those inputs verbatim, for when a name did not
 resolve), `skill_match_other_candidates` (above), `unparsed_lines`, and
 `unscored_output` — the answer that was withheld
