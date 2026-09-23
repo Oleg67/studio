@@ -248,6 +248,11 @@ class HeadingValidationContext:
     #: Heading index each matched constraint id landed on, which is what makes
     #: "this section must come after that one" nameable with a line number.
     matched_idx_by_id: Dict[str, int] = dataclass_field(default_factory=dict)
+    #: Heading indices whose numbering some constraint has already ruled on.
+    #: The numbering check reads a constraint's whole scope, not only the run
+    #: it claims, so two constraints with overlapping patterns both see a
+    #: heading only one of them takes — and one defect would be reported twice.
+    numbering_judged: Set[int] = dataclass_field(default_factory=set)
 
 def error(
     kind: str,
@@ -3983,13 +3988,17 @@ def merge_kit_constraints_all_of(
 ) -> Optional[KitConstraints]:
     """Merge constraints sequentially using allOf-style additive semantics.
 
-    ``errors`` collects the merges that cannot be performed at all — two kits
-    ordering one pair of sections in opposite directions. Callers that pass a
-    list must treat a non-empty one as a failed load; the returned model is
-    then one arbitrary reading of a contradiction and must not be validated
-    against.
+    Returns None when the merge cannot be performed at all — two kits ordering
+    one pair of sections in opposite directions. That is unconditional, not a
+    courtesy to callers who pass ``errors``: a partly-merged model carries one
+    arbitrary reading of the contradiction and looks exactly like a successful
+    merge, so handing it back to a caller that did not ask for the messages
+    would make the silence the caller's problem rather than this function's.
+
+    ``errors``, when given, collects those messages as well, so a caller that
+    wants to say *why* the load failed does not have to re-derive it.
     """
-    merge_errors = errors if errors is not None else []
+    merge_errors: List[str] = []
     by_kind: Dict[str, ArtifactKindConstraints] = {}
     for kit_constraints in constraints:
         for kind, incoming in (kit_constraints.by_kind or {}).items():
@@ -4001,7 +4010,9 @@ def merge_kit_constraints_all_of(
                     by_kind[normalized], incoming, normalized, merge_errors)
             else:
                 by_kind[normalized] = incoming
-    if not by_kind:
+    if errors is not None:
+        errors.extend(merge_errors)
+    if not by_kind or merge_errors:
         return None
     return KitConstraints(
         by_kind=by_kind,
@@ -4520,7 +4531,7 @@ def _matches_in_scope(
     scope_start: int,
     scope_end: int,
     claimed: Set[int],
-) -> List[Dict[str, object]]:
+) -> List[Tuple[int, Dict[str, object]]]:
     """Every unclaimed heading anywhere in this scope the constraint matches.
 
     Deliberately not the same list as ``matches``. The run above stops at the
@@ -4538,7 +4549,7 @@ def _matches_in_scope(
     between them.
     """
     return [
-        headings[idx] for idx in range(scope_start, scope_end)
+        (idx, headings[idx]) for idx in range(scope_start, scope_end)
         if idx not in claimed and _match_heading_constraint(headings[idx], heading_constraint)
     ]
 # @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-match-headings-scope
@@ -4669,16 +4680,26 @@ def _append_requires_multiple_heading_error(
 
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-order-violation
-def _enclosing_heading_index(
+def _ancestor_heading_indices(
     headings: Sequence[Dict[str, object]],
     idx: int,
-) -> Optional[int]:
-    """Index of the nearest preceding heading that contains ``headings[idx]``."""
+) -> List[int]:
+    """Every heading that contains ``headings[idx]``, nearest first.
+
+    The whole chain, not the nearest one: a section travels with the ancestor
+    that moved, however many unconstrained headings sit between them. Checking
+    only the immediate parent broke the chain at the first heading no
+    constraint names, which is the common shape — a displaced section with a
+    plain subheading over its constrained detail.
+    """
+    ancestors: List[int] = []
     level = int(headings[idx].get("level", 0) or 0)
     for back in range(idx - 1, -1, -1):
-        if int(headings[back].get("level", 0) or 0) < level:
-            return back
-    return None
+        back_level = int(headings[back].get("level", 0) or 0)
+        if back_level < level:
+            ancestors.append(back)
+            level = back_level
+    return ancestors
 
 
 def _matched_heading_info(
@@ -4747,8 +4768,8 @@ def _append_order_violation_error(
     order = heading_ctx.order
     if order is None:
         return
-    parent_idx = _enclosing_heading_index(headings, match_idx)
-    if parent_idx is not None and parent_idx in heading_ctx.reported_idx:
+    ancestors = _ancestor_heading_indices(headings, match_idx)
+    if any(ancestor in heading_ctx.reported_idx for ancestor in ancestors):
         heading_ctx.reported_idx.add(match_idx)
         return
     heading_id = str(getattr(heading_constraint, "id", "") or "")
@@ -4911,7 +4932,7 @@ def _rescue_unmatched_heading(
     heading_constraint: HeadingConstraint,
     idx: int,
     last_match_idx_by_level: Dict[int, int],
-) -> Optional[Tuple[List[Dict[str, object]], int, int, List[Dict[str, object]]]]:
+) -> Optional[Tuple[List[Dict[str, object]], int, int, List[Tuple[int, Dict[str, object]]]]]:
     """Look behind the cursor for a section that is present but out of place.
 
     The forward-only cursor cannot tell "this section is missing" from "this
@@ -4982,7 +5003,7 @@ def _check_matched_heading_rules(
     heading_constraint: HeadingConstraint,
     idx: int,
     matches: List[Dict[str, object]],
-    scope_matches: List[Dict[str, object]],
+    scope_matches: List[Tuple[int, Dict[str, object]]],
 ) -> None:
     """Apply the count and numbering rules to one constraint's matched run."""
     if heading_constraint.multiple is False and len(matches) > 1:
@@ -5003,7 +5024,14 @@ def _check_matched_heading_rules(
     if heading_constraint.numbered is None:
         return
     want_numbered = heading_constraint.numbered is True
-    for match in scope_matches:
+    for scope_idx, match in scope_matches:
+        # Once per heading, by whichever constraint reaches it first.
+        # Numbering is a property of the section, and two constraints whose
+        # patterns overlap both see a heading only one of them will claim —
+        # without this, that heading is reported twice for one defect.
+        if scope_idx in heading_ctx.numbering_judged:
+            continue
+        heading_ctx.numbering_judged.add(scope_idx)
         if bool(match.get("numbered", False)) == want_numbered:
             continue
         _append_numbering_mismatch_error(

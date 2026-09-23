@@ -308,6 +308,37 @@ def test_children_of_a_rescued_section_are_scoped_under_it(tmp_path):
     assert _codes(report) == []
 
 
+def test_a_subsection_travels_with_its_parent_through_unconstrained_headings(tmp_path):
+    """The chain is every ancestor, not the nearest one.
+
+    A displaced section usually has a plain subheading over its constrained
+    detail. Checking only the immediate parent broke the chain at the first
+    heading no constraint names, so the detail was reported for a move its
+    ancestor already accounts for.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Beta
+
+### Plain
+
+#### Detail
+
+## Alpha
+""")
+    report = _report(path, _kind(
+        [
+            _heading("Alpha", "sec-alpha"),
+            _heading("Beta", "sec-beta"),
+            _heading("Detail", "sec-detail", level=4),
+        ],
+        order=C.HeadingOrder.from_sequence(("sec-alpha", "sec-beta", "sec-detail")),
+    ))
+    assert _codes(report) == [EC.HEADING_ORDER_VIOLATION]
+    assert _finding(report, EC.HEADING_ORDER_VIOLATION)["heading_id"] == "sec-beta"
+
+
 def test_only_the_displaced_parent_is_reported_not_its_subsections(tmp_path):
     """One move fixes the document, so the report names one move."""
     path = _doc(tmp_path, """
@@ -635,6 +666,32 @@ def test_a_cycle_that_only_closes_across_three_kits_is_caught(tmp_path):
     assert any("contradicts another kit's order" in message for message in errors), errors
 
 
+def test_a_contradicted_merge_returns_nothing_even_when_nobody_asked_for_errors(tmp_path):
+    """Fail-closed without being asked to be.
+
+    `merge_kit_constraints_all_of` is exported. A caller that does not pass an
+    `errors` list would otherwise receive a fully-formed model holding one
+    arbitrary reading of the contradiction, indistinguishable from a merge that
+    worked — the silence would be the caller's problem rather than this
+    function's.
+    """
+    def _kit(ids):
+        return C.KitConstraints(by_kind={"PRD": C.ArtifactKindConstraints(
+            name=None, description=None, defined_id=[],
+            order=C.HeadingOrder.from_sequence(ids))})
+
+    assert C.merge_kit_constraints_all_of([_kit(("x", "y")), _kit(("y", "x"))]) is None
+
+    errors: list[str] = []
+    assert C.merge_kit_constraints_all_of(
+        [_kit(("x", "y")), _kit(("y", "x"))], errors) is None
+    assert any("contradicts another kit's order" in message for message in errors)
+
+    # A merge that can be performed still is.
+    merged = C.merge_kit_constraints_all_of([_kit(("x", "y")), _kit(("y", "z"))])
+    assert merged is not None and merged.by_kind["PRD"].order.relates("x", "z")
+
+
 def test_one_kit_with_an_order_and_one_without_keeps_the_order(tmp_path):
     kit, errors = _two_kits(
         tmp_path, _kind_toml(order=["sec-alpha", "sec-beta"]), _kind_toml())
@@ -771,6 +828,55 @@ def test_but_a_duplicate_separated_by_a_subsection_is_still_not_a_duplicate(tmp_
     report = _report(path, _kind(
         [_heading("Flow", "sec-flow", multiple=False)], toc=False))
     assert EC.HEADING_PROHIBITS_MULTIPLE not in _codes(report)
+
+
+def test_a_heading_two_constraints_can_both_see_is_judged_once(tmp_path):
+    """The cost of reading the scope instead of the run, and its bound.
+
+    Only one constraint *claims* a heading, but every constraint whose pattern
+    matches it *sees* it while counting its scope. Without a record of what has
+    been ruled on, one numbering defect is reported once per constraint that
+    could have matched it — the document has one problem, so it gets one
+    finding, from whichever constraint reaches it first.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Flow
+
+### Step
+
+## 2. Flow
+""")
+    report = _report(path, _kind([
+        _heading("Flow", "sec-flow-a", numbered=False),
+        _heading("Flow", "sec-flow-b", numbered=False),
+    ], toc=False))
+    assert _codes(report) == [EC.HEADING_NUMBERING_MISMATCH]
+    assert _finding(report, EC.HEADING_NUMBERING_MISMATCH)["heading_id"] == "sec-flow-a"
+
+
+def test_the_leftover_match_is_still_claimable_by_the_next_constraint(tmp_path):
+    """Seeing a heading is not taking it — the second constraint still matches.
+
+    The pair above would also produce one finding if the scope inspection had
+    quietly claimed everything it looked at, so this pins the other half: the
+    unclaimed copy is what the second constraint matches on.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Flow
+
+### Step
+
+## Flow
+""")
+    report = _report(path, _kind([
+        _heading("Flow", "sec-flow-a"),
+        _heading("Flow", "sec-flow-b"),
+    ], toc=False))
+    assert _codes(report) == []
 
 
 def test_a_section_that_appears_once_is_still_reported_when_it_has_subsections(tmp_path):
