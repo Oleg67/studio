@@ -4493,7 +4493,7 @@ def _find_heading_matches_in_scope(
     ):
         match_idx += 1
     if match_idx >= scope_end:
-        return [], scope_start, scope_start, 0
+        return [], scope_start, scope_start, []
     matches = [headings[match_idx]]
     next_idx = match_idx + 1
     if heading_constraint.multiple is not False:
@@ -4504,7 +4504,7 @@ def _find_heading_matches_in_scope(
         ):
             matches.append(headings[next_idx])
             next_idx += 1
-    return matches, match_idx, next_idx, _count_matches_in_scope(
+    return matches, match_idx, next_idx, _matches_in_scope(
         headings=headings,
         heading_constraint=heading_constraint,
         scope_start=scope_start,
@@ -4513,27 +4513,34 @@ def _find_heading_matches_in_scope(
     )
 
 
-def _count_matches_in_scope(
+def _matches_in_scope(
     *,
     headings: Sequence[Dict[str, object]],
     heading_constraint: HeadingConstraint,
     scope_start: int,
     scope_end: int,
     claimed: Set[int],
-) -> int:
-    """How many unclaimed headings anywhere in this scope the constraint matches.
+) -> List[Dict[str, object]]:
+    """Every unclaimed heading anywhere in this scope the constraint matches.
 
-    Deliberately not the same number as ``len(matches)``. The run above stops
-    at the first heading that does not match, because ``multiple = false`` has
-    always meant "not twice in a row" and widening it would report duplicates
-    in documents that pass today. "At least two" asks a different question —
-    does this section repeat within its scope at all — and a section that
-    repeats will almost always have its own subsections between the copies.
+    Deliberately not the same list as ``matches``. The run above stops at the
+    first heading that does not match, because ``multiple = false`` has always
+    meant "not twice in a row" and widening it would report duplicates in
+    documents that pass today, including this repository's own DESIGN under
+    the shipped kit's repeated component entries.
+
+    The two rules that read this list ask about the section rather than about
+    the run. "At least two" asks whether the section repeats within its scope
+    at all, and a section that repeats almost always carries its own
+    subsections between the copies. ``numbered`` is the spec's "each matching
+    heading", which is every copy — checking only the first run left the
+    second copy of a repeated section unvalidated whenever anything sat
+    between them.
     """
-    return sum(
-        1 for idx in range(scope_start, scope_end)
+    return [
+        headings[idx] for idx in range(scope_start, scope_end)
         if idx not in claimed and _match_heading_constraint(headings[idx], heading_constraint)
-    )
+    ]
 # @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-match-headings-scope
 
 
@@ -4852,7 +4859,7 @@ def _validate_single_heading_match(
         cursor=cursor,
         last_match_idx_by_level=last_match_idx_by_level,
     )
-    matches, match_idx, next_idx, scope_count = _find_heading_matches_in_scope(
+    matches, match_idx, next_idx, scope_matches = _find_heading_matches_in_scope(
         headings=headings,
         heading_constraint=heading_constraint,
         scope_start=scope_start,
@@ -4869,7 +4876,7 @@ def _validate_single_heading_match(
         )
         if rescued is None:
             return cursor
-        matches, match_idx, next_idx, scope_count = rescued
+        matches, match_idx, next_idx, scope_matches = rescued
     _claim_heading_matches(
         heading_ctx=heading_ctx,
         heading_constraint=heading_constraint,
@@ -4891,7 +4898,7 @@ def _validate_single_heading_match(
         heading_constraint=heading_constraint,
         idx=idx,
         matches=matches,
-        scope_count=scope_count,
+        scope_matches=scope_matches,
     )
     return cursor
 
@@ -4904,7 +4911,7 @@ def _rescue_unmatched_heading(
     heading_constraint: HeadingConstraint,
     idx: int,
     last_match_idx_by_level: Dict[int, int],
-) -> Optional[Tuple[List[Dict[str, object]], int, int, int]]:
+) -> Optional[Tuple[List[Dict[str, object]], int, int, List[Dict[str, object]]]]:
     """Look behind the cursor for a section that is present but out of place.
 
     The forward-only cursor cannot tell "this section is missing" from "this
@@ -4923,7 +4930,7 @@ def _rescue_unmatched_heading(
         cursor=0,
         last_match_idx_by_level=last_match_idx_by_level,
     )
-    matches, match_idx, next_idx, scope_count = _find_heading_matches_in_scope(
+    matches, match_idx, next_idx, scope_matches = _find_heading_matches_in_scope(
         headings=headings,
         heading_constraint=heading_constraint,
         scope_start=scope_start,
@@ -4945,7 +4952,7 @@ def _rescue_unmatched_heading(
         idx=idx,
         match_idx=match_idx,
     )
-    return matches, match_idx, next_idx, scope_count
+    return matches, match_idx, next_idx, scope_matches
 
 
 # @cpt-end:cpt-studio-algo-traceability-validation-headings-contract:p1:inst-rescue-unmatched
@@ -4975,7 +4982,7 @@ def _check_matched_heading_rules(
     heading_constraint: HeadingConstraint,
     idx: int,
     matches: List[Dict[str, object]],
-    scope_count: int,
+    scope_matches: List[Dict[str, object]],
 ) -> None:
     """Apply the count and numbering rules to one constraint's matched run."""
     if heading_constraint.multiple is False and len(matches) > 1:
@@ -4986,7 +4993,7 @@ def _check_matched_heading_rules(
             match_count=len(matches),
             line=int(matches[1].get("line", 1) or 1),
         )
-    elif heading_constraint.multiple is True and scope_count < 2:
+    elif heading_constraint.multiple is True and len(scope_matches) < 2:
         _append_requires_multiple_heading_error(
             heading_ctx=heading_ctx,
             heading_constraint=heading_constraint,
@@ -4996,7 +5003,7 @@ def _check_matched_heading_rules(
     if heading_constraint.numbered is None:
         return
     want_numbered = heading_constraint.numbered is True
-    for match in matches:
+    for match in scope_matches:
         if bool(match.get("numbered", False)) == want_numbered:
             continue
         _append_numbering_mismatch_error(

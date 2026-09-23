@@ -266,6 +266,10 @@ that declares no `order` accepts its constrained sections in any sequence.
 **Numbering**:
 - `numbered = true`: each matching heading MUST have a numbering prefix
 - `numbered = false`: MUST NOT have a numbering prefix
+- "Each matching heading" means every copy in the parent section, not only the
+  first consecutive run. The run is what `multiple = false` asks about; whether
+  a section is numbered is a property of the section, so a second copy with
+  subsections between it and the first is checked like any other
 - Numbering progression: consecutive numbered headings at the same level must increment by 1; nested numbering must be consistent with parent prefix. Reported as `heading-number-not-consecutive`, an ordinary rule code: a kind that numbers its sections by hand lowers or disables it in its own `[artifacts.<KIND>.validation.severity]` table
 
 ### Section Order

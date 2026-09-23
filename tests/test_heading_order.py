@@ -728,6 +728,51 @@ def test_a_repeated_section_is_repeated_even_with_subsections_between(tmp_path):
     assert _codes(report) == []
 
 
+def test_every_copy_of_a_repeated_section_has_its_numbering_checked(tmp_path):
+    """`numbered` is "each matching heading", and a second copy is one of them.
+
+    The consecutive run and the scope are the same list until something sits
+    between the copies. Checking numbering on the run alone meant a repeated
+    section's later copies were unvalidated exactly when the section was long
+    enough to have subsections — which is when it repeats at all.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Flow
+
+### Step
+
+## 2. Flow
+""")
+    report = _report(path, _kind(
+        [_heading("Flow", "sec-flow", numbered=False)], toc=False))
+    assert _codes(report) == [EC.HEADING_NUMBERING_MISMATCH]
+    assert _finding(report, EC.HEADING_NUMBERING_MISMATCH)["line"] == 7
+
+
+def test_but_a_duplicate_separated_by_a_subsection_is_still_not_a_duplicate(tmp_path):
+    """The other rule keeps the run, and that asymmetry is the point.
+
+    `multiple = false` has meant "not twice in a row" since before this branch.
+    Widening it to the scope would report duplicates in documents that pass
+    today, so only the rules that ask about the section — not the run — read
+    the wider list.
+    """
+    path = _doc(tmp_path, """
+# Doc
+
+## Flow
+
+### Step
+
+## Flow
+""")
+    report = _report(path, _kind(
+        [_heading("Flow", "sec-flow", multiple=False)], toc=False))
+    assert EC.HEADING_PROHIBITS_MULTIPLE not in _codes(report)
+
+
 def test_a_section_that_appears_once_is_still_reported_when_it_has_subsections(tmp_path):
     """The other half of the same count — widening it must not silence the rule."""
     path = _doc(tmp_path, "# Doc\n\n## Flow\n\n### Step\n")

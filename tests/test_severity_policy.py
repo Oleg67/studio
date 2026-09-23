@@ -1243,6 +1243,73 @@ def test_e2e_a_kit_severity_reaches_the_placeholder_phases_too(tmp_path):
     assert exit_code == 0
 
 
+def _kit_with_two_broken_phases(tmp_path: Path, severity: dict | None = None) -> None:
+    """A PRD template that fails the heading contract *and* the placeholder phase.
+
+    One defect in each of the two phases the early return sits between, so a
+    test can tell "the second phase ran" from "the second phase was skipped" —
+    which a template broken in only one place never can.
+    """
+    constraints = _both_kinds()
+    constraints["PRD"] = {
+        **constraints["PRD"],
+        "identifiers": {"fr": {"required": True, "template": "cpt-{system}-fr-{slug}"}},
+        **({"validation": {"severity": severity}} if severity else {}),
+    }
+    # No `## Metrics` (the heading contract) and no `fr` placeholder (the
+    # placeholder phase).
+    _write_project(tmp_path, kind_constraints=constraints, prd_template="# PRD\n")
+    (tmp_path / "kits" / "test" / "constraints.toml").write_text(
+        toml_utils.dumps({"artifacts": constraints}), encoding="utf-8")
+
+
+def _prd_codes(report: dict) -> set:
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    return {f.get("code") for f in (prd.get("errors") or []) + (prd.get("warnings") or [])}
+
+
+def test_e2e_a_heading_error_stops_before_the_placeholder_phase(tmp_path):
+    """The early return is a contract, not an implementation detail.
+
+    An unsatisfied outline makes every later finding about placement suspect,
+    so the phases after it do not run. What that costs is a second finding the
+    author would have had to fix anyway; what it buys is never reporting an ID
+    as being in the wrong section of a document whose sections are wrong.
+    """
+    _kit_with_two_broken_phases(tmp_path)
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.HEADING_MISSING}
+
+
+def test_e2e_a_heading_lowered_to_a_warning_lets_the_placeholder_phase_run(tmp_path):
+    """The other side of the same gate, and the reason it counts errors not findings.
+
+    The kit downgraded the heading rule, so the outline is no longer a reason
+    to stop — and the placeholder defect behind it must surface rather than
+    stay hidden behind a rule its own kit called advisory.
+    """
+    _kit_with_two_broken_phases(tmp_path, severity={"heading-missing": "warning"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.HEADING_MISSING, EC.TEMPLATE_DEF_PLACEHOLDER_MISSING}
+
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert [f.get("code") for f in prd["warnings"]] == [EC.HEADING_MISSING]
+    assert [f.get("code") for f in prd["errors"]] == [EC.TEMPLATE_DEF_PLACEHOLDER_MISSING]
+
+
+def test_e2e_a_suppressed_heading_also_lets_the_placeholder_phase_run(tmp_path):
+    """Off is not an error either, and the count still has to survive the gate."""
+    _kit_with_two_broken_phases(tmp_path, severity={"heading-missing": "off"})
+    exit_code, report = _run(tmp_path, ["--json", "validate-kits", "--verbose"])
+    assert exit_code == 2
+    assert _prd_codes(report) == {EC.TEMPLATE_DEF_PLACEHOLDER_MISSING}
+
+    prd = [r for r in report["self_check_results"] if r.get("kind") == "PRD"][0]
+    assert prd["suppressed_count"] == 1
+
+
 def test_e2e_an_empty_registry_still_reports_a_kit_warning(tmp_path):
     """The run where nothing else would mention it."""
     constraints = _both_kinds()

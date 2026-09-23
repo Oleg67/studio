@@ -742,10 +742,10 @@ Pure decision logic, no I/O: this is a deterministic CLI, not the caller that ac
 5. [x] - `p1` - Match headings against constraints: hierarchical scope matching, required/multiple/numbered enforcement, emit errors for missing/duplicate/misnumbered headings - `inst-match-headings`
 6. [x] - `p1` - Rescue a constraint the forward cursor left unmatched: re-search its parent range from the start for an unclaimed heading, **IF** one is found treat it as a match, **ELSE** report the section as missing - `inst-rescue-unmatched`
 7. [x] - `p1` - Claim the headings one constraint matched and record where it landed, so no two constraints stand on one section - `inst-claim-matches`
-8. [x] - `p1` - Apply the count and numbering rules to a constraint's matched run, whether it matched forward or was rescued - `inst-check-match-rules`
+8. [x] - `p1` - Apply the count and numbering rules, whether the constraint matched forward or was rescued: `multiple = false` over the consecutive run, `numbered` and "at least two" over every unclaimed match in the parent scope - `inst-check-match-rules`
 9. [x] - `p1` - Find the nearest already-matched section a rescued one now precedes, according to the kind's declared order - `inst-order-offender`
 10. [x] - `p1` - **IF** the kind declares an `order` and an offender was found, emit `heading-order-violation` naming it, suppressing the descendants of a section already reported - `inst-order-violation`
-11. [x] - `p1` - **IF** a constraint declares `multiple = true` and matched exactly once, emit `heading-requires-multiple` (off by default) - `inst-requires-multiple`
+11. [x] - `p1` - **IF** a constraint declares `multiple = true` and its parent scope holds fewer than two unclaimed matches, emit `heading-requires-multiple` (off by default) - `inst-requires-multiple`
 
 **Supporting**:
 - [x] - `p1` - Heading line regex, number prefix regex, and module exports - `inst-headings-datamodel`
