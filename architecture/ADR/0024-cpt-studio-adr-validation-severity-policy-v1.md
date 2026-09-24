@@ -327,11 +327,43 @@ it.
 
 A definition stays bare. A definition is the place being pointed at, so a link in its
 place points away from itself and declares nothing. Such a line used to be filed as a
-reference to the very id it meant to declare: the id ended up undefined, with one
-spurious reference and no diagnostic anywhere. It is now recognised, counted as
-neither a definition nor a reference, and reported as `def-link-form-not-allowed` —
-a rule code like any other, so a kit or project that disagrees can lower it, and the
-severity model is what makes that disagreement expressible without a fork.
+reference to the very id it meant to declare, and what followed depended on the id's
+system. Where the system is registered — the normal case — the self-reference found
+no definition and raised `ref-no-definition` *on the definition line itself*: an
+error, but one that told the author their definition was a reference to nothing.
+Where it is not registered, the reference was treated as external and skipped, and
+nothing was reported at all. The line is now recognised, counted as neither a
+definition nor a reference, and reported as `def-link-form-not-allowed` — a rule code
+like any other, so a kit or project that disagrees can lower it, and the severity
+model is what makes that disagreement expressible without a fork.
+
+**Why it is lowerable, when muting it looks like reopening the hole.** The other
+`def-*` codes encode a preference; this one exists to end a misleading or silent
+failure, so the question of whether it should be lockable by default is fair. It is
+lowerable because lowering it does not restore either. The suppressed finding is
+counted in `suppressed_count`, and a project's lowering is listed in
+`severity_overrides` on every run. The scan no longer misclassifies the line whatever
+the severity, so the id is honestly undefined: every reference to it raises
+`ref-no-definition` — an error this rule does not govern, now pointing at real
+references instead of at the definition — and a `required` id kind raises
+`required-id-kind-missing` on top. What remains quiet is an unreferenced id of an
+optional kind, with a suppression count beside it, which is exactly what `off` means
+for any rule. A default lock on a built-in code is also a mechanism this model does
+not have: `locked` lives on a kit's own constraint entries, and adding a code-level
+lock for one rule is a change to the policy model that deserves its own record rather
+than a rider on this one.
+
+**Why it defaults to `error` rather than being staged in at `warning`.** The default
+follows whether the flagged documents are valid. `heading-requires-multiple` ships
+`off` because enforcing it would fail documents that are correct by the spec. Every
+line this rule flags is incorrect by the spec — it was always a definition that
+defined nothing — so a `warning` default would let a known-broken definition pass the
+gate out of the box. And the upgrade cost is smaller than a new error suggests: where
+the id's system is registered, the same line already failed with `ref-no-definition`,
+so the new code replaces a misleading error with an accurate one at the same line and
+severity. Only the unregistered-system case — the one that was genuinely silent —
+starts failing, which is the point. A project that wants to stage it anyway has the
+path this ADR provides: one line in `config/core.toml`, reported in every run.
 
 ### Consequences
 

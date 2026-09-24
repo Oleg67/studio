@@ -406,8 +406,10 @@ A definition is written **bare**. The same line written as a markdown link
 (``**ID**: [`cpt-my-system-fr-login`](spec.md)``) defines nothing: the scanner emits
 `type: definition-link-form` for it, which is neither a definition nor a reference,
 and the validator reports `def-link-form-not-allowed`. Before that code existed such
-a line was filed as a reference to the very ID it meant to declare, leaving the ID
-undefined with no diagnostic anywhere.
+a line was filed as a reference to the very ID it meant to declare. With the ID's
+system registered, that self-reference raised `ref-no-definition` on the definition
+line itself — an error that misnamed the problem; with it unregistered, the reference
+was skipped as external and nothing was reported at all.
 
 **ID references** — recognized in three ways:
 - Standalone backticked IDs on list lines: `` - `cpt-my-system-fr-login` ``
