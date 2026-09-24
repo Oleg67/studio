@@ -343,12 +343,14 @@ failure, so the question of whether it should be lockable by default is fair. It
 lowerable because lowering it does not restore either. The suppressed finding is
 counted in `suppressed_count`, and a project's lowering is listed in
 `severity_overrides` on every run. The scan no longer misclassifies the line whatever
-the severity, so the id is honestly undefined: every reference to it raises
-`ref-no-definition` — an error this rule does not govern, now pointing at real
-references instead of at the definition — and a `required` id kind raises
-`required-id-kind-missing` on top. What remains quiet is an unreferenced id of an
-optional kind, with a suppression count beside it, which is exactly what `off` means
-for any rule. A default lock on a built-in code is also a mechanism this model does
+the severity, so the id is honestly undefined. Where the id's system is registered,
+every reference to it raises `ref-no-definition` — an error this rule does not
+govern, now pointing at real references instead of at the definition — and a
+`required` id kind raises `required-id-kind-missing` on top. Where the system is not
+registered, its references are skipped as external, as they always have been, and
+the suppression count is the only signal left. That case and an unreferenced id of an
+optional kind are what stays quiet, each with a suppression count beside it, which is
+exactly what `off` means for any rule. A default lock on a built-in code is also a mechanism this model does
 not have: `locked` lives on a kit's own constraint entries, and adding a code-level
 lock for one rule is a change to the policy model that deserves its own record rather
 than a rider on this one.

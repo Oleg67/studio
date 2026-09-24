@@ -47,17 +47,23 @@ _ID_REF_RE = re.compile(
 # the inline scan, which used to file it as a reference to itself: the id was left
 # undefined, reported — if at all — as a dangling reference on its own definition line.
 #
-# It keys on the link *text* — the id in square brackets — and accepts whatever
-# follows, where the reference pattern above is narrow, and the asymmetry is the
-# point. A reference the narrow pattern rejects still reaches the inline scan and is
-# still recorded as a reference — it loses its task and priority, nothing else. A
-# definition the same rejection drops is *misclassified*, which is the defect this
-# code exists to remove, so no link syntax may escape it: an inline target of any
-# content including none (`(...)`, `()`), a reference-style label (`[label]`), a
-# collapsed one (`[]`), or a shortcut link with nothing after the brackets.
+# It keys on the link *text* — the id in square brackets — where the reference
+# pattern above is narrow, and the asymmetry is the point. A reference the narrow
+# pattern rejects still reaches the inline scan and is still recorded as a reference —
+# it loses its task and priority, nothing else. A definition the same rejection drops
+# is *misclassified*, which is the defect this code exists to remove, so no link
+# syntax may escape it.
+#
+# The match stops at the closing `]` and is not anchored at the end, so every link
+# syntax — an inline destination of any content including none, a reference-style
+# label, a collapsed `[]`, a shortcut link — matches the same way, and text after the
+# link can still reference other ids: the caller scans from `match.end()` for
+# backticked ids. That scan cannot pick anything out of the destination or label,
+# because neither contains backticks, so parsing them would add a branch that no
+# input can observe.
 _ID_DEF_LINK_RE = re.compile(
     r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
-    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\].*$"
+    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]"
 )
 _BACKTICK_ID_RE = re.compile(r"`(cpt-[a-z0-9][a-z0-9-]+)`")
 
@@ -212,6 +218,10 @@ def scan_cpt_id_lines(lines: List[str]) -> List[Dict[str, object]]:
                 id_group_names=("id",),
                 priority_group_names=("priority",),
             ))
+            # Only the text after the link text can reference other ids — never the
+            # linked id itself, and never a destination, which has no backticks.
+            for mm in _BACKTICK_ID_RE.finditer(stripped[mdef_link.end():]):
+                hits.append({"id": mm.group(1), "line": idx0 + 1, "type": "reference", "checked": False})
             continue
         # @cpt-end:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-match-def-link
 

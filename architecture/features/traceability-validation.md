@@ -223,7 +223,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 2. [x] - `p1` - **FOR EACH** line (skipping fenced code blocks) - `inst-foreach-line`
    1. [x] - `p1` - Match ID definition pattern: `**ID**: \`cpt-...\`` with optional checkbox and priority - `inst-match-def`
    2. [x] - `p1` - **IF** definition matched, extract id, checked, has_task, priority and append as definition hit - `inst-if-def`
-   3. [x] - `p1` - **ELSE** match a definition written as a markdown link and append it under its own type, so the spelling is reported rather than read as a reference to the id it meant to declare - `inst-match-def-link`
+   3. [x] - `p1` - **ELSE** match a definition written as a markdown link and append it under its own type, so the spelling is reported rather than read as a reference to the id it meant to declare; scan only the text after the link for inline references - `inst-match-def-link`
    4. [x] - `p1` - **ELSE** match standalone reference pattern, bare or link-form, with optional checkbox - `inst-match-ref`
    5. [x] - `p1` - **ELSE** scan for inline backticked `cpt-*` references - `inst-match-inline`
 3. [x] - `p1` - **RETURN** ordered list of hits - `inst-return-hits`

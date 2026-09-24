@@ -101,6 +101,34 @@ def test_every_definition_shape_is_recognised_in_link_form(line):
     assert [h["type"] for h in hits] == [LINK_FORM_DEFINITION]
 
 
+OTHER = "cpt-myapp-flow-logout"
+
+
+@pytest.mark.parametrize("line, expected_refs", [
+    # Text after the complete link construct still references other ids…
+    ("**ID**: [`{id}`](spec.md) related: `{other}`", ["{other}"]),
+    ("**ID**: [`{id}`][login] related: `{other}`", ["{other}"]),
+    ("**ID**: [`{id}`] related: `{other}`", ["{other}"]),
+    ("**ID**: [`{id}`](spec.md) see [`{other}`](b.md#{other})", ["{other}"]),
+    # …but neither the linked id nor its destination is a reference.
+    ("**ID**: [`{id}`](spec.md#{other})", []),
+    ("**ID**: [`{id}`](spec.md) closing (note)", []),
+])
+def test_only_text_after_the_link_can_reference_other_ids(line, expected_refs):
+    hits = scan_cpt_id_lines([line.format(id=TARGET, other=OTHER)])
+    assert hits[0]["type"] == LINK_FORM_DEFINITION
+    assert hits[0]["id"] == TARGET
+    assert [h["id"] for h in hits[1:]] == [r.format(other=OTHER) for r in expected_refs]
+    assert all(h["type"] == "reference" for h in hits[1:])
+
+
+def test_no_destination_shape_can_hide_the_definition():
+    """The match keys on the link text and never parses the destination, so even a
+    doubly nested one — past anything a destination regex would handle — is reported."""
+    hits = scan_cpt_id_lines([f"**ID**: [`{TARGET}`](a((b)).md)"])
+    assert [h["type"] for h in hits] == [LINK_FORM_DEFINITION]
+
+
 def test_a_reference_target_with_parentheses_falls_back_to_the_inline_scan():
     """Deliberate, and the other half of the asymmetry above.
 

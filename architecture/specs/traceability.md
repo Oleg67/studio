@@ -156,12 +156,14 @@ A definition is written **bare**. References may also be written as a markdown l
 place being pointed at. The link-form spelling is recognized only so that it can be
 reported as `def-link-form-not-allowed` — it defines nothing, and it is not counted as
 a reference either. Recognition keys on the link *text* — the ID in square brackets —
-and accepts **any** link syntax after it: an inline target of any content including
+and so accepts **any** link syntax after it: an inline target of any content including
 none (`(...)`, `()`), a reference-style label (`[label]`), a collapsed reference
 (`[]`) or a shortcut link. That is deliberately wider than the reference pattern: a
 reference the narrow pattern rejects is still recorded as a reference, while a
 definition it rejected would be misclassified, which is the failure this code exists
-to remove.
+to remove. Text after the link is still scanned for inline references, so
+``**ID**: [`cpt-a`](spec.md) related: `cpt-b` `` reports the definition *and* records
+the reference to `cpt-b`; the linked ID itself and the link destination never count.
 
 ```
 **ID**: [`cpt-myapp-fr-must-authenticate`](../prd/PRD.md#auth)   ← error, defines nothing
