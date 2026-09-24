@@ -46,9 +46,17 @@ _ID_REF_RE = re.compile(
 # so it can be reported (``def-link-form-not-allowed``) instead of falling through to
 # the inline scan, which used to file it as a reference to itself and leave the id
 # with no definition and no diagnostic.
+#
+# Its target is permissive where the reference target above is narrow, and the
+# asymmetry is the point. A reference the narrow target rejects still reaches the
+# inline scan and is still recorded as a reference — it loses its task and priority,
+# nothing else. A definition the same rejection drops is *misclassified*, which is the
+# defect this code exists to remove, so no target may escape it. The line is already
+# anchored by `**ID**:` and a backticked id in the link text; greedy `.+` to the last
+# `)` on the line needs no paren balancing.
 _ID_DEF_LINK_RE = re.compile(
     r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
-    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]\({_LINK_TARGET_PATTERN}\)\s*$"
+    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]\(.+\)\s*$"
 )
 _BACKTICK_ID_RE = re.compile(r"`(cpt-[a-z0-9][a-z0-9-]+)`")
 

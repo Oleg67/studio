@@ -155,7 +155,10 @@ A definition is written **bare**. References may also be written as a markdown l
 (below); a definition may not, because a link points somewhere and a definition is the
 place being pointed at. The link-form spelling is recognized only so that it can be
 reported as `def-link-form-not-allowed` — it defines nothing, and it is not counted as
-a reference either:
+a reference either. Recognition here accepts **any** link target, including one with
+parentheses, unlike the narrow target the reference pattern accepts: a rejected
+reference target still records a reference, while a rejected definition target would
+be silently misclassified, which is the failure this code exists to remove.
 
 ```
 **ID**: [`cpt-myapp-fr-must-authenticate`](../prd/PRD.md#auth)   ← error, defines nothing

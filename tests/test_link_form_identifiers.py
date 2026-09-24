@@ -77,10 +77,27 @@ def test_a_link_form_definition_is_neither_a_definition_nor_a_reference():
     "**ID**: [`{id}`](spec.md)",
     "`p1` - **ID**: [`{id}`](spec.md)",
     "- [x] `p1` - **ID**: [`{id}`](spec.md#login)",
+    # No target may escape the definition pattern: one the reference pattern rejects
+    # would reach the inline scan and be misclassified as a reference to the very id
+    # it means to declare, which is the defect this code removes.
+    "**ID**: [`{id}`](API_(v2).md)",
+    "**ID**: [`{id}`](spec.md 'Login (v2)')",
 ])
 def test_every_definition_shape_is_recognised_in_link_form(line):
     hits = scan_cpt_id_lines([line.format(id=TARGET)])
     assert [h["type"] for h in hits] == [LINK_FORM_DEFINITION]
+
+
+def test_a_reference_target_with_parentheses_falls_back_to_the_inline_scan():
+    """Deliberate, and the other half of the asymmetry above.
+
+    The narrow reference target keeps a link's *target* from ever being read as an id.
+    A rejected one still reaches the inline scan, so the reference is recorded — it
+    loses only its task marker and priority, which is a documented limit, not silence.
+    """
+    hits = scan_cpt_id_lines([f"[`{TARGET}`](API_(v2).md)"])
+    assert [h["type"] for h in hits] == ["reference"]
+    assert "has_task" not in hits[0]
 
 
 def _prd_constraints():
