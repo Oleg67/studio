@@ -136,6 +136,10 @@ _REASONS: Dict[str, List[str]] = {
     EC.DEF_PROHIBITED_PRIORITY: [
         "Priority marker was added to `{id}` but kind `{id_kind}` prohibits priority",
     ],
+    EC.DEF_LINK_FORM_NOT_ALLOWED: [
+        "`{id}` was defined as a markdown link because the author wanted the definition to be clickable",
+        "A reference written as a link was copied into the definition line",
+    ],
 
     # Constraints — heading placement
     EC.DEF_WRONG_HEADINGS: [
@@ -643,6 +647,10 @@ def _prompt_for_constraints(ctx: _FixPromptContext) -> Optional[str]:
         EC.DEF_PROHIBITED_PRIORITY: (
             f"Open `{ctx.loc}`: remove the priority marker from `{ctx.cpt_id}` — "
             f"kind `{ctx.id_kind}` prohibits priority."
+        ),
+        EC.DEF_LINK_FORM_NOT_ALLOWED: (
+            f"Open `{ctx.loc}`: write the definition bare — ``**ID**: `{ctx.cpt_id}``` — "
+            f"and keep the markdown link for the references that point here."
         ),
     }
     if ctx.code in prompt_map:

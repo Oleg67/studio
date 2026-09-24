@@ -28,11 +28,35 @@ _ID_DEF_RE = re.compile(
     r"\*\*ID\*\*:\s*`(?P<id3>cpt-[a-z0-9][a-z0-9-]+)`"
     r")\s*$"
 )
+_CPT_ID_PATTERN = r"cpt-[a-z0-9][a-z0-9-]+"
+# A markdown link target, narrowly: anything but parentheses, so a nested `()` ends
+# the match rather than being guessed at. Paths, anchors and `path "Title"` all fit.
+_LINK_TARGET_PATTERN = r"[^()]+"
+
+# A standalone reference may spell its id bare or as a markdown link. The two forms
+# share every prefix (task marker, priority) and resolve to the same node, because
+# the node is the id string — the link only tells a reader where to go next.
 _ID_REF_RE = re.compile(
     r"^(?:(?P<task>\[\s*[xX]?\s*\])\s*(?:`(?P<priority>p\d+)`\s*-\s*|\-\s*)|`(?P<priority_only>p\d+)`\s*-\s*)?"
-    r"`(?P<id>cpt-[a-z0-9][a-z0-9-]+)`\s*$"
+    rf"(?:`(?P<id>{_CPT_ID_PATTERN})`"
+    rf"|\[`(?P<id_link>{_CPT_ID_PATTERN})`\]\({_LINK_TARGET_PATTERN}\))\s*$"
+)
+
+# A *definition* stays bare. This pattern exists to recognise the link-form spelling
+# so it can be reported (``def-link-form-not-allowed``) instead of falling through to
+# the inline scan, which used to file it as a reference to itself and leave the id
+# with no definition and no diagnostic.
+_ID_DEF_LINK_RE = re.compile(
+    r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
+    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]\({_LINK_TARGET_PATTERN}\)\s*$"
 )
 _BACKTICK_ID_RE = re.compile(r"`(cpt-[a-z0-9][a-z0-9-]+)`")
+
+#: Hit type for a definition written in link form. Deliberately neither
+#: ``definition`` nor ``reference``: the id is not defined by such a line, and it is
+#: not referenced by it either. Consumers that partition hits ignore it; the artifact
+#: validator turns it into one finding.
+LINK_FORM_DEFINITION = "definition-link-form"
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-scan-cdsl:p1:inst-scan-cdsl-datamodel
 _CDSL_LINE_RE = re.compile(
@@ -166,8 +190,24 @@ def scan_cpt_id_lines(lines: List[str]) -> List[Dict[str, object]]:
             # @cpt-end:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-if-def
         # @cpt-end:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-match-def
 
+        # @cpt-begin:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-match-def-link
+        # A definition spelled as a markdown link. Recorded under its own type and
+        # not passed on to the reference branches, so the validator reports the
+        # spelling instead of the document silently gaining a self-reference.
+        mdef_link = _ID_DEF_LINK_RE.match(stripped)
+        if mdef_link:
+            hits.append(_build_id_hit(
+                mdef_link,
+                idx0=idx0,
+                hit_type=LINK_FORM_DEFINITION,
+                id_group_names=("id",),
+                priority_group_names=("priority",),
+            ))
+            continue
+        # @cpt-end:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-match-def-link
+
         # @cpt-begin:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-match-ref
-        # Reference line format (optionally checkbox / priority).
+        # Reference line format (optionally checkbox / priority), bare or link-form.
         stripped_ref = _normalize_reference_candidate(stripped)
         mref = _ID_REF_RE.match(stripped_ref)
         if mref:
@@ -175,7 +215,7 @@ def scan_cpt_id_lines(lines: List[str]) -> List[Dict[str, object]]:
                 mref,
                 idx0=idx0,
                 hit_type="reference",
-                id_group_names=("id",),
+                id_group_names=("id", "id_link"),
                 priority_group_names=("priority", "priority_only"),
             ))
             continue

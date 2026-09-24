@@ -205,6 +205,7 @@ class ArtifactIdentifierPhaseContext:
 
     defs: List[Dict[str, object]]
     refs: List[Dict[str, object]]
+    link_form_defs: List[Dict[str, object]]
     defs_by_id: Dict[str, Dict[str, object]]
     heading_ctx_for_line: Callable[[int], Tuple[List[str], Optional[int]]]
     scope_end_for_heading_idx: Callable[[Optional[int]], int]
@@ -1251,13 +1252,17 @@ def _build_artifact_identifier_phase_context(
     registered_systems: Optional[Iterable[str]],
     scan_cpt_ids,
 ) -> ArtifactIdentifierPhaseContext:
+    from .document import LINK_FORM_DEFINITION
+
     hits = scan_cpt_ids(artifact_path)
     defs = [hit for hit in hits if str(hit.get("type")) == "definition"]
     refs = [hit for hit in hits if str(hit.get("type")) == "reference"]
+    link_form_defs = [hit for hit in hits if str(hit.get("type")) == LINK_FORM_DEFINITION]
     _, heading_ctx_for_line, scope_end_for_heading_idx = _build_heading_context_helpers(artifact_path)
     return ArtifactIdentifierPhaseContext(
         defs=defs,
         refs=refs,
+        link_form_defs=link_form_defs,
         defs_by_id=_build_defs_index(defs),
         heading_ctx_for_line=heading_ctx_for_line,
         scope_end_for_heading_idx=scope_end_for_heading_idx,
@@ -1776,6 +1781,35 @@ def _id_kind_hint(c: Optional[IdConstraint]) -> str:
     return (" (" + "; ".join(parts) + ")") if parts else ""
 
 # @cpt-begin:cpt-studio-algo-traceability-validation-validate-structure:p1:inst-validate-id-format
+# @cpt-begin:cpt-studio-algo-traceability-validation-validate-structure:p1:inst-link-form-def
+def _validate_link_form_definitions(
+    *,
+    link_form_defs: Sequence[Dict[str, object]],
+    artifact_path: Path,
+    kind: str,
+    errors: List[Dict[str, object]],
+) -> None:
+    """Report every definition written as a markdown link.
+
+    A reference may be spelled either way; a definition may not, so such a line
+    declares nothing. It used to be filed as a reference to the very id it meant to
+    declare, which left the id undefined and said nothing about why.
+    """
+    for hit in link_form_defs:
+        hid = str(hit.get("id"))
+        errors.append(error(
+            "constraints",
+            f"`{hid}` is defined as a markdown link; a definition is written bare "
+            f"(**ID**: `{hid}`) and the link belongs on the references that point here",
+            code=EC.DEF_LINK_FORM_NOT_ALLOWED,
+            path=artifact_path,
+            line=int(hit.get("line", 1) or 1),
+            artifact_kind=kind,
+            id=hid,
+        ))
+# @cpt-end:cpt-studio-algo-traceability-validation-validate-structure:p1:inst-link-form-def
+
+
 def _validate_definition_hits(
     *,
     defs: Sequence[Dict[str, object]],
@@ -1935,6 +1969,12 @@ def _validate_artifact_identifier_phase(
         errors=errors,
         heading_ctx_for_line=context.heading_ctx_for_line,
         scope_end_for_heading_idx=context.scope_end_for_heading_idx,
+    )
+    _validate_link_form_definitions(
+        link_form_defs=context.link_form_defs,
+        artifact_path=artifact_path,
+        kind=kind,
+        errors=errors,
     )
     defs_by_kind: Dict[str, List[Dict[str, object]]] = {}
     _validate_definition_hits(

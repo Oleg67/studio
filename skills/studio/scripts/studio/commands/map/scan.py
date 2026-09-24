@@ -296,6 +296,10 @@ def _split_md_cpt(path: Path) -> Tuple[List[str], List[CptUse]]:
 
         line_no = int(h.get("line", 0))
         hit_type = h.get("type", "reference")
+        if hit_type not in ("definition", "reference"):
+            # A definition written as a markdown link defines nothing and uses
+            # nothing — `cfs validate` reports the line instead.
+            continue
         # Both definitions and references use the whole containing section
         # (nearest heading → next heading). For lone reference bullets between
         # blank lines, this is the only way to surface useful context — the
