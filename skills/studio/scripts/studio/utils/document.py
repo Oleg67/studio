@@ -44,19 +44,20 @@ _ID_REF_RE = re.compile(
 
 # A *definition* stays bare. This pattern exists to recognise the link-form spelling
 # so it can be reported (``def-link-form-not-allowed``) instead of falling through to
-# the inline scan, which used to file it as a reference to itself and leave the id
-# with no definition and no diagnostic.
+# the inline scan, which used to file it as a reference to itself: the id was left
+# undefined, reported — if at all — as a dangling reference on its own definition line.
 #
-# Its target is permissive where the reference target above is narrow, and the
-# asymmetry is the point. A reference the narrow target rejects still reaches the
-# inline scan and is still recorded as a reference — it loses its task and priority,
-# nothing else. A definition the same rejection drops is *misclassified*, which is the
-# defect this code exists to remove, so no target may escape it. The line is already
-# anchored by `**ID**:` and a backticked id in the link text; greedy `.+` to the last
-# `)` on the line needs no paren balancing.
+# It keys on the link *text* — the id in square brackets — and accepts whatever
+# follows, where the reference pattern above is narrow, and the asymmetry is the
+# point. A reference the narrow pattern rejects still reaches the inline scan and is
+# still recorded as a reference — it loses its task and priority, nothing else. A
+# definition the same rejection drops is *misclassified*, which is the defect this
+# code exists to remove, so no link syntax may escape it: an inline target of any
+# content including none (`(...)`, `()`), a reference-style label (`[label]`), a
+# collapsed one (`[]`), or a shortcut link with nothing after the brackets.
 _ID_DEF_LINK_RE = re.compile(
     r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
-    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]\(.+\)\s*$"
+    rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\].*$"
 )
 _BACKTICK_ID_RE = re.compile(r"`(cpt-[a-z0-9][a-z0-9-]+)`")
 

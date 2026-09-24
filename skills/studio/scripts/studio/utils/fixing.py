@@ -648,9 +648,13 @@ def _prompt_for_constraints(ctx: _FixPromptContext) -> Optional[str]:
             f"Open `{ctx.loc}`: remove the priority marker from `{ctx.cpt_id}` — "
             f"kind `{ctx.id_kind}` prohibits priority."
         ),
+        # Unwrap in place rather than show a rewritten line: a definition may carry a
+        # checkbox and a priority, and a model of the bare line would drop both.
         EC.DEF_LINK_FORM_NOT_ALLOWED: (
-            f"Open `{ctx.loc}`: write the definition bare — ``**ID**: `{ctx.cpt_id}``` — "
-            f"and keep the markdown link for the references that point here."
+            f"Open `{ctx.loc}`: unwrap the id — replace the markdown link around "
+            f"`{ctx.cpt_id}` with the bare backticked id, and leave any checkbox and "
+            f"priority marker on the line as they are. The link belongs on the "
+            f"references that point here."
         ),
     }
     if ctx.code in prompt_map:

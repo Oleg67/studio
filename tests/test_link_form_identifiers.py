@@ -21,8 +21,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scr
 
 from studio.commands.where_used import cmd_where_used
 from studio.utils import error_codes as EC
-from studio.utils.constraints import parse_kit_constraints, validate_artifact_file
+from studio.utils import toml_utils
+from studio.utils.constraints import (
+    build_severity_policy,
+    load_constraints_file,
+    parse_kit_constraints,
+    validate_artifact_file,
+)
 from studio.utils.document import LINK_FORM_DEFINITION, scan_cpt_id_lines
+from studio.utils.fixing import enrich_issues
 from studio.utils.ui import is_json_mode, set_json_mode
 
 TARGET = "cpt-myapp-flow-login"
@@ -82,6 +89,12 @@ def test_a_link_form_definition_is_neither_a_definition_nor_a_reference():
     # it means to declare, which is the defect this code removes.
     "**ID**: [`{id}`](API_(v2).md)",
     "**ID**: [`{id}`](spec.md 'Login (v2)')",
+    # Nor may any link *syntax*: an empty destination, a reference-style label, a
+    # collapsed reference and a shortcut link all reached the inline scan before.
+    "**ID**: [`{id}`]()",
+    "**ID**: [`{id}`][login]",
+    "**ID**: [`{id}`][]",
+    "**ID**: [`{id}`]",
 ])
 def test_every_definition_shape_is_recognised_in_link_form(line):
     hits = scan_cpt_id_lines([line.format(id=TARGET)])
@@ -134,6 +147,52 @@ def test_validate_leaves_a_bare_definition_alone(tmp_path: Path):
         registered_systems={"myapp"},
     )
     assert [e for e in report["errors"] if e.get("code") == EC.DEF_LINK_FORM_NOT_ALLOWED] == []
+
+
+def test_the_fix_prompt_unwraps_in_place_and_keeps_the_decoration(tmp_path: Path):
+    """A definition may carry a checkbox and a priority. A prompt that modelled the
+    bare line would have an agent drop both and trade this finding for
+    `def-missing-task` / `def-missing-priority`."""
+    artifact = tmp_path / "PRD.md"
+    artifact.write_text(f"# PRD\n\n- [x] `p1` - **ID**: [`{TARGET}`](spec.md)\n", encoding="utf-8")
+    report = validate_artifact_file(
+        artifact_path=artifact,
+        artifact_kind="PRD",
+        constraints=_prd_constraints(),
+        registered_systems={"myapp"},
+    )
+    findings = [e for e in report["errors"] if e.get("code") == EC.DEF_LINK_FORM_NOT_ALLOWED]
+    enrich_issues(findings, project_root=tmp_path)
+
+    prompt = str(findings[0]["fixing_prompt"])
+    assert TARGET in prompt
+    assert "leave any checkbox and priority marker" in prompt
+    assert f"**ID**: `{TARGET}`" not in prompt  # no undecorated line to copy
+
+
+def test_lowering_the_rule_is_never_silent(tmp_path: Path):
+    """The rule is lowerable like any other, and what that leaves behind is the answer
+    to "does muting it reopen the hole": the suppression is counted in the report."""
+    constraints_path = tmp_path / "constraints.toml"
+    constraints_path.write_text(toml_utils.dumps({
+        "validation": {"severity": {EC.DEF_LINK_FORM_NOT_ALLOWED: "off"}},
+        "artifacts": {"PRD": {"identifiers": {"flow": {}}}},
+    }), encoding="utf-8")
+    kit, errors = load_constraints_file(constraints_path)
+    assert errors == []
+
+    artifact = tmp_path / "PRD.md"
+    artifact.write_text(f"# PRD\n\n**ID**: [`{TARGET}`](spec.md)\n", encoding="utf-8")
+    report = validate_artifact_file(
+        artifact_path=artifact,
+        artifact_kind="PRD",
+        constraints=kit.by_kind["PRD"],
+        registered_systems={"myapp"},
+        policy=build_severity_policy([kit]),
+    )
+    codes = [e.get("code") for e in report["errors"] + report["warnings"]]
+    assert EC.DEF_LINK_FORM_NOT_ALLOWED not in codes
+    assert report["suppressed"] == 1
 
 
 def test_a_link_form_definition_does_not_define_the_id(tmp_path: Path):

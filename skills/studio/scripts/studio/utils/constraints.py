@@ -1793,7 +1793,8 @@ def _validate_link_form_definitions(
 
     A reference may be spelled either way; a definition may not, so such a line
     declares nothing. It used to be filed as a reference to the very id it meant to
-    declare, which left the id undefined and said nothing about why.
+    declare, which raised a `ref-no-definition` naming the definition line as a
+    dangling reference — or, for an unregistered system, nothing at all.
     """
     for hit in link_form_defs:
         hid = str(hit.get("id"))

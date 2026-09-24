@@ -79,7 +79,7 @@ DEF_PROHIBITED_PRIORITY = "def-prohibited-priority"
 # ---------------------------------------------------------------------------
 # A reference may be written as a markdown link; a definition may not. Without
 # this code the link-form definition was filed as a reference to itself, so the
-# id had no definition and nothing said why.
+# id had no definition and the only finding, if any, blamed a dangling reference.
 DEF_LINK_FORM_NOT_ALLOWED = "def-link-form-not-allowed"
 
 # ---------------------------------------------------------------------------
