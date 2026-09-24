@@ -176,17 +176,19 @@ class TestThisFileDrivesTheRegisteredFixture:
     def test_the_fixture_is_still_autouse(self, request) -> None:
         """Driving its body proves the body works, not that anything runs it.
 
-        Read off the marker `pytest.fixture` attaches to the function rather than
-        off a `FixtureDef`, which has carried no `autouse` attribute since that
-        information moved into the fixture manager's autouse-name index.
+        Read off the fixture manager's **autouse-name index** for this node, not a marker on
+        the function: since pytest 9.1 `pytest.fixture` returns a `FixtureFunctionDefinition`
+        and no longer sets `_pytestfixturefunction`, and a `FixtureDef` has carried no
+        `autouse` attribute since that information moved into the index. `_getautousenames`
+        returns the autouse fixtures applicable to a node, so this asserts the slightly
+        stronger property that the fixture is autouse **for this test**, not merely autouse
+        somewhere.
         """
         assert "_isolate_studio_context" in request._fixturemanager._arg2fixturedefs, (
             "_isolate_studio_context is not a registered fixture"
         )
-        marker = getattr(conftest._isolate_studio_context, "_pytestfixturefunction", None)
-
-        assert marker is not None, "_isolate_studio_context is not a pytest fixture"
-        assert marker.autouse, (
-            "_isolate_studio_context is registered but not autouse, so no test is "
-            "actually protected by it"
+        autouse_here = set(request._fixturemanager._getautousenames(request.node))
+        assert "_isolate_studio_context" in autouse_here, (
+            "_isolate_studio_context is registered but not autouse for this test, so no "
+            "test is actually protected by it"
         )
