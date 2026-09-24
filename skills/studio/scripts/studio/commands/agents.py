@@ -833,6 +833,26 @@ _TOOL_PROVIDER_DEFAULT: Dict[str, str] = {
 # @cpt-end:cpt-studio-algo-agent-integration-generate-shims:p1:inst-tool-provider-tables
 
 
+# OpenAI slugs are dated, not permanent. As of 2026-09-18 a ChatGPT-plan Codex
+# account was entitled to gpt-5.6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-6-astra
+# and gpt-5.5 -- the whole set, not only the three used below, because the next
+# re-pick is a choice among them and the list is the thing that dates. Its
+# predecessors gpt-5.4 and gpt-5.4-mini had been withdrawn, and every agent on
+# the cheap and balanced tiers -- 43 of the 44 in skills/studio/agents.toml --
+# answered a 400 at the point of use.
+#
+# The tiers map onto OpenAI's own descriptions of each model (fast and
+# affordable / balanced everyday / most capable), so re-picking is a reading
+# rather than a judgement call. `codex` lists what an account currently has.
+#
+# Nothing here validates a resolved slug, and that gap is open rather than
+# fixed: `generate-agents` writes whatever the matrix says, so the next
+# withdrawal surfaces at the point of use again. The pilot has a preflight that
+# reads codex's own model cache (tests/prompts/cf-ux/preflight.py) and the same
+# check could run here -- but warning a user mid-generate about their account's
+# entitlements is a product decision, not a detail to settle while fixing a
+# stale literal.
+
 # (tool, provider) → {"base": {tier: model_id}, "overrides": {(tier, role, target): model_id}}
 # Tier keys use the `cf:tier:*` namespace to distinguish abstract tiers from
 # raw model identifiers a kit author might write as passthrough.
@@ -854,14 +874,14 @@ _MODEL_MATRIX: Dict[Tuple[str, str], Dict[str, Any]] = {
     # @cpt-begin:cpt-studio-algo-agent-integration-generate-shims:p1:inst-matrix-codex-openai
     ("codex", "openai"): {
         "base": {
-            "cf:tier:cheap":     "gpt-5.4-mini",
-            "cf:tier:balanced":  "gpt-5.4",
-            "cf:tier:expensive": "gpt-5.5",
+            "cf:tier:cheap":     "gpt-5.6-luna",
+            "cf:tier:balanced":  "gpt-5.6-terra",
+            "cf:tier:expensive": "gpt-6-astra",
         },
         "overrides": {
-            ("cf:tier:cheap", "analyze",  "codebase"):  "gpt-5.4",
-            ("cf:tier:cheap", "planning", "codebase"):  "gpt-5.4",
-            ("cf:tier:cheap", "planning", "artifacts"): "gpt-5.4",
+            ("cf:tier:cheap", "analyze",  "codebase"):  "gpt-5.6-terra",
+            ("cf:tier:cheap", "planning", "codebase"):  "gpt-5.6-terra",
+            ("cf:tier:cheap", "planning", "artifacts"): "gpt-5.6-terra",
         },
     },
     # @cpt-end:cpt-studio-algo-agent-integration-generate-shims:p1:inst-matrix-codex-openai
@@ -882,14 +902,14 @@ _MODEL_MATRIX: Dict[Tuple[str, str], Dict[str, Any]] = {
     # @cpt-begin:cpt-studio-algo-agent-integration-generate-shims:p1:inst-matrix-cursor-openai
     ("cursor", "openai"): {
         "base": {
-            "cf:tier:cheap":     "gpt-5.4-mini",
-            "cf:tier:balanced":  "gpt-5.4",
-            "cf:tier:expensive": "gpt-5.5",
+            "cf:tier:cheap":     "gpt-5.6-luna",
+            "cf:tier:balanced":  "gpt-5.6-terra",
+            "cf:tier:expensive": "gpt-6-astra",
         },
         "overrides": {
-            ("cf:tier:cheap", "analyze",  "codebase"):  "gpt-5.4",
-            ("cf:tier:cheap", "planning", "codebase"):  "gpt-5.4",
-            ("cf:tier:cheap", "planning", "artifacts"): "gpt-5.4",
+            ("cf:tier:cheap", "analyze",  "codebase"):  "gpt-5.6-terra",
+            ("cf:tier:cheap", "planning", "codebase"):  "gpt-5.6-terra",
+            ("cf:tier:cheap", "planning", "artifacts"): "gpt-5.6-terra",
         },
     },
     # @cpt-end:cpt-studio-algo-agent-integration-generate-shims:p1:inst-matrix-cursor-openai
