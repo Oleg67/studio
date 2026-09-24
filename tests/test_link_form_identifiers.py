@@ -23,7 +23,10 @@ from studio.commands.where_used import cmd_where_used
 from studio.utils import error_codes as EC
 from studio.utils import toml_utils
 from studio.utils.constraints import (
+    ArtifactRecord,
+    _validate_cdsl_structure,
     build_severity_policy,
+    cross_validate_artifacts,
     load_constraints_file,
     parse_kit_constraints,
     validate_artifact_file,
@@ -120,6 +123,16 @@ def test_only_text_after_the_link_can_reference_other_ids(line, expected_refs):
     assert hits[0]["id"] == TARGET
     assert [h["id"] for h in hits[1:]] == [r.format(other=OTHER) for r in expected_refs]
     assert all(h["type"] == "reference" for h in hits[1:])
+
+
+def test_a_backticked_id_in_a_title_counts_as_it_does_on_any_other_line():
+    """A title is free text and can name an id. The inline scan has always counted
+    that as a reference on an ordinary line; the definition line is not made the one
+    place where it does not."""
+    title = f'(spec.md "supersedes `{OTHER}`")'
+    on_definition = scan_cpt_id_lines([f"**ID**: [`{TARGET}`]{title}"])
+    on_prose = scan_cpt_id_lines([f"see [the flow]{title}"])
+    assert [h["id"] for h in on_definition[1:]] == [h["id"] for h in on_prose] == [OTHER]
 
 
 def test_no_destination_shape_can_hide_the_definition():
@@ -221,6 +234,55 @@ def test_lowering_the_rule_is_never_silent(tmp_path: Path):
     codes = [e.get("code") for e in report["errors"] + report["warnings"]]
     assert EC.DEF_LINK_FORM_NOT_ALLOWED not in codes
     assert report["suppressed"] == 1
+
+
+def test_lowering_it_for_an_unregistered_system_leaves_only_the_count(tmp_path: Path):
+    """The other branch of ADR-0024's claim. References to an id whose system is not
+    registered are skipped as external, so with the rule lowered no `ref-no-definition`
+    stands behind it: the suppression count is the only signal, and it is there."""
+    constraints_path = tmp_path / "constraints.toml"
+    constraints_path.write_text(toml_utils.dumps({
+        "validation": {"severity": {EC.DEF_LINK_FORM_NOT_ALLOWED: "off"}},
+        "artifacts": {"PRD": {"identifiers": {"flow": {}}},
+                      "DESIGN": {"identifiers": {"comp": {}}}},
+    }), encoding="utf-8")
+    kit, errors = load_constraints_file(constraints_path)
+    assert errors == []
+
+    prd, design = tmp_path / "PRD.md", tmp_path / "DESIGN.md"
+    prd.write_text(f"# PRD\n\n**ID**: [`{TARGET}`](spec.md)\n", encoding="utf-8")
+    design.write_text(f"# Design\n\n`{TARGET}`\n", encoding="utf-8")
+    unregistered = {"elsewhere"}  # TARGET's system is `myapp`
+
+    per_artifact = validate_artifact_file(
+        artifact_path=prd, artifact_kind="PRD", constraints=kit.by_kind["PRD"],
+        registered_systems=unregistered, policy=build_severity_policy([kit]),
+    )
+    cross = cross_validate_artifacts(
+        [ArtifactRecord(path=prd, artifact_kind="PRD", constraints=kit.by_kind["PRD"]),
+         ArtifactRecord(path=design, artifact_kind="DESIGN", constraints=kit.by_kind["DESIGN"])],
+        registered_systems=unregistered, known_kinds={"flow", "comp"},
+    )
+    about_target = [e for e in per_artifact["errors"] + per_artifact["warnings"] + cross["errors"]
+                    if e.get("id") == TARGET]
+    assert about_target == []
+    assert per_artifact["suppressed"] == 1
+
+
+def test_a_link_form_definition_is_not_mistaken_for_a_cdsl_step(tmp_path: Path):
+    """It shares a decorated step's `- [x] `p1` -` prefix. The CDSL checks step around
+    every line the ID scan classifies, and the scan now classifies this one."""
+    artifact = tmp_path / "FEATURE.md"
+    artifact.write_text(
+        "# Feature\n\n### Login\n\n**Steps**:\n"
+        "1. [x] - `p1` - Read the input - `inst-read`\n"
+        f"- [x] `p1` - **ID**: [`{TARGET}`](spec.md)\n",
+        encoding="utf-8",
+    )
+    errors: list = []
+    warnings: list = []
+    _validate_cdsl_structure(artifact_path=artifact, cdsl_hits=[], errors=errors, warnings=warnings)
+    assert [f for f in errors + warnings if f.get("line") == 7] == []
 
 
 def test_a_link_form_definition_does_not_define_the_id(tmp_path: Path):

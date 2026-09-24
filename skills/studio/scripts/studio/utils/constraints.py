@@ -1551,11 +1551,11 @@ def _is_real_cdsl_item_start(stripped: str) -> bool:
     Excludes ID definitions/references, which use the same dash-prefixed
     shape but aren't CDSL steps.
     """
-    from .document import _ID_DEF_RE, _ID_REF_RE, _normalize_reference_candidate
+    from .document import is_scanned_id_line
 
     if not _CDSL_CANDIDATE_START_RE.match(stripped):
         return False
-    return not (_ID_DEF_RE.match(stripped) or _ID_REF_RE.match(_normalize_reference_candidate(stripped)))
+    return not is_scanned_id_line(stripped)
 
 
 def _section_starts_with_wellformed_cdsl_line(entries: List[Tuple[int, str, str]]) -> bool:
@@ -1686,7 +1686,7 @@ def _validate_cdsl_structure(
     warnings: List[Dict[str, object]],
 ) -> None:
     """Enforce CDSL.md's FAIL rules (S.3-7, CL.1-4, CO.4-6) across an artifact."""
-    from .document import _ID_DEF_RE, _ID_REF_RE, _normalize_reference_candidate, read_text_safe
+    from .document import is_scanned_id_line, read_text_safe
 
     lines = read_text_safe(artifact_path)
     if lines is None:
@@ -1697,7 +1697,7 @@ def _validate_cdsl_structure(
         # Task-tracked ID definitions/references use the same `pN` priority-token
         # shape as a CDSL phase token — exclude anything the ID scanner already
         # classifies as a definition or reference line.
-        if _ID_DEF_RE.match(joined_text) or _ID_REF_RE.match(_normalize_reference_candidate(joined_text)):
+        if is_scanned_id_line(joined_text):
             continue
         # @cpt-begin:cpt-studio-algo-traceability-validation-validate-structure:p1:inst-if-cdsl-placeholder
         if _CDSL_PLACEHOLDER_RE.search(joined_text):

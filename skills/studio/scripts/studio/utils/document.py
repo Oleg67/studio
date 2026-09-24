@@ -58,9 +58,10 @@ _ID_REF_RE = re.compile(
 # syntax — an inline destination of any content including none, a reference-style
 # label, a collapsed `[]`, a shortcut link — matches the same way, and text after the
 # link can still reference other ids: the caller scans from `match.end()` for
-# backticked ids. That scan cannot pick anything out of the destination or label,
-# because neither contains backticks, so parsing them would add a branch that no
-# input can observe.
+# backticked ids, exactly as the inline scan treats any other line. A destination
+# has no backticks to find. A link title or a reference label can hold a backticked
+# id, and it then counts as a reference here just as it does on every other line —
+# the definition line is not made the one place where it would not.
 _ID_DEF_LINK_RE = re.compile(
     r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
     rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]"
@@ -120,6 +121,21 @@ def _build_id_hit(
     if priority:
         hit["priority"] = priority
     return hit
+
+
+def is_scanned_id_line(stripped: str) -> bool:
+    """Whether the ID scan classifies *stripped* as a whole-line definition — bare or
+    link-form — or a standalone reference.
+
+    One predicate for every caller that must step around ID lines (the CDSL checks),
+    so a new spelling the scan learns is excluded everywhere at once instead of at
+    whichever call sites remembered to list its pattern.
+    """
+    return bool(
+        _ID_DEF_RE.match(stripped)
+        or _ID_DEF_LINK_RE.match(stripped)
+        or _ID_REF_RE.match(_normalize_reference_candidate(stripped))
+    )
 
 
 def _normalize_reference_candidate(stripped: str) -> str:

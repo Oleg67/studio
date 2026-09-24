@@ -201,6 +201,14 @@ happens to name an ID a reference to it. A link target containing parentheses fa
 back to the inline pattern below, which still records the reference but not its task
 or priority.
 
+**The link destination is not validated.** Studio does not check that
+``[`cpt-x`](path.md#anchor)`` points to where `cpt-x` is defined, or anywhere at all.
+The node is the ID, so a reference with a broken link still traces correctly; the
+broken link is a documentation defect rather than a traceability one. It sits on the
+same side of the boundary as formatting: a markdown link checker covers it, and
+Studio does not. A team that wants the two kept in step runs one alongside
+`cfs validate`.
+
 **Inline pattern** (any backticked `cpt-*` in content):
 ```regex
 `(cpt-[a-z0-9][a-z0-9-]+)`
