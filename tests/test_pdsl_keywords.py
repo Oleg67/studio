@@ -1076,8 +1076,6 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "skills/studio/modules/gates/migrate-from-cypilot-offer.md#0::MigrateFromCypilotConfirm",
     "skills/studio/modules/gates/plan-first.md#0::PlanFirstConfirm",
     "skills/studio/modules/gates/plan-first.md#1::PlanStorageChoice",
-    "skills/studio/modules/gates/simple-mode-simple.md#2::SimpleModeBraveNewWorldChoice",
-    "skills/studio/modules/gates/simple-mode.md#0::SimpleModeChoice",
     "skills/studio/modules/gates/workflow-prep.md#1::WorkflowPrepExploreRepeatMenu",
     "skills/studio/modules/generate-routing-menus.md#1::GenerateIntentOffer",
     "skills/studio/modules/generate-routing-menus.md#2::GenerateLoadOffer",
@@ -1114,9 +1112,7 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
     "skills/studio/modules/routing/root-intent-routing.md#1::MatchedIntentSkillMenu",
     "skills/studio/modules/routing/root-intent-routing.md#9::AllCfSkillsMenu",
     "skills/studio/modules/session/shutdown.md#0::StudioShutdownConfirm",
-    "skills/studio/modules/subagents/dispatch.md#1::SubAgentApprovalRequest",
     "skills/studio/modules/subagents/git-commit-mode.md#5::GitCommitModeMenu",
-    "skills/studio/modules/ui/next-actions.md#0::NextActionsMenu",
     "skills/studio/modules/workspace-configure.md#0::SourceConfirmMenu",
     "skills/studio/modules/workspace-discover.md#0::RepoSelectionMenu",
     "skills/studio/modules/workspace-discover.md#0::StorageModeMenu",
@@ -1138,7 +1134,14 @@ UNTYPED_MENU_BASELINE: frozenset[str] = frozenset({
 # act; a rename does not need it, because a rename leaves the count unchanged.
 # 113 -> 111: DecompositionConfirmMenu and BriefCheckpointMenu collapsed into one
 # menu that declares `TYPE: decision`, so two entries left and none replaced them.
-UNTYPED_MENU_BASELINE_CEILING = 111
+# 111 -> 101: typed the four remaining gates from #219's priority table --
+# NextActionsMenu (decision), SimpleModeChoice (confirmation),
+# SimpleModeBraveNewWorldChoice (blocking), and SubAgentApprovalRequest (blocking: its
+# "Recommended: native" is ambiguous between a one-shot and a session-wide option, so it
+# cannot be `confirmation` per the auto-proceeding guard below -- blocking keeps it a
+# human choice). Ceiling set to the true post-typing count; six intervening typings had
+# shrunk the set to 105 without lowering it from 111, so this tightens it too.
+UNTYPED_MENU_BASELINE_CEILING = 101
 
 
 

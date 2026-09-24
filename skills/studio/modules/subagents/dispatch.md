@@ -43,6 +43,7 @@ RULES:
   ALWAYS allow the calling workflow to set SUB_AGENT_GROUP_DECISION = approve-once before reaching SubAgentDispatch when the user's original message is an explicit imperative with a named target artifact or operation (e.g. 'run cf-review on X', 'fix these findings') and no conditional or questioning language; NEVER allow pre-setting SUB_AGENT_DISPATCH_MODE = approve-session on behalf of the user — session-wide preference must only be set by the user via SubAgentApprovalRequest option 2
 MENU SubAgentApprovalRequest
 TITLE: Ready to run a background task — native mode runs it in a separate process (faster, isolated); inline keeps everything in this chat. Recommended: native.
+TYPE: blocking
 OPTIONS:
   1 native (this time) -> SET SUB_AGENT_GROUP_DECISION = approve-once; CONTINUE SubAgentDispatchExecute
   2 native (always, this session) -> SET SUB_AGENT_DISPATCH_MODE = approve-session; CONTINUE SubAgentDispatchExecute
