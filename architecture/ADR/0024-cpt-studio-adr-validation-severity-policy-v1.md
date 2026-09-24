@@ -23,6 +23,8 @@ decision-makers: project maintainer
   - [The fail-fast heading gate counts errors, not findings](#the-fail-fast-heading-gate-counts-errors-not-findings)
   - [What a run reports](#what-a-run-reports)
   - [Ordering is deterministic](#ordering-is-deterministic)
+  - [What no policy can turn on: formatting](#what-no-policy-can-turn-on-formatting)
+  - [A reference may be a link; a definition may not](#a-reference-may-be-a-link-a-definition-may-not)
   - [Consequences](#consequences)
   - [Confirmation](#confirmation)
 - [Pros and Cons of the Options](#pros-and-cons-of-the-options)
@@ -294,6 +296,42 @@ Findings sort by `(path, line, code)`; `--explain-severity` sorts by
 `(kind, code)`; `severity_overrides` sorts by `(kind, code, entry)`. Both
 outputs are read by humans and diffed in CI, and a golden comparison hides an
 ordering bug behind whatever insertion order a dict happened to have.
+
+### What no policy can turn on: formatting
+
+Severity makes a rule quieter or louder. It does not make a rule *exist*, and there
+is no rule set for formatting: table alignment, bullet markers, heading
+capitalisation, line length and spelling are outside `validate`, `validate-toc` and
+`validate-kits` entirely. Structure is in scope — which sections exist, at which
+level, in which order, which identifiers live under them, and whether the declared
+relationships hold. `markdownlint` and formatters cover the rest and are not Studio
+gates.
+
+Recording it as a decision rather than an omission: the boundary was implicit, so
+teams found it by watching a formatting problem pass validation and concluding the
+gate was unreliable. It is now written in `guides/CONFIGURATION.md`, the CLI spec and
+the kit constraints spec. A kit that wants formatting enforced adds a formatter to
+its own CI; it cannot express it as a constraint, and no `[validation.severity]` key
+will ever name one.
+
+### A reference may be a link; a definition may not
+
+An identifier reference may be written bare (`` `cpt-x` ``) or as the text of a
+markdown link (``[`cpt-x`](../prd/PRD.md#x)``), so one line can be both readable in a
+rendered document and traceable. Both spellings carry the same task marker and
+priority and resolve to one node, because the node is the id string — the link only
+tells a reader where to go next. The accepted form is narrow: the id must be marked
+up as an id, so `[the login flow](spec.md#cpt-x)` stays prose. Inferring a reference
+from a link *target* would make every path that happens to name an id a reference to
+it.
+
+A definition stays bare. A definition is the place being pointed at, so a link in its
+place points away from itself and declares nothing. Such a line used to be filed as a
+reference to the very id it meant to declare: the id ended up undefined, with one
+spurious reference and no diagnostic anywhere. It is now recognised, counted as
+neither a definition nor a reference, and reported as `def-link-form-not-allowed` —
+a rule code like any other, so a kit or project that disagrees can lower it, and the
+severity model is what makes that disagreement expressible without a fork.
 
 ### Consequences
 
