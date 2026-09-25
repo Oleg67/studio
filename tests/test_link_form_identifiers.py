@@ -222,6 +222,44 @@ def test_the_fix_prompt_unwraps_in_place_and_keeps_the_decoration(tmp_path: Path
     assert f"**ID**: `{TARGET}`" not in prompt  # no undecorated line to copy
 
 
+def _all_findings(tmp_path: Path, design_line: str) -> list:
+    """A PRD holding the real definition of TARGET, and a DESIGN glossary line about it."""
+    kit, errors = parse_kit_constraints({"PRD": {"identifiers": {"flow": {}}},
+                                         "DESIGN": {"identifiers": {"flow": {}}}})
+    assert errors == []
+    prd, design = tmp_path / "PRD.md", tmp_path / "DESIGN.md"
+    prd.write_text(f"# PRD\n\n**ID**: `{TARGET}`\n", encoding="utf-8")
+    design.write_text(f"# Design\n\n## Glossary\n\n{design_line}\n", encoding="utf-8")
+    found = []
+    for path, kind in ((prd, "PRD"), (design, "DESIGN")):
+        found += validate_artifact_file(artifact_path=path, artifact_kind=kind,
+                                        constraints=kit.by_kind[kind], registered_systems={"myapp"})["errors"]
+    found += cross_validate_artifacts(
+        [ArtifactRecord(path=prd, artifact_kind="PRD", constraints=kit.by_kind["PRD"]),
+         ArtifactRecord(path=design, artifact_kind="DESIGN", constraints=kit.by_kind["DESIGN"])],
+        registered_systems={"myapp"}, known_kinds={"flow"},
+    )["errors"]
+    return [f for f in found if f.get("code") not in (EC.REQUIRED_ID_KIND_MISSING, EC.TOC_MISSING)]
+
+
+def test_a_glossary_line_pointing_at_a_real_definition_gets_the_right_advice(tmp_path: Path):
+    """An index re-listing an id defined elsewhere, in definition markup. Unwrapping it —
+    the advice for a definition — would create a second definition. The finding and its
+    prompt name the other edit, and that edit leaves both artifacts clean."""
+    glossary = f"**ID**: [`{TARGET}`](PRD.md#login)"
+    findings = _all_findings(tmp_path, glossary)
+    assert [f.get("code") for f in findings] == [EC.DEF_LINK_FORM_NOT_ALLOWED]
+    enrich_issues(findings, project_root=tmp_path)
+    for text in (str(findings[0]["message"]), str(findings[0]["fixing_prompt"])):
+        assert "defined elsewhere" in text and "**ID**:" in text
+
+    # The edit the prompt names for this case, applied as written: no findings at all.
+    assert _all_findings(tmp_path, f"[`{TARGET}`](PRD.md#login)") == []
+    # The other branch's edit, applied to this line, is exactly what must be avoided.
+    unwrapped = _all_findings(tmp_path, f"**ID**: `{TARGET}`")
+    assert {f.get("code") for f in unwrapped} == {EC.DUPLICATE_DEFINITION}
+
+
 def test_lowering_the_rule_is_never_silent(tmp_path: Path):
     """The rule is lowerable like any other, and what that leaves behind is the answer
     to "does muting it reopen the hole": the suppression is counted in the report."""

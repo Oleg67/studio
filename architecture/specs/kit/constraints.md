@@ -458,7 +458,7 @@ default.
 | `def-missing-task` / `def-prohibited-task` | error | `task` is `true` and the definition has no checkbox, or `false` and it has one | Add or remove the `[ ]` / `[x]` checkbox |
 | `def-missing-priority` / `def-prohibited-priority` | error | `priority` is `true` and the definition has no priority token, or `false` and it has one | Add or remove the priority marker (e.g. `` `p1` ``) |
 | `def-wrong-headings` | error | An ID is defined outside the sections its `headings` list allows | Move the definition under an allowed heading |
-| `def-link-form-not-allowed` | error | A definition is written as a markdown link (``**ID**: [`cpt-x`](target)``) | Write the definition bare; the link form belongs on references |
+| `def-link-form-not-allowed` | error | An `**ID**:` line wraps the ID in a markdown link (``**ID**: [`cpt-x`](target)``), which defines nothing | To define the ID here, write it bare. If it is defined elsewhere and the line points there, delete `**ID**:` and keep the link — the line becomes a reference |
 | `ref-missing-from-kind` | error | `coverage = true` but the target artifact kind references the ID nowhere | Add the reference in the target artifact |
 | `ref-from-prohibited-kind` | error | `coverage = false` but the target artifact kind references the ID | Remove the reference |
 | `ref-done-def-not-done` / `def-done-ref-not-done` | error | A reference and its definition disagree about being done | Mark the definition done, or unmark the reference |

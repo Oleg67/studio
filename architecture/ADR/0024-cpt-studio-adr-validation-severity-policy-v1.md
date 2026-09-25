@@ -360,12 +360,30 @@ follows whether the flagged documents are valid. `heading-requires-multiple` shi
 `off` because enforcing it would fail documents that are correct by the spec. Every
 line this rule flags is incorrect by the spec — it was always a definition that
 defined nothing — so a `warning` default would let a known-broken definition pass the
-gate out of the box. And the upgrade cost is smaller than a new error suggests: where
-the id's system is registered, the same line already failed with `ref-no-definition`,
-so the new code replaces a misleading error with an accurate one at the same line and
-severity. Only the unregistered-system case — the one that was genuinely silent —
-starts failing, which is the point. A project that wants to stage it anyway has the
-path this ADR provides: one line in `config/core.toml`, reported in every run.
+gate out of the box.
+
+The upgrade cost differs by what the line was doing before, and there are three cases:
+
+- **The id is defined nowhere, and its system is registered.** The line already failed
+  with a misleading `ref-no-definition`; an accurate error replaces it at the same line
+  and severity.
+- **The id is defined nowhere, and its system is unregistered.** The line was silent and
+  now fails, which is the point.
+- **The id is defined bare elsewhere**, and this line re-lists it as a link — a
+  glossary or index using definition markup to point at the real definition. This one
+  *worked* before: it resolved as an ordinary reference, with no findings. It now
+  fails. It still uses `**ID**:` for something that is not a definition, and the fix
+  is one token: delete `**ID**:` and keep the link, and the line becomes the link-form
+  reference this change newly supports. The finding and its fix prompt name both
+  intents, because unwrapping this line, as for the other two cases, would create a
+  second definition. Measured before choosing the default, no repository available to
+  this change and no bundled kit contains such a line, or any link-form definition at
+  all.
+
+That third case is the real cost of an unstaged `error`. It is paid only by a pattern
+that measured absent, and its fix is mechanical. A project that has the pattern, or
+wants to stage the rule anyway, has the path this ADR provides: one line in
+`config/core.toml`, reported in every run.
 
 ### Consequences
 

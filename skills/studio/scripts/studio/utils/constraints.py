@@ -1800,8 +1800,9 @@ def _validate_link_form_definitions(
         hid = str(hit.get("id"))
         errors.append(error(
             "constraints",
-            f"`{hid}` is defined as a markdown link; a definition is written bare "
-            f"(**ID**: `{hid}`) and the link belongs on the references that point here",
+            f"`{hid}` is written as a markdown link on an `**ID**:` line, which defines "
+            f"nothing. To define it here, write it bare (**ID**: `{hid}`); if it is defined "
+            f"elsewhere and this line points there, drop `**ID**:` and keep the link",
             code=EC.DEF_LINK_FORM_NOT_ALLOWED,
             path=artifact_path,
             line=int(hit.get("line", 1) or 1),

@@ -139,6 +139,7 @@ _REASONS: Dict[str, List[str]] = {
     EC.DEF_LINK_FORM_NOT_ALLOWED: [
         "`{id}` was defined as a markdown link because the author wanted the definition to be clickable",
         "A reference written as a link was copied into the definition line",
+        "A glossary or index re-listed `{id}`, defined elsewhere, using definition markup",
     ],
 
     # Constraints — heading placement
@@ -648,13 +649,18 @@ def _prompt_for_constraints(ctx: _FixPromptContext) -> Optional[str]:
             f"Open `{ctx.loc}`: remove the priority marker from `{ctx.cpt_id}` — "
             f"kind `{ctx.id_kind}` prohibits priority."
         ),
-        # Unwrap in place rather than show a rewritten line: a definition may carry a
-        # checkbox and a priority, and a model of the bare line would drop both.
+        # Two intents share this spelling, and the right edit differs. Unwrapping a line
+        # that only points at a definition elsewhere would create a second definition —
+        # `duplicate-definition` on both. Edit in place rather than show a rewritten
+        # line: a definition may carry a checkbox and a priority, and a model of the
+        # bare line would drop both.
         EC.DEF_LINK_FORM_NOT_ALLOWED: (
-            f"Open `{ctx.loc}`: unwrap the id — replace the markdown link around "
-            f"`{ctx.cpt_id}` with the bare backticked id, and leave any checkbox and "
-            f"priority marker on the line as they are. The link belongs on the "
-            f"references that point here."
+            f"Open `{ctx.loc}`: if this line is meant to define `{ctx.cpt_id}`, unwrap the "
+            f"id — replace the markdown link around it with the bare backticked id, and "
+            f"leave any checkbox and priority marker on the line as they are. If "
+            f"`{ctx.cpt_id}` is defined elsewhere and this line points there, delete "
+            f"`**ID**:` instead and keep the link: the line becomes a reference. Run "
+            f"`where-defined {ctx.cpt_id}` to tell which."
         ),
     }
     if ctx.code in prompt_map:
