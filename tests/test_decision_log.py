@@ -341,6 +341,49 @@ def test_redact_respects_home_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dl._redact("/Users/max/x") == "/Users/max/x"         # root home -> no-op (never redact "/")
 
 
+def test_redact_fails_safe_when_the_shared_pattern_is_unavailable(
+        monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    """A renamed or broken `_home_pattern` must not crash the command, nor leak the raw path.
+
+    This PR moved `_redact` off its own inline regex onto `redaction._home_pattern`, and that
+    lazy import runs on paths that reach `cfs gate-log` and plan-decisions *outside* any
+    fail-open handler -- so a future rename would turn instrumentation into a hard CLI crash.
+    The guard mirrors `_gate_types`'s below, but fails **safe**: a redactor that fell back to
+    the raw value would emit the very username it exists to hide. Raised in review; correct.
+    """
+    from studio.utils import redaction  # noqa: PLC0415
+
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/someone"))
+    # Make the lazy `from .redaction import _home_pattern` inside `_redact` fail, exactly as a
+    # rename would. `delattr` is restored by monkeypatch at teardown.
+    monkeypatch.delattr(redaction, "_home_pattern")
+
+    with caplog.at_level(logging.WARNING, logger=dl.logger.name):
+        out = dl._redact("/home/someone/project/kit")
+    assert "someone" not in out, out       # never the raw, leaking value
+    assert out == "...", out               # blanked, because it could still carry the prefix
+    # Exactly one warning for the one failed call -- not a storm. The diagnostic must not be
+    # `_describe(exc)`, which routes back through `_capped` -> `_redact`, re-enters this same
+    # broken import and recurses ~hundreds deep, one warning per frame. A regression to that
+    # form makes this count explode. Raised in review.
+    assert len(caplog.records) == 1, [r.getMessage() for r in caplog.records]
+    # Text that cannot contain the home string is passed through, not needlessly blanked.
+    assert dl._redact("a plain message") == "a plain message"
+    # The public entry callers use outside any handler survives too, and does not leak.
+    assert "someone" not in dl.capped_text("/home/someone/x")
+    assert any("home-redaction pattern is unavailable" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    # And the cross-separator case: a Windows home with a value written in forward slashes --
+    # exactly what git and friends emit on Windows -- must still be caught by the fallback,
+    # not slip out raw because the separators differ. A same-case, same-separator substring
+    # test would leak here; the fallback normalises both, as `_home_pattern` does.
+    monkeypatch.setattr(Path, "home", lambda: Path(r"C:\Users\Alice"))
+    leaked = dl._redact("opened C:/Users/Alice/project not found")
+    assert "Alice" not in leaked, leaked
+    assert leaked == "...", leaked
+
+
 def test_rotation_failure_is_swallowed(log_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dl, "_MAX_BYTES", 50)
     dl.record("routing", {"pad": "x" * 80}, path=log_path)     # push the log over the limit

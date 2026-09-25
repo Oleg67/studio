@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .redaction import home_collapsed
+
 logger = logging.getLogger(__name__)
 
 # @cpt-begin:cpt-studio-algo-core-infra-armed-reversal:p1:inst-reversal-vocab
@@ -87,18 +89,23 @@ def _check_borrowed_helper_exists() -> None:
 
     The same guard the gate-surface walk uses against a renamed PDSL keyword. That lesson
     was applied there and not here; review found the gap.
+
+    **Both halves raise**, matching that guard exactly. The first version warned and
+    returned when its own import failed, which review flagged as two guards against the
+    same class of failure disagreeing on how bad it is. Warning is the weaker of the two
+    and it was the wrong one: a guard that cannot run, and carries on anyway, leaves the
+    thing it guards unguarded and looking fine -- which is the defect it exists to catch,
+    one level up. The module it reaches for imports nothing but the standard library and
+    its own siblings, so an `ImportError` here is a broken installation rather than a
+    missing optional dependency, and a broken installation should stop.
     """
     try:
         from . import change_summary  # pylint: disable=import-outside-toplevel
-    except ImportError as exc:  # pragma: no cover - sibling module in this package
-        # Said, not swallowed. This is the third guard in a day to be written with a quiet
-        # `return` on its own import failure, and the shape is always wrong for the same
-        # reason: a check that cannot run, and does not say so, leaves the thing it guards
-        # unguarded and looking fine.
-        logger.warning("armed reversal: the module carrying the bounded git query could "
-                       "not be imported, so its absence cannot be detected: %s",
-                       type(exc).__name__)
-        return
+    except ImportError as exc:
+        raise RuntimeError(
+            "armed reversal: the module carrying the bounded git query could not be "
+            "imported, so a rename of `_git_query` would go unnoticed and every reversal "
+            "probe would report a tool failure and refuse every edit, silently") from exc
     if not hasattr(change_summary, "_git_query"):
         raise RuntimeError(
             "armed reversal: change_summary._git_query is gone, so every reversal probe "
@@ -197,38 +204,16 @@ def _said(value: object) -> str:
 
     A project root is very often under `$HOME`, so the refusal read
     `/home/<username>/project is not inside a git work tree` and put a username into
-    whatever logs it. That is the leak class the ledger's redactor exists for, and reusing
-    it beats a second rule that drifts -- redaction has to happen before the cap, and that
-    ordering is already settled there.
+    whatever logs it.
+
+    The collapse moved to `redaction.home_collapsed`, and moving it fixed two live leaks
+    this copy still had: it trusted a clean return from `capped_text`, which returns its
+    input unchanged when `Path.home()` raises inside it, and its own fallback then returned
+    the raw path truncated when `Path.home()` raised here too -- under a comment saying that
+    second one had been fixed. Both were found in the sibling copy and repaired only there.
+    Raised in review as duplication; the duplication is how the repair was lost.
     """
-    try:
-        from .decision_log import capped_text  # pylint: disable=import-outside-toplevel
-        text = capped_text(str(value))
-    except Exception as exc:  # pylint: disable=broad-except
-        # Broad, because the docstring promises this cannot raise and `ImportError` was
-        # only the failure imagined: `capped_text` is another module's function and any
-        # exception from it would escape a safety check through its reporting path.
-        #
-        # Warned, not swallowed — the fallback gives up the shared redactor, and a leak
-        # guard that quietly stops running is worth a line.
-        logger.warning("armed reversal: the shared redactor is unavailable, so a path is "
-                       "reported through a local fallback: %s", type(exc).__name__)
-        # And the fallback still collapses `$HOME`. The first version returned the raw
-        # path truncated, so the one failure path of a username guard was the one that
-        # leaked the username.
-        try:
-            home = str(Path.home())
-        except (OSError, RuntimeError) as home_exc:
-            # Said, not swallowed. This is the guard's last line, and a guard that gives
-            # up quietly is the defect this module keeps finding one level down: the
-            # fallback path of a username guard is exactly where a username escapes.
-            logger.warning("armed reversal: the home directory could not be read, so a "
-                           "path is reported uncollapsed: %s", type(home_exc).__name__)
-            home = ""
-        text = str(value)
-        if home and text.startswith(home):
-            text = "~" + text[len(home):]
-        text = text[:200]
+    text = home_collapsed(value, logger=logger, subject="armed reversal")[:200]
     # Stripped and delimited, not merely redacted and capped. A directory named with a
     # newline forged a second line in the refusal reading `ARMED: yes — reversal
     # confirmed`: a fabricated verdict, saying the opposite of the real one, inside the

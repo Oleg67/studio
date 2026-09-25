@@ -268,12 +268,46 @@ def _redact(value: Any) -> Any:
         try:
             home = str(Path.home()).rstrip(os.sep)
         except (OSError, RuntimeError):
-            return value
+            # No home to strip and no way to learn one: nothing to redact, so fall through
+            # to the single "nothing to do" return below rather than a second one here.
+            home = ""
         if not home:
             return value
         # Substitute $HOME only at a path boundary (separator or end-of-string), so a
         # sibling like ``/Users/maxine`` is never mangled into ``~ine`` for home ``/Users/max``.
-        return re.sub(re.escape(home) + r"(?=" + re.escape(os.sep) + r"|$)", "~", value)
+        # Both separators, in the prefix and at the boundary. The same hole was found
+        # here and in `redaction._home_pattern`, which this delegates the reasoning to;
+        # fixing one copy and not the other is how the repair gets lost.
+        try:
+            # Function-local for two reasons: the fail-safe below, and a
+            # `decision_log` <-> `redaction` cycle -- `redaction.home_collapsed` imports back
+            # into this module (`capped_text`), so hoisting either import to module scope
+            # would make whichever module loads first import a half-initialised other and
+            # raise at load. Kept lazy on both sides on purpose.
+            from .redaction import _home_pattern  # pylint: disable=import-outside-toplevel
+            return re.sub(_home_pattern(home), "~", value)
+        except Exception as exc:  # pylint: disable=broad-except
+            # The same fail-open contract as `_gate_types` below, for the same reason: this
+            # runs on paths that reach `cfs gate-log` and plan-decisions *outside* any
+            # handler, so a renamed or broken `_home_pattern` must not crash the command.
+            # But this is a redactor, so failing open here means failing **safe**, never
+            # raw -- a silent pass-through would emit the very username this exists to hide.
+            # The value is blanked when it could still carry the home prefix, and only text
+            # that plainly cannot is passed through unchanged.
+            # `type(exc).__name__`, never `_describe(exc)` here: `_describe` routes through
+            # `_capped` -> `_redact`, which would re-enter this very except on the still-broken
+            # import and recurse until the stack gives out, emitting a warning per frame. The
+            # class name needs nothing from the redactor and cannot itself carry a path -- and
+            # the `ImportError`'s own message *does* name `redaction.py`'s absolute path, so
+            # feeding it back through the failed redactor would be a leak as well as a loop.
+            logger.warning("the shared home-redaction pattern is unavailable, so a value is "
+                           "blanked rather than risk leaking a path: %s", type(exc).__name__)
+            # Cross-separator and case-folded, the same holes `_home_pattern` itself closes:
+            # blank the value if the home prefix could appear in it under either separator or
+            # case, and pass through only text that plainly cannot carry it. A plain
+            # same-case substring test would let a forward-slash Windows path slip out raw.
+            prefix = home.lower().replace("\\", "/")
+            return "..." if prefix in value.lower().replace("\\", "/") else value
     if isinstance(value, dict):
         return {_redact(k): _redact(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

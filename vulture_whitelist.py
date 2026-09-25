@@ -1,5 +1,20 @@
 # Vulture whitelist — false positives that should be ignored.
 # Each entry is a dummy usage of the flagged name.
+#
+# RUNNING A "REMOVAL TRIGGER" GREP. Several entries below say to delete them once a real
+# consumer appears, and name a grep for finding one. Run it like this, or it answers the
+# wrong question:
+#
+#     grep -rn --include='*.py' NAME . | grep -v vulture_whitelist.py | grep -v '/tests/'
+#
+# **This file imports every name it whitelists**, so an unqualified grep always reports at
+# least one hit and the instruction reads as already satisfied — which would have the entry
+# deleted while the name is still genuinely unused, failing the dead-code gate. Two further
+# kinds of hit are not consumers either: the defining module itself, and a mention in a
+# docstring or comment (`redaction.py` names `armed_reversal` in its own module docstring,
+# for instance, and imports nothing from it). A consumer is production code that imports
+# and calls the name. Tests do not count; vulture does not scan them, which is why the
+# entry is needed at all. Raised in review, where the instructions were unqualified.
 
 from studio.utils.ui import _UI
 from studio.ralphex_export import (
@@ -191,8 +206,9 @@ finding_json_schema  # noqa: B018
 # gap / traceability / contradiction detectors (later tasks). The four query commands
 # consume references / definitions / scan_records now; graph_for is unreferenced until
 # the first detector imports it. REMOVAL TRIGGER — delete this entry once a detector
-# imports graph_for (i.e. once `cpt-studio-flow-artifact-quality-assess` is implemented
-# — grep that id in architecture/features/artifact-quality.md and check its `[ ]`→`[x]`).
+# imports graph_for (grep `graph_for` per the header above, discounting this file; i.e.
+# once `cpt-studio-flow-artifact-quality-assess` is implemented — grep that id in
+# architecture/features/artifact-quality.md and check its `[ ]`→`[x]`).
 # The algo itself is declared in architecture/features/traceability-validation.md (### CPT Reference Scan).
 from studio.utils.cpt_reference_scan import graph_for  # noqa: E402
 graph_for  # noqa: B018
@@ -204,7 +220,9 @@ graph_for  # noqa: B018
 # guard. Built before the consumer deliberately: putting the check in place before
 # autonomous editing ships is the only order in which it is cheap.
 # REMOVAL TRIGGER — delete these entries once a dispatch or eligibility module consults it
-# (grep `armed_reversal` outside its own module and tests). The algorithm is declared in
+# (grep `armed_reversal` per the header above; today it hits only this file, the module
+# itself, and a docstring mention in `redaction.py` — none of which is a consumer).
+# The algorithm is declared in
 # architecture/features/core-infra.md (### Assert an Armed Reversal).
 from studio.utils.armed_reversal import ReversalCheck, armed_reversal  # noqa: E402
 armed_reversal  # noqa: B018
@@ -215,8 +233,50 @@ ReversalCheck.refused  # noqa: B018
 # `preflight` returns `blocked_on` and uses `PlanLookup.resolved` itself; `will_run` is the
 # shape the consumer wants and the consumer is the enforcement increment, which does not
 # import this module yet. REMOVAL TRIGGER — delete this entry once a dispatch module's
-# Python reads it (grep `will_run` outside plan_decisions.py and its tests). Deleting the
+# Python reads it (grep `will_run` per the header above, discounting this file). Deleting the
 # property instead would have the first consumer reinvent `not blocked_on` under a name
 # that reads as permission, which this one deliberately is not.
 from studio.utils.plan_decisions import PhaseOutlook  # noqa: E402
 PhaseOutlook.will_run  # noqa: B018
+
+# gate_surface — the static walk that counts how many gates a workflow can reach, and the
+# fields of its result that **nothing reads**. The walk records a baseline before the
+# autonomy default is flipped, and the comparison that will read these is a later task.
+# Each is a separate number that comparison needs, which is why they are kept rather than
+# collapsed into the one total the walk could return today.
+#
+# The list was three entries longer and said the same thing about all of them. Review
+# pointed out that `_warn_about_gaps` reads `tree`, `missing_loads` and
+# `duplicate_menu_definitions` to build its warning text — a production read, so the stated
+# reason was false for them and the entries were suppressing nothing. They are gone. Each
+# remaining entry was checked the only way that settles it: removed, with `make vulture-ci`
+# re-run, and kept only where the scan then failed.
+#
+# An earlier version of this comment argued instead that the numbers were already in use
+# because a person had read them and sized a decision on them. Review's first pass called
+# that a contradiction with "nothing consumes them yet" in the same block; its second pass
+# made the sharper point, which is that the decision it cited appears nowhere in this
+# repository — so to anyone reading here, a load-bearing justification rested on something
+# they cannot check. The claim is gone rather than restated: what the repository can show
+# is that these fields are computed, tested, and unread, and that is enough to justify the
+# entry on its own.
+#
+# REMOVAL TRIGGER — delete these once a command or report reads the fields (grep
+# `WorkflowSurface` or `GateSurface` per the header above, discounting this file). The
+# algorithm is declared in architecture/features/developer-experience.md (### Count the
+# Reachable Gate Surface).
+from studio.utils.gate_surface import GateSurface, WorkflowSurface  # noqa: E402
+# `WorkflowSurface`'s fields carry no default, so they are instance attributes only --
+# `WorkflowSurface.files_reached` is not a class attribute and raises `AttributeError`, unlike
+# every other bare `Class.field` entry here (those fields have defaults, so the class attribute
+# exists). Marked used on a dummy instance instead: vulture matches the attribute name either
+# way, and this stays evaluable, which the header's "dummy usage" convention relies on.
+_wf_surface = WorkflowSurface(workflow="", files_reached=0, halt_sites=0, stop_sites=0,
+                              non_stop_sites=0, distinct_menus=0)
+_wf_surface.files_reached  # noqa: B018
+_wf_surface.stop_sites  # noqa: B018
+_wf_surface.halt_sites  # noqa: B018
+_wf_surface.non_stop_sites  # noqa: B018
+_wf_surface.distinct_menus  # noqa: B018
+GateSurface.distinct_menu_definitions  # noqa: B018
+GateSurface.concentration  # noqa: B018

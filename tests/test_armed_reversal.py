@@ -434,6 +434,94 @@ class TestWhatReviewFoundOnTheFirstPush:
         with pytest.raises(RuntimeError, match="_git_query is gone"):
             ar._check_borrowed_helper_exists()
 
+    @pytest.mark.parametrize("guard_of, blocked, expected", [
+        ("armed_reversal", "change_summary", "could not be imported"),
+        ("gate_surface", "pdsl", "could not be read"),
+    ])
+    def test_both_import_guards_treat_their_own_failure_as_fatal(
+            self, monkeypatch: pytest.MonkeyPatch, guard_of: str, blocked: str,
+            expected: str) -> None:
+        """The pair is asserted together, because the defect was that they disagreed.
+
+        Two guards against the same class of failure — a dependency the module reaches into
+        being renamed or gone — and one raised while the other warned and carried on.
+        Review flagged the inconsistency. Warning was the wrong half: the failure both
+        guard against is invisible in the output, so a guard that cannot run and says so
+        only in a log leaves a silent refusal (here) or a silent zero (there) looking like
+        a clean result.
+
+        The guards are **called** here, to check their *logic* — that both halves raise, the
+        property this test exists for. Whether each guard is actually *wired* at module scope
+        is a separate question, covered per module by its own reload test: gate_surface's
+        keyword guard under a corrupted keyword set, and armed_reversal's helper guard under a
+        blocked `change_summary` import (`test_the_borrowed_helper_guard_fires_at_import`),
+        which reaches the module-level call precisely because that import lives *inside* the
+        guard, not at the top level. An earlier version claimed both modules imported at the
+        top level and so could only be called, not reloaded — false for armed_reversal, and
+        the reason its placement went untested. Raised in review.
+
+        One parametrised test over both modules rather than two tests in two files, so the
+        agreement is checked rather than assumed and the next guard in this shape has an
+        obvious place to join.
+        """
+        import builtins  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
+
+        real_import = builtins.__import__
+
+        def _blocked(name, globals_=None, locals_=None, fromlist=(), level=0):
+            # `from . import change_summary` calls this with an empty name and the target
+            # in `fromlist`, so matching on the name alone blocks nothing and the test
+            # passes by never provoking the failure it claims to check. Both spellings are
+            # matched, since the two guards use one each.
+            if (name == blocked or name.endswith("." + blocked)
+                    or blocked in (fromlist or ())):
+                raise ImportError(f"{blocked} is gone")
+            return real_import(name, globals_, locals_, fromlist, level)
+
+        module = importlib.import_module(f"studio.utils.{guard_of}")
+        guard = next(getattr(module, n) for n in dir(module)
+                     if n.startswith("_check_") and n.endswith(("_exists", "_still_exist")))
+        monkeypatch.setattr(builtins, "__import__", _blocked)
+        with pytest.raises(RuntimeError, match=expected):
+            guard()
+
+    def test_the_borrowed_helper_guard_fires_at_import(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Importing armed_reversal must fail loudly when `change_summary` is gone.
+
+        The guarantee is "this module fails at import if the helper it borrows is gone", so
+        import is what is run — not the guard called by hand. `_check_borrowed_helper_exists`
+        imports `change_summary` *inside itself* and is invoked at module scope, so a reload
+        with that import blocked reaches the module-level call and must raise its own
+        `RuntimeError` (wrapping the `ImportError`), not a bare `ImportError`. Deleting the
+        module-level call would leave the guard callable but never wired, and nothing checked
+        the wiring — the placement hole gate_surface's keyword guard has a test for and this
+        one did not. Raised in review.
+
+        Reloaded rather than imported fresh (already in `sys.modules`), and restored in
+        `finally` so a failure cannot leave a half-initialised module behind for later tests.
+        """
+        import builtins  # noqa: PLC0415
+        import importlib  # noqa: PLC0415
+
+        real_import = builtins.__import__
+
+        def _blocked(name, globals_=None, locals_=None, fromlist=(), level=0):
+            # `from . import change_summary` calls with an empty name and the target in
+            # `fromlist`, so both spellings are matched.
+            if name.endswith("change_summary") or "change_summary" in (fromlist or ()):
+                raise ImportError("change_summary is gone")
+            return real_import(name, globals_, locals_, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked)
+        try:
+            with pytest.raises(RuntimeError, match="could not be imported"):
+                importlib.reload(ar)
+        finally:
+            monkeypatch.undo()
+            importlib.reload(ar)
+
     def test_the_home_directory_failing_is_said_not_swallowed(
             self, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
         """The last line of the guard, and it used to give up without a word.
@@ -460,7 +548,13 @@ class TestWhatReviewFoundOnTheFirstPush:
         monkeypatch.setattr(Path, "home", classmethod(_no_home))
         with caplog.at_level(logging.WARNING, logger=ar.logger.name):
             rendered = ar._said("/somewhere/project")
-        assert "project" in rendered, rendered
+        # The component used to survive here. It no longer does: with `$HOME` unreadable
+        # there is no way to tell a path *under* the home directory from the home directory
+        # itself, whose final component is the username. Reported as review finding; the
+        # guarantee got stricter and this assertion moved with it.
+        # Quoted, because this module delimits where it renders: the value travels inside a
+        # sentence here, unlike the gate-surface copy which returns list elements.
+        assert rendered == '"..."', rendered
         assert any("home directory could not be read" in r.getMessage()
                    for r in caplog.records), [r.getMessage() for r in caplog.records]
 
@@ -570,15 +664,28 @@ class TestTheRemovalTriggerIsCheckedRatherThanWritten:
         mechanism: when the first consumer appears, the entries must go with it, and until
         then they must stay — a whitelist kept past its reason hides the next real finding.
         """
+        import re  # noqa: PLC0415
+
         root = Path(__file__).resolve().parents[1]
         module = root / "skills/studio/scripts/studio/utils/armed_reversal.py"
+        # An *import*, not a mention. This searched for the bare name anywhere in the file
+        # and counted a module whose docstring explains why a helper was lifted **out of**
+        # `armed_reversal` — the dependency runs the other way, and naming the module you
+        # were extracted from is exactly what a good comment does. A test that punishes
+        # that would be paid in vaguer comments.
+        imports = re.compile(r"^\s*(?:from\s+[\w.]*\barmed_reversal\b\s+import\b"
+                             r"|import\s+[\w.]*\barmed_reversal\b)", re.M)
         consumers = sorted(
             path.relative_to(root)
             for path in root.rglob("*.py")
             if path != module
             and path.name not in {"vulture_whitelist.py", Path(__file__).name}
             and ".bootstrap" not in path.parts and "build" not in path.parts
-            and "armed_reversal" in path.read_text(encoding="utf-8", errors="replace"))
+            # A regular file before `read_text`: a glob can match a FIFO left in a local
+            # workspace, and reading it would block forever. `and` short-circuits, so a
+            # special file is skipped unread. Cannot happen in a clean checkout; cheap here.
+            and path.is_file()
+            and imports.search(path.read_text(encoding="utf-8", errors="replace")))
         whitelisted = "armed_reversal" in (root / "vulture_whitelist.py").read_text(
             encoding="utf-8")
         assert whitelisted is not bool(consumers), (
