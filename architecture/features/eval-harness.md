@@ -140,6 +140,48 @@ any fails, and `UNKNOWN` when the run cannot be loaded or no phase carries parse
 frontmatter — "unscoreable is not zero". The scorer is pure over the in-memory run
 artifacts: it touches no filesystem.
 
+The registry, published so a reader of a compliance percentage can tell what was checked.
+Each line says **what the check is for**, not what it guarantees: the predicate in
+`eval_structural.py` is the authority on the exact rule, and a one-line summary of a
+predicate with preconditions is a promise that cannot be kept. The block is compared against
+`CHECKS` by `tests/test_eval_structural.py`, so the two published surfaces cannot drift from
+the registry — though that test pins *agreement*, not truth.
+
+**A finding count is not a defect count**: one structural break commonly trips several of
+these at once, and how many depends on the plan — for a removed phase file, on where it sat in
+the sequence and on what depended on it — so a shortfall counts rules broken, not mistakes
+made.
+
+<!-- checks -->
+
+| check | what it is for |
+|---|---|
+| `phase-frontmatter-valid` | Catches a phase file the scorer cannot read — a [phase] block that is broken or absent — so it cannot quietly drop out of the score. |
+| `phase-numbers-unique` | Catches two phase files claiming the same position in the plan. |
+| `manifest-present` | Catches a plan.toml that never lists its phases, leaving nothing to check the files against. |
+| `manifest-entries-valid` | Catches a manifest entry whose phase number is missing or nonsensical. |
+| `manifest-numbers-unique` | Catches a manifest that lists the same phase more than once. |
+| `manifest-total-matches-entries` | Catches a total_phases that disagrees with the phases the manifest declares. |
+| `manifest-matches-files` | Catches the manifest and the phase files drifting apart — in either direction, or in which file is paired with which number. |
+| `numbering-contiguous-from-1` | Catches a gap in the phase sequence, or a plan that does not begin at 1. |
+| `phase-total-consistent` | Catches phase files that disagree with each other about how many phases there are. The frontmatter field is total, not the manifest's total_phases. |
+| `phase-total-matches-count` | Catches a declared total that does not match the phases the run actually has. |
+| `dependencies-resolve` | Catches a depends_on that points nowhere — a phase that is not there, a malformed value, or a misspelling of the key itself. |
+| `dependencies-not-forward` | Catches a phase that depends on itself, or on work that comes later. |
+| `every-phase-declares-an-output` | Catches a phase that never says what it produces, including a declaration too malformed to mean anything. |
+| `required-sections-present` | Catches a phase body missing a section the suite requires of it. |
+
+<!-- /checks -->
+
+Published to `cfs eval --help` and to this table, and **deliberately not into the report
+payload**. A finding is serialised as `name: detail`; repeating a fixed sentence on every
+occurrence of a finding would inflate the payload without adding anything a consumer cannot
+read once, and `--baseline` compares a stored report against a later run, so the payload's
+shape is a compatibility surface rather than a display surface. A reader of a failing run is
+pointed at the list instead: the note beside the compliance figure ends "cfs eval --help lists
+them", and prints whenever compliance is below 100%. If the descriptions should reach the
+payload, the shape is a checks table emitted once per report, which is a separate change.
+
 **Steps**:
 1. [x] - `p1` - Parse each phase file's `[phase]` frontmatter into a number-keyed table, recording files that re-declare a number as duplicates - `inst-structural-parse`
 2. [x] - `p1` - Run the phase-file validity and numbering-uniqueness checks over the parsed phases - `inst-structural-checks`

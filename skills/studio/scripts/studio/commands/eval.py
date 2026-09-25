@@ -18,12 +18,13 @@ import logging
 import math
 import os
 import tempfile
+import textwrap
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..utils import eval_harness
 from ..utils.eval_judge import AdvisoryJudge, calibrate, load_gold, reference_stub_judge
-from ..utils.eval_structural import StructuralScorer
+from ..utils.eval_structural import CHECKS, StructuralScorer
 from ..utils.ui import JsonSafeArgumentParser, parse_args_or_json_error, ui
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,29 @@ def _compliance_arg(value: str) -> float:
     return parsed
 
 
+def _structural_checks_help() -> str:
+    """The structural checks, rendered for ``--help`` from the registry itself.
+
+    Read from ``CHECKS`` rather than retyped, so the help cannot describe a scorer that no
+    longer exists — the gap this text was added to close was exactly that the list lived in
+    one source file and nowhere a reader would look.
+    """
+    lines = [f"structural checks applied by the deterministic scorer ({len(CHECKS)}).",
+             "Each line says what the check is for; the predicate is the authority on the",
+             "exact rule.", ""]
+    for check in CHECKS:
+        lines.append(f"  {check.name}")
+        # Wrapped here rather than by argparse: the raw formatter is what keeps one check per
+        # block, and it does not wrap at all, so a long sentence would run off the terminal.
+        lines.extend(textwrap.wrap(check.description, width=76,
+                                   initial_indent="      ", subsequent_indent="      "))
+    lines.append("")
+    lines.append("A finding count is not a defect count: one structural break commonly trips")
+    lines.append("several of these at once — how many depends on the plan — so the number of")
+    lines.append("findings counts rules broken, not mistakes made.")
+    return "\n".join(lines)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     # JsonSafeArgumentParser, not the plain one: `cfs eval` speaks JSON, and argparse's
     # own failure path writes a plain-text usage banner to stderr and exits without ever
@@ -65,7 +89,9 @@ def _build_parser() -> argparse.ArgumentParser:
     # unparseable stderr string for something as ordinary as a misspelled flag.
     parser = JsonSafeArgumentParser(
         prog="cfs eval",
-        description="Run the workflow eval-harness over a suite of scenarios.")
+        description="Run the workflow eval-harness over a suite of scenarios.",
+        epilog=_structural_checks_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--scenarios-dir", default=None,
         help="Directory of scenarios (each a subdir with scenario.toml). "
@@ -170,6 +196,13 @@ def _human_report(data: Dict[str, object]) -> None:
     compliance = summary.get("structural_compliance")
     ui.info(f"structural compliance: {compliance * 100:.0f}%" if compliance is not None
             else "structural compliance: n/a (nothing scored)")
+    # Printed only when something failed, and beside the number rather than in the findings
+    # list: a reader who sees "92%" has no way to know that one broken phase file can trip
+    # three checks, so the shortfall reads as three mistakes instead of one. Silent on a
+    # clean run, where there is no count to misread.
+    if compliance is not None and compliance < 1.0:
+        ui.info("note: one structural break can trip several checks — the shortfall counts "
+                "rules broken, not mistakes made (cfs eval --help lists them)")
     _report_scenarios(data.get("per_scenario"))
     _report_oracle_mismatches(data.get("oracle_mismatches"))
     _report_regression(data.get("regression"))

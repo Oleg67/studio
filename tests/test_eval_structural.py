@@ -212,6 +212,32 @@ def test_manifest_duplicate_number_is_flagged() -> None:
 
 # --- registry: skip by name and by tag -------------------------------------
 
+def test_skip_cannot_turn_an_unscoreable_run_into_a_pass() -> None:
+    """`skip` disables checks; it must not disable the UNKNOWN gate in front of them.
+
+    The two are independent code paths: the gate short-circuits in `score` before the registry
+    is consulted at all, so a skip-set covering every check reaches it by a different route
+    than a malformed corpus does. Skipping everything on a *scoreable* run is UNKNOWN because
+    nothing was assessed; a run nothing can parse must be UNKNOWN for the other reason, and a
+    regression that moved the gate after the skip filter would turn "nothing to check" into a
+    vacuous pass. Raised in review.
+    """
+    unparseable = _run(phase_texts={"phase-1.md": "# Phase 1\n\nNo frontmatter here.\n"})
+    all_tags = {tag for check in CHECKS for tag in check.tags}
+    for skip in ((), ("phase",), ("phase-frontmatter-valid",), tuple(all_tags)):
+        result = _score(unparseable, skip=skip)
+        assert result.verdict == VERDICT_UNKNOWN, (skip, result.verdict)
+        assert result.score_pct is None, (skip, result.score_pct)
+
+
+def test_skip_does_not_rescue_a_failing_run_it_does_not_cover() -> None:
+    """The mirror: skipping an unrelated family leaves a real FAIL intact, rather than
+    softening it into UNKNOWN by emptying the active set too eagerly."""
+    broken = _run(manifest_phases=[{"number": 1, "file": "phase-1.md"}])   # manifest vs files
+    result = _score(broken, skip=("deps",))
+    assert result.verdict == VERDICT_FAIL, result.findings
+
+
 def test_skip_by_name_removes_a_check() -> None:
     run = _run(phase_texts={"phase-1.md": _phase_body(1, 2, depends_on=[2]),
                             "phase-2.md": _phase_body(2, 2, depends_on=[1])})
@@ -640,3 +666,53 @@ class TestAnEmptyManifestBesideRealPhaseFiles:
 
         assert result.verdict == VERDICT_UNKNOWN, result
         assert result.score_pct is None, result
+
+
+class TestThePublishedRuleListCannotDrift:
+    """The 14 rules are published in two places; neither may be retyped.
+
+    QA read a compliance percentage and could not tell what had been checked, because the
+    registry existed only in `eval_structural.py` — not in `cfs eval --help`, not in the
+    feature doc. Publishing it is only worth doing if it stays true, so both surfaces derive
+    from `CHECKS` and these tests fail when one of them stops matching.
+    """
+
+    DOC = Path(__file__).resolve().parent.parent / "architecture/features/eval-harness.md"
+    START, END = "<!-- checks -->", "<!-- /checks -->"
+
+    def _doc_block(self) -> str:
+        text = self.DOC.read_text(encoding="utf-8")
+        # Separately, so a failure names the marker that is wrong rather than the pair.
+        assert text.count(self.START) == 1, f"{self.DOC} must carry exactly one {self.START}"
+        assert text.count(self.END) == 1, f"{self.DOC} must carry exactly one {self.END}"
+        return text.split(self.START, 1)[1].split(self.END, 1)[0]
+
+    def test_every_check_carries_a_description(self) -> None:
+        """A check with no sentence is a rule nobody outside this file can interpret."""
+        undescribed = [c.name for c in CHECKS if not c.description.strip()]
+        assert not undescribed, undescribed
+
+    def test_a_description_is_a_single_line(self) -> None:
+        """A newline corrupts the doc table row it is rendered into.
+
+        Written after an edit put a literal newline and its indentation inside two
+        descriptions: the registry still imported, and the breakage would have surfaced as a
+        confusing table-comparison failure rather than as what it was.
+        """
+        multiline = [c.name for c in CHECKS
+                     if "\n" in c.description or "|" in c.description]
+        assert not multiline, multiline
+
+    def test_the_feature_doc_lists_exactly_the_registry(self) -> None:
+        """Names and sentences both — a row that drifts in wording is as stale as a missing one."""
+        expected = [f"| `{c.name}` | {c.description} |" for c in CHECKS]
+        rows = [line.strip() for line in self._doc_block().splitlines()
+                if line.strip().startswith("| `")]
+        assert rows == expected, (
+            "architecture/features/eval-harness.md no longer matches CHECKS. Regenerate the "
+            "block between the <!-- checks --> markers from studio.utils.eval_structural.CHECKS."
+        )
+
+    def test_the_doc_says_findings_are_not_defects(self) -> None:
+        """QA's second point: the number is misread without it, so it travels with the list."""
+        assert "not a defect count" in self.DOC.read_text(encoding="utf-8")

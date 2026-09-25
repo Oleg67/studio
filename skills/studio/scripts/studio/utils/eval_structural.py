@@ -454,11 +454,26 @@ def _check_required_sections(inp: StructuralInput) -> Tuple[bool, str]:
 # @cpt-begin:cpt-studio-algo-eval-structural:p1:inst-structural-registry
 @dataclass(frozen=True)
 class Check:
-    """One structural check: a name, tags (for grouped skipping), and a pure predicate."""
+    """One structural check: a name, tags (for grouped skipping), a pure predicate, and the
+    sentence published to a reader.
+
+    ``description`` has no default on purpose. A run prints findings as ``name: detail``,
+    where the detail is data — ``manifest-matches-files: phase 3`` says nothing about what
+    the rule wanted. The sentence lives here, beside the predicate, so `cfs eval --help` and
+    the feature doc can both derive it and a fifteenth check cannot be added without one.
+
+    It states **what the check is for, not what it guarantees.** ``run`` is the authority on
+    semantics; a one-line summary of a predicate with preconditions is a promise that cannot
+    be kept, and the first draft of these proved it — seven of fourteen were wrong about an
+    edge case, and no test could tell, because the doc and the registry agreed with each
+    other perfectly. A statement of purpose survives the edge cases and still answers the
+    question a reader of a finding actually has.
+    """
 
     name: str
     tags: Tuple[str, ...]
     run: Callable[[StructuralInput], Tuple[bool, str]]   # -> (passed, detail)
+    description: str
 
 
 #: The registry. Each check is independent — order affects only the findings list, not any
@@ -467,20 +482,40 @@ class Check:
 #: skip-by-name rely on it) and contain **no colon** (findings serialise as ``name: detail``,
 #: which consumers split on the first colon).
 CHECKS: List[Check] = [
-    Check("phase-frontmatter-valid", ("phase",), _check_phase_frontmatter_valid),
-    Check("phase-numbers-unique", ("phase",), _check_phase_numbers_unique),
-    Check("manifest-present", ("manifest",), _check_manifest_present),
-    Check("manifest-entries-valid", ("manifest",), _check_manifest_entries_valid),
-    Check("manifest-numbers-unique", ("manifest",), _check_manifest_numbers_unique),
-    Check("manifest-total-matches-entries", ("manifest",), _check_manifest_total_matches_entries),
-    Check("manifest-matches-files", ("manifest",), _check_manifest_matches_files),
-    Check("numbering-contiguous-from-1", ("numbering",), _check_numbering_contiguous),
-    Check("phase-total-consistent", ("phase",), _check_phase_total_consistent),
-    Check("phase-total-matches-count", ("phase",), _check_phase_total_matches_count),
-    Check("dependencies-resolve", ("deps",), _check_dependencies_resolve),
-    Check("dependencies-not-forward", ("deps",), _check_dependencies_not_forward),
-    Check("every-phase-declares-an-output", ("outputs",), _check_every_phase_declares_output),
-    Check("required-sections-present", ("sections",), _check_required_sections),
+    Check("phase-frontmatter-valid", ("phase",), _check_phase_frontmatter_valid,
+          "Catches a phase file the scorer cannot read — a [phase] block that is broken or "
+          "absent — so it cannot quietly drop out of the score."),
+    Check("phase-numbers-unique", ("phase",), _check_phase_numbers_unique,
+          "Catches two phase files claiming the same position in the plan."),
+    Check("manifest-present", ("manifest",), _check_manifest_present,
+          "Catches a plan.toml that never lists its phases, leaving nothing to check the "
+          "files against."),
+    Check("manifest-entries-valid", ("manifest",), _check_manifest_entries_valid,
+          "Catches a manifest entry whose phase number is missing or nonsensical."),
+    Check("manifest-numbers-unique", ("manifest",), _check_manifest_numbers_unique,
+          "Catches a manifest that lists the same phase more than once."),
+    Check("manifest-total-matches-entries", ("manifest",), _check_manifest_total_matches_entries,
+          "Catches a total_phases that disagrees with the phases the manifest declares."),
+    Check("manifest-matches-files", ("manifest",), _check_manifest_matches_files,
+          "Catches the manifest and the phase files drifting apart — in either direction, or "
+          "in which file is paired with which number."),
+    Check("numbering-contiguous-from-1", ("numbering",), _check_numbering_contiguous,
+          "Catches a gap in the phase sequence, or a plan that does not begin at 1."),
+    Check("phase-total-consistent", ("phase",), _check_phase_total_consistent,
+          "Catches phase files that disagree with each other about how many phases there are. "
+          "The frontmatter field is total, not the manifest's total_phases."),
+    Check("phase-total-matches-count", ("phase",), _check_phase_total_matches_count,
+          "Catches a declared total that does not match the phases the run actually has."),
+    Check("dependencies-resolve", ("deps",), _check_dependencies_resolve,
+          "Catches a depends_on that points nowhere — a phase that is not there, a malformed "
+          "value, or a misspelling of the key itself."),
+    Check("dependencies-not-forward", ("deps",), _check_dependencies_not_forward,
+          "Catches a phase that depends on itself, or on work that comes later."),
+    Check("every-phase-declares-an-output", ("outputs",), _check_every_phase_declares_output,
+          "Catches a phase that never says what it produces, including a declaration too "
+          "malformed to mean anything."),
+    Check("required-sections-present", ("sections",), _check_required_sections,
+          "Catches a phase body missing a section the suite requires of it."),
 ]
 # @cpt-end:cpt-studio-algo-eval-structural:p1:inst-structural-registry
 

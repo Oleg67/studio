@@ -807,3 +807,60 @@ def test_the_oracle_mismatch_report_renders_and_tolerates_a_malformed_payload(ca
     assert "1 scenario(s)" in rendered, rendered
     assert "one:" in rendered, rendered
     assert quiet == "", quiet
+
+
+class TestTheRulesAreReachableFromTheCommand:
+    """`cfs eval --help` must answer "what was checked?" without opening the source.
+
+    QA scored a run, read a percentage, and had to read `eval_structural.py` to find out what
+    the number measured. These pin the two places the answer now appears.
+    """
+
+    def test_help_names_every_structural_check(self) -> None:
+        from studio.utils.eval_structural import CHECKS
+        help_text = _build_parser().format_help()
+        missing = [c.name for c in CHECKS if c.name not in help_text]
+        assert not missing, missing
+
+    def test_help_explains_each_check_and_not_only_its_name(self) -> None:
+        """A list of ids is the gap, not the fix — `manifest-matches-files` explains nothing."""
+        from studio.utils.eval_structural import CHECKS
+        help_text = " ".join(_build_parser().format_help().split())
+        undescribed = [c.name for c in CHECKS
+                       if " ".join(c.description.split()) not in help_text]
+        assert not undescribed, undescribed
+
+    def test_help_says_a_finding_count_is_not_a_defect_count(self) -> None:
+        assert "not a defect count" in _build_parser().format_help()
+
+    @staticmethod
+    def _human_out(compliance, capsys) -> str:
+        """Render the human report for one compliance value.
+
+        `ui.info` is a no-op while JSON mode is on, which it is by default in tests — asserting
+        a string is *absent* from an empty capture passes for the wrong reason, so every
+        assertion below also requires the compliance line itself to be present.
+        """
+        from studio.commands.eval import _human_report
+        ui_module.set_json_mode(False)
+        try:
+            _human_report({"summary": {"structural_compliance": compliance}})
+        finally:
+            ui_module.set_json_mode(True)
+        out = capsys.readouterr().out
+        assert "structural compliance" in out, out      # the report ran at all
+        return out
+
+    def test_the_note_travels_with_a_shortfall(self, capsys) -> None:
+        """The reader meets the number in the human report, not in --help."""
+        assert "rules broken, not mistakes made" in self._human_out(0.5, capsys)
+
+    def test_the_note_is_silent_on_a_clean_run(self, capsys) -> None:
+        """Nothing to misread at 100%, and a caveat printed always is a caveat nobody reads."""
+        assert "rules broken" not in self._human_out(1.0, capsys)
+
+    def test_the_note_is_silent_when_nothing_was_scored(self, capsys) -> None:
+        """`None` is "cannot assess", not a shortfall — it must not take the comparison path."""
+        out = self._human_out(None, capsys)
+        assert "rules broken" not in out
+        assert "n/a (nothing scored)" in out            # it took the UNKNOWN branch, not a 0%
