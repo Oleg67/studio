@@ -163,7 +163,12 @@ reference the narrow pattern rejects is still recorded as a reference, while a
 definition it rejected would be misclassified, which is the failure this code exists
 to remove. Text after the link is still scanned for inline references, so
 ``**ID**: [`cpt-a`](spec.md) related: `cpt-b` `` reports the definition *and* records
-the reference to `cpt-b`; the linked ID itself and the link destination never count.
+the reference to `cpt-b`. The linked ID itself never counts, and neither does
+anything inside the link construct — destination, title or reference label — even a
+backticked ID: ``**ID**: [`cpt-a`](spec-`cpt-b`.md)`` references nothing. The
+construct is recognised with one level of nested parentheses; a destination nested
+deeper still reports the definition, but a backticked ID buried in it is read as a
+reference.
 
 ```
 **ID**: [`cpt-myapp-fr-must-authenticate`](../prd/PRD.md#auth)   ← error, defines nothing

@@ -54,17 +54,22 @@ _ID_REF_RE = re.compile(
 # is *misclassified*, which is the defect this code exists to remove, so no link
 # syntax may escape it.
 #
-# The match stops at the closing `]` and is not anchored at the end, so every link
-# syntax — an inline destination of any content including none, a reference-style
-# label, a collapsed `[]`, a shortcut link — matches the same way, and text after the
-# link can still reference other ids: the caller scans from `match.end()` for
-# backticked ids, exactly as the inline scan treats any other line. A destination
-# has no backticks to find. A link title or a reference label can hold a backticked
-# id, and it then counts as a reference here just as it does on every other line —
-# the definition line is not made the one place where it would not.
+# After the link text the match consumes the rest of the link construct, when there
+# is one: an inline destination with its optional title, allowing one level of
+# nested parentheses (`(API_(v2).md)`, `(spec.md "Login (v2)")`, `()`), or a
+# reference label (`[label]`, `[]`). A destination, title or label can hold a
+# backticked id — markdown puts almost no limit on them — and none of that names a
+# reference: it says where the link goes. The caller scans only what follows
+# `match.end()`, so text after the whole link can still reference other ids.
+#
+# The construct is optional and nothing is anchored at the end, so a shortcut link
+# matches, and so does a destination nested past one level. For that last one the
+# match stops at the link text's `]` and the definition is still reported; only a
+# backticked id buried in such a destination would then be read as a reference.
 _ID_DEF_LINK_RE = re.compile(
     r"^(?:[-*]\s+(?P<task>\[\s*[xX]?\s*\])\s*)?(?:`(?P<priority>p\d+)`\s*-\s*)?"
     rf"\*\*ID\*\*:\s*\[`(?P<id>{_CPT_ID_PATTERN})`\]"
+    r"(?:\((?:[^()]|\([^()]*\))*\)|\[[^\]]*\])?"
 )
 _BACKTICK_ID_RE = re.compile(r"`(cpt-[a-z0-9][a-z0-9-]+)`")
 
@@ -234,8 +239,8 @@ def scan_cpt_id_lines(lines: List[str]) -> List[Dict[str, object]]:
                 id_group_names=("id",),
                 priority_group_names=("priority",),
             ))
-            # Only the text after the link text can reference other ids — never the
-            # linked id itself, and never a destination, which has no backticks.
+            # Only text after the whole link can reference other ids — never the
+            # linked id, nor anything in the destination, title or label.
             for mm in _BACKTICK_ID_RE.finditer(stripped[mdef_link.end():]):
                 hits.append({"id": mm.group(1), "line": idx0 + 1, "type": "reference", "checked": False})
             continue

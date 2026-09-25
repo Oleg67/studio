@@ -114,7 +114,6 @@ OTHER = "cpt-myapp-flow-logout"
     ("**ID**: [`{id}`] related: `{other}`", ["{other}"]),
     ("**ID**: [`{id}`](spec.md) see [`{other}`](b.md#{other})", ["{other}"]),
     # …but neither the linked id nor its destination is a reference.
-    ("**ID**: [`{id}`](spec.md#{other})", []),
     ("**ID**: [`{id}`](spec.md) closing (note)", []),
 ])
 def test_only_text_after_the_link_can_reference_other_ids(line, expected_refs):
@@ -125,14 +124,26 @@ def test_only_text_after_the_link_can_reference_other_ids(line, expected_refs):
     assert all(h["type"] == "reference" for h in hits[1:])
 
 
-def test_a_backticked_id_in_a_title_counts_as_it_does_on_any_other_line():
-    """A title is free text and can name an id. The inline scan has always counted
-    that as a reference on an ordinary line; the definition line is not made the one
-    place where it does not."""
-    title = f'(spec.md "supersedes `{OTHER}`")'
-    on_definition = scan_cpt_id_lines([f"**ID**: [`{TARGET}`]{title}"])
-    on_prose = scan_cpt_id_lines([f"see [the flow]{title}"])
-    assert [h["id"] for h in on_definition[1:]] == [h["id"] for h in on_prose] == [OTHER]
+@pytest.mark.parametrize("construct", [
+    # The only shapes that could leak: a *backticked* id inside the link construct.
+    # An unbackticked one never reaches the backtick scan, so it could not test this.
+    "(spec-`{other}`.md)",
+    "(spec.md#`{other}`)",
+    '(spec.md "supersedes `{other}`")',
+    "(API_(`{other}`).md)",
+    "[`{other}`]",
+])
+def test_nothing_inside_the_link_construct_is_a_reference(construct):
+    """A destination, title or label says where the link goes; it names no reference.
+    The linked definition's own construct is consumed before the rest of the line is
+    scanned."""
+    hits = scan_cpt_id_lines([f"**ID**: [`{TARGET}`]{construct.format(other=OTHER)}"])
+    assert [(h["id"], h["type"]) for h in hits] == [(TARGET, LINK_FORM_DEFINITION)]
+
+
+def test_text_after_a_consumed_construct_is_still_scanned():
+    hits = scan_cpt_id_lines([f"**ID**: [`{TARGET}`](spec-`{OTHER}`.md) related: `cpt-myapp-flow-reset`"])
+    assert [h["id"] for h in hits] == [TARGET, "cpt-myapp-flow-reset"]
 
 
 def test_no_destination_shape_can_hide_the_definition():
