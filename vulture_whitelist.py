@@ -280,3 +280,17 @@ _wf_surface.non_stop_sites  # noqa: B018
 _wf_surface.distinct_menus  # noqa: B018
 GateSurface.distinct_menu_definitions  # noqa: B018
 GateSurface.concentration  # noqa: B018
+
+# gate_chain — the autonomy filter chain skeleton (increment 1). It orders the two filter
+# classes and enforces that a safety-added stop is final and the declared type is a ceiling,
+# but no filter and no runtime seam imports it yet: the real filters (scope, reversibility,
+# blocker; already-answered, plan-and-ledger) and the CLI/runtime wiring are later increments.
+# Built before the consumers deliberately, so the ordering invariant exists before the first
+# filter can lean on it. REMOVAL TRIGGER — delete each line once a filter increment or the
+# runtime seam references it (grep `gate_chain` / `resolve_gate` outside gate_chain.py and its
+# tests). The algorithm is declared in architecture/features/core-infra.md (### The Gate Chain).
+from studio.utils.gate_chain import SafetyVerdict, EconomyVerdict, resolve_gate  # noqa: E402
+_ = resolve_gate
+_ = SafetyVerdict.ADD_STOP
+_ = EconomyVerdict.no_opinion
+_ = EconomyVerdict.indeterminate

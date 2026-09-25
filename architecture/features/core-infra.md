@@ -34,6 +34,7 @@
   - [Mirror Override](#mirror-override)
   - [Decision Log](#decision-log)
   - [Assert an Armed Reversal](#assert-an-armed-reversal)
+  - [The Gate Chain](#the-gate-chain)
 - [4. States (CDSL)](#4-states-cdsl)
   - [Project Installation State](#project-installation-state)
 - [5. Definitions of Done](#5-definitions-of-done)
@@ -762,6 +763,20 @@ Enables users to install Studio globally, initialize it in any project with sens
 4. [x] - `p1` - Name every mechanism in every refusal: an operator told "no reversal is armed" learns that something stopped and nothing about what to do, while one told about a worktree, a branch and a snapshot has a list to act on, and the first two usually take seconds - `inst-reversal-refusal`
 5. [x] - `p1` - Assert, never judge: take no description of the action, so the check cannot be tempted into deciding whether an action *looks* undoable — the behaviour this replaces, which classifies an option's visible action path. Treat unknown as refusal in every case, because a failed probe fires exactly when the environment is unusual and reading it as permission would arm nothing while allowing everything. Report rather than gate, leaving the caller to decide what a refusal means - `inst-reversal-assert`
 6. [x] - `p1` - Collapse `$HOME` out of every path this reports, through one owner shared with any other module that reports a path, and decide that a redaction happened by **checking the value returned** rather than by the call not raising — the ledger's redactor answers normally with the value unchanged when it cannot read the home directory, so a clean return is not evidence. Where the home directory cannot be read at all, report no path component at all — an opaque placeholder: returning the raw path truncated, or even only its final component, puts a username in the one field the guard exists to keep it out of, because without `$HOME` there is no way to tell the case where the path reported *is* the home directory, whose final component is itself the username. One owner because this was written twice, fixed once, and the unfixed copy kept leaking - `inst-redact-home`
+
+### The Gate Chain
+
+- [x] `p1` - **ID**: `cpt-studio-algo-core-infra-gate-chain`
+
+**Input**: A gate, its declared type, an ordered list of safety filters, and an ordered list of economy filters.
+
+**Output**: One of three outcomes — ask the user (stop, exactly as today), resolve autonomously carrying the ruling that answered the gate, or defer the gate as an open question.
+
+**Steps**:
+1. [x] - `p1` - Model the three outcomes — ask, resolve, defer — as one value that cannot be ill-formed: a resolve carries the ruling that answered the gate, an ask and a defer carry none, and a defer states why, all enforced at construction so a guard that only the named constructors honour is not relied upon - `inst-chain-outcome`
+2. [x] - `p1` - Give each class its own verdict vocabulary: a safety filter may only report clear, add-stop, or indeterminate, where indeterminate is read as a stop so the class fails closed; an economy filter may only report no-opinion, remove (carrying the ruling that justifies it), or indeterminate - `inst-chain-verdicts`
+3. [x] - `p1` - Define the two filter classes as the split that makes the safety argument structural rather than reviewed: one class may only add a stop, the other may only remove one, so a uniformly cautious set of filters that would compound into more questions than today cannot be built by accident - `inst-chain-filters`
+4. [x] - `p1` - Run safety first and treat its result as final: any safety filter that is not clear ends the chain at ask, and only with every safety filter clear does the ceiling apply — a blocking gate always asks, because the declared type is a ceiling and never a floor — and then economy run, where the first remove resolves the gate, an indeterminate defers it, and silence leaves the declared stop standing. With no filters registered, every gate asks, identical to today - `inst-chain-resolve`
 
 ## 4. States (CDSL)
 
