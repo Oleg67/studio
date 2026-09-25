@@ -235,6 +235,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 - [x] - `p1` - Content scoped extraction: hash-fence blocks, heading scopes, ID-definition scopes - `inst-scan-ids-get-content`
 - [x] - `p1` - File I/O utilities: safe text reader, text file iterator, relative path converter - `inst-scan-ids-file-utils`
 - [x] - `p1` - Wrapper function for `parse_cpt` identifier parser - `inst-parse-cpt-fn`
+- [x] - `p1` - One predicate for whether the scan classifies a line as a whole-line ID definition or standalone reference, shared by every caller that must step around ID lines - `inst-scanned-id-line`
 
 ### CPT Reference Scan
 

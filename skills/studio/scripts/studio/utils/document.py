@@ -128,6 +128,7 @@ def _build_id_hit(
     return hit
 
 
+# @cpt-begin:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-scanned-id-line
 def is_scanned_id_line(stripped: str) -> bool:
     """Whether the ID scan classifies *stripped* as a whole-line definition — bare or
     link-form — or a standalone reference.
@@ -141,6 +142,7 @@ def is_scanned_id_line(stripped: str) -> bool:
         or _ID_DEF_LINK_RE.match(stripped)
         or _ID_REF_RE.match(_normalize_reference_candidate(stripped))
     )
+# @cpt-end:cpt-studio-algo-traceability-validation-scan-ids:p1:inst-scanned-id-line
 
 
 def _normalize_reference_candidate(stripped: str) -> str:
