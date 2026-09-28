@@ -207,6 +207,17 @@ def test_contract_no_references_is_an_answer_not_a_failure() -> None:
     assert data["count"] == 0 and data["references"] == []
 
 
+def test_contract_include_code_is_a_no_op_with_artifact() -> None:
+    """Documented: `--include-code` is ignored, with no warning, when `--artifact`
+    narrows the scan — no code scan runs and no code counters appear."""
+    with TemporaryDirectory() as tmp:
+        data, mock_scan = _run_where_used_with_mocked_scan(
+            tmp, ["cpt-example-thing-x", "--artifact", "doc.md", "--include-code"])
+        mock_scan.assert_not_called()
+    assert "code_files_scanned" not in data
+    assert "code_files_skipped" not in data
+
+
 def test_contract_a_resolution_error_exits_1() -> None:
     with TemporaryDirectory() as tmp:
         rc, data = _where_used_rc(tmp, "", ["cpt-example-thing-x"], resolve_error="Artifact not found: x.md")

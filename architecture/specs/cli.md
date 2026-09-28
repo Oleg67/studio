@@ -456,8 +456,11 @@ cfs list-ids [--kind KIND] [--pattern PATTERN] [--system SYSTEM] [--format FORMA
 Find where an ID is defined.
 
 ```
-cfs where-defined --id <id>
+cfs where-defined <id> [--artifact PATH]
+cfs where-defined --id <id> [--artifact PATH]
 ```
+
+The ID is given positionally or with `--id`; `--artifact PATH` limits the search to one artifact.
 
 **Output** (JSON):
 ```json
@@ -482,7 +485,8 @@ cfs where-defined --id <id>
 Find where an ID is referenced.
 
 ```
-cfs where-used [--id] <id> [--artifact PATH] [--include-definitions] [--include-code]
+cfs where-used <id> [--artifact PATH] [--include-definitions] [--include-code]
+cfs where-used --id <id> [--artifact PATH] [--include-definitions] [--include-code]
 ```
 
 | Option | Description |
@@ -505,7 +509,7 @@ oversized, or unparsable".
 {
   "id": "cpt-studio-component-traceability-engine",
   "artifacts_scanned": 52,
-  "count": 23,
+  "count": 1,
   "references": [
     {
       "artifact": "/path/to/project/architecture/ADR/0011-cpt-studio-adr-structured-id-format-v1.md",

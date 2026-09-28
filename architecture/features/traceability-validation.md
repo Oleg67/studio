@@ -189,7 +189,8 @@ Catches structural and traceability issues that AI agents miss or hallucinate �
 **Error Scenarios**:
 - `where-defined` / `get-content` for an ID that is not defined in any artifact → not-found result with exit code 2
 - `where-used` / `list-ids` with nothing to report → empty result with exit code 0: no references and no matches are answers, not failures
-- Target cannot be resolved (no Studio project, empty ID, missing `--artifact`) → `ERROR` with exit code 1
+- Target cannot be resolved (no Studio project, an empty ID, or an `--artifact` path that does not exist) → `ERROR` with exit code 1, for all four commands
+- `get-content` with neither `--artifact` nor `--code` → `ERROR` with exit code 1; the other three treat `--artifact` as optional and scan every registered artifact without it
 
 **Steps**:
 1. [x] - `p1` - User invokes one of: `list-ids [--kind K] [--pattern P]`, `where-defined --id <id>`, `where-used --id <id>`, `get-content --id <id>` - `inst-user-query`
@@ -920,7 +921,7 @@ The system **MUST** scan code files for `@cpt-*` markers (scope markers and bloc
 
 - [x] `p1` - **ID**: `cpt-studio-dod-traceability-validation-queries`
 
-The system **MUST** provide CLI commands for navigating the ID graph: `list-ids [--kind K] [--pattern P]` (list definitions matching criteria), `where-defined --id <id>` (find definition location), `where-used --id <id>` (find all references), `get-content --id <id>` (extract content block). All commands **MUST** output JSON, scan all registered artifacts, and exit 1 when the target cannot be resolved. A lookup of one thing — `where-defined`, `get-content` — **MUST** exit 0 when found and 2 when not found. A query whose empty result is itself an answer — `where-used` (no references), `list-ids` (no matches) — **MUST** exit 0 either way.
+The system **MUST** provide CLI commands for navigating the ID graph: `list-ids [--kind K] [--pattern P]` (list definitions matching criteria), `where-defined --id <id>` (find definition location), `where-used --id <id>` (find all references), `get-content --id <id>` (extract content block). All commands **MUST** output JSON, scan all registered artifacts unless `--artifact` narrows the scope to one, and exit 1 when the target cannot be resolved. A lookup of one thing — `where-defined`, `get-content` — **MUST** exit 0 when found and 2 when not found. A query whose empty result is itself an answer — `where-used` (no references), `list-ids` (no matches) — **MUST** exit 0 either way.
 
 **Implements**:
 - `cpt-studio-flow-traceability-validation-query`
