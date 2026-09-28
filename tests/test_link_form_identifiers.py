@@ -87,6 +87,7 @@ def test_a_link_form_definition_is_neither_a_definition_nor_a_reference():
     "**ID**: [`{id}`](spec.md)",
     "`p1` - **ID**: [`{id}`](spec.md)",
     "- [x] `p1` - **ID**: [`{id}`](spec.md#login)",
+    "* [x] `p1` - **ID**: [`{id}`](spec.md)",
     # No target may escape the definition pattern: one the reference pattern rejects
     # would reach the inline scan and be misclassified as a reference to the very id
     # it means to declare, which is the defect this code removes.
@@ -102,6 +103,24 @@ def test_a_link_form_definition_is_neither_a_definition_nor_a_reference():
 def test_every_definition_shape_is_recognised_in_link_form(line):
     hits = scan_cpt_id_lines([line.format(id=TARGET)])
     assert [h["type"] for h in hits] == [LINK_FORM_DEFINITION]
+
+
+@pytest.mark.parametrize("prefix, checked, priority", [
+    ("- [x] `p1` - ", True, "p1"),
+    ("* [x] `p1` - ", True, "p1"),
+    ("- [ ] `p2` - ", False, "p2"),
+    ("`p1` - ", False, "p1"),
+    ("- [x] ", True, None),
+])
+def test_a_link_form_definition_keeps_the_checkbox_and_priority_of_its_bare_twin(prefix, checked, priority):
+    """`list-ids` passes the link-form hit through to its output, so its checkbox and
+    priority are user-visible. They are read exactly as the bare spelling's are."""
+    decoration = ("checked", "has_task", "has_priority", "priority")
+    (bare,) = scan_cpt_id_lines([f"{prefix}**ID**: `{TARGET}`"])
+    (link,) = scan_cpt_id_lines([f"{prefix}**ID**: [`{TARGET}`](spec.md)"])
+    assert (bare["type"], link["type"]) == ("definition", LINK_FORM_DEFINITION)
+    assert (link["checked"], link.get("priority")) == (checked, priority)
+    assert {k: link.get(k) for k in decoration} == {k: bare.get(k) for k in decoration}
 
 
 OTHER = "cpt-myapp-flow-logout"
