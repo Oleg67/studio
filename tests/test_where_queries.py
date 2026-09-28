@@ -646,6 +646,21 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(rc, 2)
         self.assertEqual(out, {"status": "NOT_FOUND", "id": "cpt-test-algo-a", "inst": "absent"})
 
+    def test_get_content_empty_inst_is_an_instruction_asked_for_not_an_omitted_option(self):
+        """`--inst ""` and `--inst inst-` both ask for the empty instruction, which no
+        marker has. A truthiness check once served the first block as FOUND for the first
+        spelling while the second was NOT_FOUND."""
+        with TemporaryDirectory() as td:
+            code = self._marked_code(Path(td))
+            answers = [
+                self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", inst])
+                for inst in ("", "inst-")
+            ]
+        self.assertEqual(answers, [
+            (2, {"status": "NOT_FOUND", "id": "cpt-test-algo-a", "inst": ""}),
+            (2, {"status": "NOT_FOUND", "id": "cpt-test-algo-a", "inst": "inst-"}),
+        ])
+
     def test_get_content_inst_accepts_the_prefixed_spelling(self):
         """The option's help once showed `inst-validate-input`, a spelling that could never
         match because the parser stores `validate-input`. Both spellings now select it."""

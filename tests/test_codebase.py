@@ -67,6 +67,31 @@ class TestScanRegisteredCodebaseReferences:
         assert hits[0]["artifact_type"] == "CODE"
         assert hits[0]["inst"] == "check-creds"
 
+    def test_code_records_are_exactly_the_documented_shape(self, tmp_path: Path):
+        """The record `list-ids` and `where-used` print for a code marker, through the real
+        scan rather than a mocked one: a scope marker keeps its own kind and has no `inst`;
+        a block marker's kind is the string `code`, never null, and its `inst` drops the
+        `inst-` prefix."""
+        code_dir = tmp_path / "src"
+        code_dir.mkdir()
+        impl = code_dir / "impl.py"
+        impl.write_text(
+            "# @cpt-algo:cpt-app-algo-x:p2\n"
+            "# @cpt-begin:cpt-app-algo-x:p2:inst-step\n"
+            "step = 1\n"
+            "# @cpt-end:cpt-app-algo-x:p2:inst-step\n"
+        )
+        ctx = _FakeCtx(tmp_path, [_FakeCodebaseEntry(code_dir, [".py"])])
+
+        hits, _, _ = scan_registered_codebase_references(ctx)
+
+        common = {"id": "cpt-app-algo-x", "type": "code_reference", "artifact_type": "CODE",
+                  "artifact": str(impl), "phase": 2}
+        assert sorted(hits, key=lambda hit: hit["line"]) == [
+            {**common, "line": 1, "kind": "algo", "marker_type": "scope"},
+            {**common, "line": 2, "kind": "code", "marker_type": "block", "inst": "step"},
+        ]
+
     def test_default_ignored_directories_are_skipped_without_explicit_ignore(self, tmp_path: Path):
         code_dir = tmp_path / "src"
         code_dir.mkdir()

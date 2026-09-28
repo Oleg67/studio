@@ -29,8 +29,9 @@ def _emit_code_content(args: argparse.Namespace) -> int:
         return 1
 
     # An instruction the ID has no block for is not found — never the ID's first block
-    # reported under the name that was asked for.
-    content = cf.get_by_inst(args.id, args.inst) if args.inst else cf.get(args.id)
+    # reported under the name that was asked for. That includes an empty `--inst`: it
+    # asks for an instruction, and no marker has an empty one.
+    content = cf.get_by_inst(args.id, args.inst) if args.inst is not None else cf.get(args.id)
     if content is None:
         ui.result({"status": "NOT_FOUND", "id": args.id, "inst": args.inst})
         return 2

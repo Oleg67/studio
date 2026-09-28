@@ -464,8 +464,11 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   artifact; `--all` shows every code record. A further definition of the
   same ID is not dropped: it is listed on that entry as `duplicate_definitions`, and a
   warning naming both locations goes to stderr. This command lists; it does not judge.
-  A duplicate definition is a `duplicate-definition` error in `cfs validate`, which is
-  the gate.
+  `cfs validate` is the gate, and it is narrower: it reports `duplicate-definition` at
+  each place only when the definitions are in different files, and only among the
+  artifacts it checks — those of a system bound to an installed kit. A second definition
+  in the same file, or a duplicate in a kit-less system, is listed here and passes
+  `validate`.
 - `priority` appears when the line carries one. `list-ids` does not emit `source` —
   unlike `where-used` and `where-defined`, which add it for an artifact that belongs to a
   workspace source.
@@ -480,8 +483,8 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 - `--include-code` is **not** scoped by `--source`: the code scan always covers every
   registered codebase path. So `--source X --include-code` returns code records from the
   whole project, and for a source that is unknown or unreachable it returns *only* those —
-  `artifacts_scanned: 0` with a non-empty `ids`. To query one source, omit
-  `--include-code`.
+  `artifacts_scanned: 0`, with the code records in `ids` if any marker matched. To query
+  one source, omit `--include-code`.
 
 No match is an answer: `count` is `0`, `ids` is `[]`, and the exit code is `0`. An
 `--artifact` that does not exist, or no Studio project, prints
@@ -661,14 +664,15 @@ line — and `inst` is `null`. With `--inst`, it is that instruction's block **o
 ID**: the name is accepted with or without its `inst-` prefix, and only the ID's own
 blocks are searched, because instruction names repeat across IDs in one file. An
 `--inst` the ID has no block for is `NOT_FOUND` with exit 2 — never another block
-reported under the name that was asked for. `inst` echoes the value as given.
+reported under the name that was asked for. That includes an empty `--inst ""`, which is
+a request for an instruction, not an omitted option. `inst` echoes the value as given.
 
 Several blocks for one ID are the norm, not a conflict: an algorithm's steps are
 `@cpt-begin` blocks that share its ID and differ in instruction id, and `--inst` is how
-one is chosen. This is not `where-defined`'s `AMBIGUOUS`, which is an ID *defined* in more
-than one artifact. With `--artifact`, an artifact that defines the ID twice yields the
-first definition's block; that duplicate is a `duplicate-definition` error in
-`cfs validate`, which is where it is judged. An ID with no content block in the given file
+one is chosen. This is not `where-defined`'s `AMBIGUOUS`, which is an ID *defined* more
+than once. With `--artifact`, an artifact that defines the ID twice yields the first
+definition's block; `cfs validate` does not report that duplicate, because it flags only
+definitions in different files (see `list-ids`). An ID with no content block in the given file
 returns `{"status": "NOT_FOUND", "id": "...", "inst": ...}` (`--code`) or
 `{"status": "NOT_FOUND", "id": "..."}` (`--artifact`). Neither
 `--artifact` nor `--code`, a path that does not exist, `--artifact` outside a Studio project, or a code file whose markers do
