@@ -464,11 +464,13 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   artifact; `--all` shows every code record. A further definition of the
   same ID is not dropped: it is listed on that entry as `duplicate_definitions`, and a
   warning naming both locations goes to stderr. This command lists; it does not judge.
-  `cfs validate` is the gate, and it is narrower: it reports `duplicate-definition` at
-  each place only when the definitions are in different files, and only among the
-  artifacts it checks — those of a system bound to an installed kit. A second definition
-  in the same file, or a duplicate in a kit-less system, is listed here and passes
-  `validate`.
+  `cfs validate` is the gate, and it is narrower. It compares every registered artifact
+  but reports `duplicate-definition` only on the ones it checks — those of a system
+  bound to an installed kit — and only when another definition is in a different file.
+  So a duplicate split between a checked artifact and a kit-less one fails the checked
+  one, naming the other; the kit-less side gets no finding. A second definition in the
+  same file, or a duplicate whose definitions all sit in kit-less systems, is listed
+  here and passes `validate`.
 - `priority` appears when the line carries one. `list-ids` does not emit `source` —
   unlike `where-used` and `where-defined`, which add it for an artifact that belongs to a
   workspace source.

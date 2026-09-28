@@ -160,9 +160,12 @@ def test_list_ids_default_surfaces_duplicate_definitions_end_to_end() -> None:
             os.chdir(cwd)
 
 
-def _duplicate_definition_project(root: Path, *, bound_to_kit: bool, same_file: bool = False) -> None:
+def _duplicate_definition_project(
+    root: Path, *, bound_to_kit: bool, same_file: bool = False, split: bool = False,
+) -> None:
     """Two registered artifacts that both define `cpt-test-item-1` — or, with *same_file*,
-    `a.md` defining it twice (lines 1 and 3) and `b.md` defining something else."""
+    `a.md` defining it twice (lines 1 and 3) and `b.md` defining something else. With
+    *split*, `b.md` belongs to a second system that has no kit."""
     from studio.utils import toml_utils
     from _test_helpers import write_constraints_toml
 
@@ -188,6 +191,10 @@ def _duplicate_definition_project(root: Path, *, bound_to_kit: bool, same_file: 
         "name": "Test", "slug": "test",
         "artifacts": [{"path": "docs/a.md", "kind": "PRD"}, {"path": "docs/b.md", "kind": "PRD"}],
     }
+    systems = [system]
+    if split:
+        system["artifacts"] = system["artifacts"][:1]
+        systems.append({"name": "Loose", "slug": "loose", "artifacts": [{"path": "docs/b.md", "kind": "PRD"}]})
     kits: dict = {}
     if bound_to_kit:
         kits = {"sdlc": {"format": "CFS", "path": "kits/sdlc"}}
@@ -203,7 +210,7 @@ def _duplicate_definition_project(root: Path, *, bound_to_kit: bool, same_file: 
             "PRD": {"identifiers": {"item": {"template": "cpt-{system}-item-{slug}"}}},
         })
     toml_utils.dump(
-        {"version": "1.0", "project_root": "..", "kits": kits, "systems": [system]},
+        {"version": "1.0", "project_root": "..", "kits": kits, "systems": systems},
         config / "artifacts.toml",
     )
 
@@ -270,6 +277,24 @@ def test_duplicate_definitions_validate_does_not_judge_are_still_listed(
     assert (rc_validate, report["status"], report["error_count"], report["artifacts_validated"]) == (
         0, "PASS", 0, artifacts_validated,
     )
+
+
+def test_duplicate_split_across_a_kit_boundary_fails_only_the_checked_side() -> None:
+    """`validate` compares every registered artifact but reports only on the ones it
+    checks. One definition in a kit-bound system and one in a kit-less system: the
+    kit-bound artifact fails, naming the other; the kit-less one gets no finding."""
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir).resolve()
+        _duplicate_definition_project(root, bound_to_kit=True, split=True)
+        a, b = root / "docs" / "a.md", root / "docs" / "b.md"
+        _, listed, _ = _run_main(root, ["list-ids"])
+        rc_validate, report, _ = _run_main(root, ["--json", "validate"])
+
+    assert listed["ids"][0]["duplicate_definitions"] == [{"artifact": str(b), "line": 1}]
+    assert (rc_validate, report["status"]) == (2, "FAIL")
+    assert [(e["code"], e["location"], e["message"]) for e in report["errors"]] == [
+        ("duplicate-definition", f"{a}:1", f"Duplicate definition of `cpt-test-item-1` — also defined in: {b}"),
+    ]
 
 
 def test_list_ids_include_code_works_with_no_registered_artifacts() -> None:
