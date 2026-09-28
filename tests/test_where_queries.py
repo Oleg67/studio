@@ -21,7 +21,7 @@ from studio.commands.list_ids import cmd_list_ids
 from studio.commands.where_defined import cmd_where_defined, _human_where_defined
 from studio.commands.where_used import cmd_where_used, _human_where_used
 from studio.utils.context import StudioContext as CypilotContext, set_context
-from studio.utils.ui import set_json_mode
+from studio.utils.ui import is_json_mode, set_json_mode
 from studio.cli import main
 
 
@@ -831,18 +831,36 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(rc, 0)
         self.assertEqual([(h["id"], h["type"]) for h in out["ids"]], [("cpt-test-item-refonly", "reference")])
 
-    def test_both_id_forms_the_positional_wins_and_the_json_shows_it(self):
-        """The warning goes to the log; the JSON carries only the id that was used."""
-        with TemporaryDirectory() as td:
-            root = Path(td)
-            _setup_project(root)
-            _with_context(root)
-            rc, out = self._run(cmd_where_used, ["cpt-test-item-1", "--id", "cpt-test-item-nowhere"])
-            rc_empty, fallthrough = self._run(cmd_where_used, ["", "--id", "cpt-test-item-1"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(out["id"], "cpt-test-item-1")
-        self.assertEqual(rc_empty, 0)
-        self.assertEqual(fallthrough["id"], "cpt-test-item-1")
+    @staticmethod
+    def _run_main(root: Path, argv):
+        """Through the real entry point, which routes warnings to stderr:
+        (exit code, parsed JSON, stderr text)."""
+        cwd, json_was = os.getcwd(), is_json_mode()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            os.chdir(root)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                rc = main(["--json", *argv])
+        finally:
+            set_json_mode(json_was)
+            os.chdir(cwd)
+        return rc, json.loads(stdout.getvalue()), stderr.getvalue()
+
+    def test_both_id_forms_the_positional_wins_and_only_stderr_says_so(self):
+        """For both commands: given both forms the positional wins, and the warning goes to
+        stderr, never into the JSON. An empty positional falls through to `--id`."""
+        warning = "Both positional ID and --id given; using positional"
+        for command in ("where-used", "where-defined"):
+            with self.subTest(command=command), TemporaryDirectory() as td:
+                root = Path(td)
+                _setup_project(root)
+                rc, out, stderr = self._run_main(root, [command, "cpt-test-item-1", "--id", "cpt-test-item-nowhere"])
+                rc_empty, fallthrough, stderr_empty = self._run_main(root, [command, "", "--id", "cpt-test-item-1"])
+                self.assertEqual((rc, out["id"]), (0, "cpt-test-item-1"))
+                self.assertIn(warning, stderr.splitlines())
+                self.assertNotIn("positional", json.dumps(out))
+                self.assertEqual((rc_empty, fallthrough["id"]), (0, "cpt-test-item-1"))
+                self.assertNotIn(warning, stderr_empty)
 
     def test_get_content_not_found_is_scoped_to_the_file_given(self):
         """`--artifact`: defined elsewhere is still not found here. `--code`: artifact
