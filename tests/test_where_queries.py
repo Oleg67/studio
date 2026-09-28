@@ -747,6 +747,80 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(rc_both, 0)
         self.assertEqual((both["artifacts_scanned"], both["count"]), (1, 1))
 
+    def test_list_ids_code_records_and_the_dedupe_that_hides_them(self):
+        """Documented: code hits are `type: code_reference` with `marker_type`; without
+        `--all` one survives only for an ID no artifact mentions."""
+        code_hits = [
+            {"id": "cpt-test-item-1", "kind": "item", "type": "code_reference", "artifact_type": "CODE",
+             "line": 3, "artifact": "/repo/src/a.py", "marker_type": "block", "phase": 1, "inst": "one"},
+            {"id": "cpt-test-only-in-code", "kind": "algo", "type": "code_reference", "artifact_type": "CODE",
+             "line": 1, "artifact": "/repo/src/b.py", "marker_type": "scope", "phase": 1},
+        ]
+        rc, deduped, _ = self._list_ids_with_code_scan(["--include-code"], (code_hits, 2, 0))
+        rc_all, everything, _ = self._list_ids_with_code_scan(["--include-code", "--all"], (code_hits, 2, 0))
+        self.assertEqual((rc, rc_all), (0, 0))
+        by_id = {h["id"]: h for h in deduped["ids"]}
+        self.assertEqual(by_id["cpt-test-item-1"]["type"], "definition")  # the artifact's definition wins
+        self.assertEqual(by_id["cpt-test-only-in-code"]["type"], "code_reference")
+        self.assertEqual(by_id["cpt-test-only-in-code"]["marker_type"], "scope")
+        self.assertEqual(sum(h["type"] == "code_reference" for h in everything["ids"]), 2)
+
+    def test_list_ids_an_artifact_reference_outranks_a_code_record(self):
+        """The order-dependent case the definition-wins rule does not cover: an ID an
+        artifact only *references* and code also marks. Artifacts are read first, so
+        without `--all` the artifact's reference is the entry, not the code record."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            prd = root / "architecture" / "PRD.md"
+            prd.write_text(prd.read_text(encoding="utf-8") + "\n`cpt-test-item-refonly`\n", encoding="utf-8")
+            _with_context(root)
+            code_hit = {"id": "cpt-test-item-refonly", "kind": "item", "type": "code_reference",
+                        "artifact_type": "CODE", "line": 1, "artifact": "/repo/src/c.py", "marker_type": "scope"}
+            with patch("studio.commands.list_ids.scan_registered_codebase_references",
+                       return_value=([code_hit], 1, 0)):
+                rc, out = self._run(cmd_list_ids, ["--include-code", "--pattern", "refonly"])
+        self.assertEqual(rc, 0)
+        self.assertEqual([(h["id"], h["type"]) for h in out["ids"]], [("cpt-test-item-refonly", "reference")])
+
+    def test_both_id_forms_the_positional_wins_and_the_json_shows_it(self):
+        """The warning goes to the log; the JSON carries only the id that was used."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, out = self._run(cmd_where_used, ["cpt-test-item-1", "--id", "cpt-test-item-nowhere"])
+            rc_empty, fallthrough = self._run(cmd_where_used, ["", "--id", "cpt-test-item-1"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["id"], "cpt-test-item-1")
+        self.assertEqual(rc_empty, 0)
+        self.assertEqual(fallthrough["id"], "cpt-test-item-1")
+
+    def test_get_content_not_found_is_scoped_to_the_file_given(self):
+        """`--artifact`: defined elsewhere is still not found here. `--code`: artifact
+        definitions are never consulted, so a code-only ID is found."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            other = root / "architecture" / "OTHER.md"
+            other.write_text("# Other\n\nno definitions here\n", encoding="utf-8")
+            only_in_code = root / "only.py"
+            only_in_code.write_text(
+                "# @cpt-algo:cpt-test-only-in-code:p1\n"
+                "def f():\n"
+                "    # @cpt-begin:cpt-test-only-in-code:p1:inst-one\n"
+                "    one = 1\n"
+                "    # @cpt-end:cpt-test-only-in-code:p1:inst-one\n",
+                encoding="utf-8",
+            )
+            with patch("studio.commands.get_content._resolve_registered_artifact_scan",
+                       return_value=(object(), [(other, "PRD")])):
+                rc_art, from_other = self._run(cmd_get_content, ["--id", "cpt-test-item-1", "--artifact", str(other)])
+            rc_code, from_code = self._run(cmd_get_content, ["--id", "cpt-test-only-in-code", "--code", str(only_in_code)])
+        self.assertEqual((rc_art, from_other["status"]), (2, "NOT_FOUND"))  # defined in PRD.md, not in OTHER.md
+        self.assertEqual((rc_code, from_code["status"]), (0, "FOUND"))      # in no artifact at all
+
     def test_list_ids_code_files_skipped_appears_only_when_nonzero(self):
         rc, clean, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 0))
         rc2, skipped, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 2))

@@ -187,7 +187,8 @@ Catches structural and traceability issues that AI agents miss or hallucinate �
 - User runs `cfs get-content --id <id> --artifact <path>` (or `--code <path>`) → content block under the ID heading, or the marked code block, returned
 
 **Error Scenarios**:
-- `where-defined` / `get-content` for an ID that is not defined in any artifact → not-found result with exit code 2
+- `where-defined` for an ID not defined in any scanned artifact → not-found result with exit code 2
+- `get-content` for an ID with no content in the one file it is given → not-found result with exit code 2. The scope is that file alone: with `--artifact`, an ID defined in another artifact is still not found; with `--code`, artifact definitions are never consulted, so an ID that exists only as a code marker is found and one defined in an artifact but not marked in the file is not
 - `where-used` / `list-ids` with nothing to report → empty result with exit code 0: no references and no matches are answers, not failures
 - Target cannot be resolved → `ERROR` with exit code 1. No Studio project, or an `--artifact` path that does not exist, applies to `list-ids`, `where-defined`, `where-used` and `get-content --artifact`; `get-content --code` reads the file directly and needs no project. An empty ID is an error for `where-defined` and `where-used`; `get-content` reports it as not found (exit 2), and `list-ids` takes no ID.
 - `get-content` with neither `--artifact` nor `--code` → `ERROR` with exit code 1; the other three treat `--artifact` as optional and scan every registered artifact without it

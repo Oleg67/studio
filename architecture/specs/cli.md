@@ -455,8 +455,12 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 
 - `count` equals the length of `ids`. `kind` is inferred from the ID's slug against the
   registered systems' known kinds, or `null` when it cannot be.
-- `type` is `definition` or `reference`. Without `--all` each ID appears once — its
-  definition when one exists, otherwise its first occurrence. A further definition of the
+- `type` is `definition`, `reference`, or — with `--include-code` — `code_reference`. A
+  code record also carries `marker_type` (`scope`, `block`, …), `phase`, and `inst` when
+  the marker names one, and its `kind` is the marker's. Without `--all` each ID appears
+  once — its definition when one exists, otherwise its first occurrence. Artifacts are
+  read before code, so a code record is listed only for an ID that appears in no
+  artifact; `--all` shows every code record. A further definition of the
   same ID is not dropped: it is listed on that entry as `duplicate_definitions`, and a
   warning naming both locations goes to stderr. This command lists; it does not judge.
   A duplicate definition is a `duplicate-definition` error in `cfs validate`, which is
@@ -490,7 +494,7 @@ cfs where-defined <id> [--artifact PATH]
 cfs where-defined --id <id> [--artifact PATH]
 ```
 
-The ID is given positionally or with `--id`; `--artifact PATH` limits the search to one artifact.
+The ID is given positionally or with `--id`; given both, the positional wins, with a warning on stderr, exactly as under `where-used`. `--artifact PATH` limits the search to one artifact.
 
 **Output** (JSON):
 ```json
@@ -535,7 +539,7 @@ cfs where-used --id <id> [--artifact PATH] [--include-definitions] [--include-co
 
 | Option | Description |
 |--------|-------------|
-| `<id>` / `--id <id>` | The ID to look up, positionally or by flag |
+| `<id>` / `--id <id>` | The ID to look up, positionally or by flag. Given both, the positional wins and a warning goes to stderr, not into the JSON; an empty positional falls through to `--id`. |
 | `--artifact PATH` | Scan only this artifact |
 | `--include-definitions` | Also list the ID's definitions, typed `definition` |
 | `--include-code` | Also scan registered codebase paths for `@cpt-*` markers (below) |
@@ -569,8 +573,8 @@ oversized, or unparsable".
 
 - `count` equals the length of `references`.
 - `artifact` is an absolute path. `artifact_type` is the artifact's kind, or `CODE` for a code reference.
-- `type` is `reference`, `definition` (only with `--include-definitions`), or the code marker's type.
-- `kind` is `null` for artifact references; code references carry their marker's kind.
+- `type` is `reference`, `definition` (only with `--include-definitions`), or `code_reference` for a code marker (only with `--include-code`).
+- `kind` is `null` for artifact references. A code reference carries its marker's kind, or `code` when the marker names none. The marker's own category — scope, block — is not in `where-used`'s output; `list-ids --include-code --all` shows it as `marker_type`.
 - `checked` is the reference's task state; `source` is added when the artifact belongs to a workspace source.
 - `--include-code` adds `code_files_scanned` and, when non-zero, `code_files_skipped`.
 
