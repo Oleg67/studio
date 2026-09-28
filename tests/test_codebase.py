@@ -411,13 +411,16 @@ class TestCodeFileInterface:
         code_file.write_text(code)
 
         cf, _ = CodeFile.from_path(code_file)
-        content = cf.get_by_inst("validate")
+        content = cf.get_by_inst("cpt-myapp-feature-auth-flow-login", "validate")
         assert content is not None
         assert "def validate" in content
 
-        content2 = cf.get_by_inst("authenticate")
+        content2 = cf.get_by_inst("cpt-myapp-feature-auth-flow-login", "inst-authenticate")
         assert content2 is not None
         assert "def authenticate" in content2
+
+        # The instruction exists, but not for this ID.
+        assert cf.get_by_inst("cpt-myapp-feature-auth-flow-other", "validate") is None
 
 
 class TestCrossValidation:
@@ -717,7 +720,7 @@ class TestCodeFileGetScopeMarker:
         code_file.write_text(code)
 
         cf, _ = CodeFile.from_path(code_file)
-        content = cf.get_by_inst("nonexistent")
+        content = cf.get_by_inst("cpt-myapp-any", "nonexistent")
         assert content is None
 
 

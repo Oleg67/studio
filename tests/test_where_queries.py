@@ -637,26 +637,47 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(second["inst"], "two")               # the bare id selects the block
         self.assertEqual(second["text"].strip(), "two = 2")
 
-    def test_get_content_unknown_inst_falls_back_to_the_first_block_but_echoes_the_request(self):
-        """Documented as a quirk: check `text`, not `inst`, to know what came back."""
+    def test_get_content_unknown_inst_is_not_found_never_another_block(self):
+        """Before the fix an unmatched `--inst` returned the ID's first block as FOUND,
+        under the name that was asked for."""
         with TemporaryDirectory() as td:
             code = self._marked_code(Path(td))
             rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "absent"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(out["inst"], "absent")
-        self.assertEqual(out["text"].strip(), "one = 1")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, {"status": "NOT_FOUND", "id": "cpt-test-algo-a", "inst": "absent"})
 
-    def test_get_content_prefixed_inst_never_matches_and_falls_back(self):
-        """The marker parser stores `inst-two` as `two`, so the spelling the option's own
-        help text suggests is one the lookup can never match: it falls back to the first
-        block while `inst` echoes the request. Documented as the trap it is; when the
-        command learns to strip the prefix, this test and the spec change together."""
+    def test_get_content_inst_accepts_the_prefixed_spelling(self):
+        """The option's help once showed `inst-validate-input`, a spelling that could never
+        match because the parser stores `validate-input`. Both spellings now select it."""
         with TemporaryDirectory() as td:
             code = self._marked_code(Path(td))
-            rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "inst-two"])
+            rc, prefixed = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "inst-two"])
+            _, bare = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "two"])
         self.assertEqual(rc, 0)
-        self.assertEqual(out["inst"], "inst-two")
-        self.assertEqual(out["text"].strip(), "one = 1")  # not "two = 2"
+        self.assertEqual(prefixed["inst"], "inst-two")  # echoed as given
+        self.assertEqual(prefixed["text"].strip(), "two = 2")
+        self.assertEqual(prefixed["text"], bare["text"])
+
+    def test_get_content_inst_is_looked_up_among_this_ids_blocks_only(self):
+        """Instruction names repeat across IDs in one file — `document.py` has an
+        `inst-read-file` in two algorithms. The lookup used to take the first block with
+        that name, whichever ID it belonged to."""
+        with TemporaryDirectory() as td:
+            code = Path(td) / "two_algos.py"
+            code.write_text(
+                "# @cpt-begin:cpt-test-algo-first:p1:inst-read\n"
+                "first_read = 1\n"
+                "# @cpt-end:cpt-test-algo-first:p1:inst-read\n"
+                "# @cpt-begin:cpt-test-algo-second:p1:inst-read\n"
+                "second_read = 2\n"
+                "# @cpt-end:cpt-test-algo-second:p1:inst-read\n",
+                encoding="utf-8",
+            )
+            rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-second", "--code", str(code), "--inst", "read"])
+            rc_other, other = self._run(cmd_get_content, ["--id", "cpt-test-algo-third", "--code", str(code), "--inst", "read"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["text"].strip(), "second_read = 2")
+        self.assertEqual((rc_other, other["status"]), (2, "NOT_FOUND"))  # the name exists, but not for this ID
 
     def test_get_content_code_wins_when_both_paths_are_given(self):
         """The id is defined in the registered artifact and absent from the code file;
@@ -684,7 +705,7 @@ class TestDocumentedContracts(_ContextTestBase):
                 "--artifact", str(root / "architecture" / "PRD.md"),
                 "--inst", "inst-anything",
             ])
-        self.assertNotEqual(out["status"], "ERROR")
+        self.assertEqual((rc, out["status"]), (0, "FOUND"))  # the lookup still succeeds
         self.assertNotIn("inst", out)  # the artifact branch never saw the flag
 
     def test_get_content_neither_path_is_an_error(self):
@@ -713,10 +734,15 @@ class TestDocumentedContracts(_ContextTestBase):
             try:
                 os.chdir(outside)
                 rc_code, from_code = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code)])
+                rc_miss, missing = self._run(cmd_get_content, ["--id", "cpt-test-algo-absent", "--code", str(code)])
                 rc_art, from_artifact = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--artifact", str(doc)])
             finally:
                 os.chdir(cwd)
         self.assertEqual((rc_code, from_code["status"]), (0, "FOUND"))
+        self.assertEqual(from_code["text"], "    one = 1")  # the exact block, not just a status
+        # No project, and an ID the file does not mark: not-found from the file alone,
+        # with no fallback to any artifact index.
+        self.assertEqual((rc_miss, missing), (2, {"status": "NOT_FOUND", "id": "cpt-test-algo-absent", "inst": None}))
         self.assertEqual((rc_art, from_artifact["status"]), (1, "ERROR"))
         self.assertIn("not initialized", from_artifact["message"])
 
@@ -763,7 +789,14 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(by_id["cpt-test-item-1"]["type"], "definition")  # the artifact's definition wins
         self.assertEqual(by_id["cpt-test-only-in-code"]["type"], "code_reference")
         self.assertEqual(by_id["cpt-test-only-in-code"]["marker_type"], "scope")
-        self.assertEqual(sum(h["type"] == "code_reference" for h in everything["ids"]), 2)
+        # `--all`: the exact occurrence set — the artifact's definition as well as both
+        # code records — not just a count of one type, which would miss a dropped record.
+        self.assertEqual(
+            sorted((h["id"], h["type"], h["artifact_type"]) for h in everything["ids"]),
+            [("cpt-test-item-1", "code_reference", "CODE"),
+             ("cpt-test-item-1", "definition", "PRD"),
+             ("cpt-test-only-in-code", "code_reference", "CODE")],
+        )
 
     def test_list_ids_an_artifact_reference_outranks_a_code_record(self):
         """The order-dependent case the definition-wins rule does not cover: an ID an
@@ -799,12 +832,20 @@ class TestDocumentedContracts(_ContextTestBase):
     def test_get_content_not_found_is_scoped_to_the_file_given(self):
         """`--artifact`: defined elsewhere is still not found here. `--code`: artifact
         definitions are never consulted, so a code-only ID is found."""
+        from studio.utils import toml_utils
+
         with TemporaryDirectory() as td:
             root = Path(td)
-            _setup_project(root)
-            _with_context(root)
+            adapter = _setup_project(root)
             other = root / "architecture" / "OTHER.md"
             other.write_text("# Other\n\nno definitions here\n", encoding="utf-8")
+            # Register OTHER.md for real, so the lookup goes through the registry rather
+            # than a patched resolver.
+            registry = adapter / "config" / "artifacts.toml"
+            data = toml_utils.load(registry)
+            data["systems"][0]["artifacts"].append({"path": "architecture/OTHER.md", "kind": "PRD"})
+            toml_utils.dump(data, registry)
+            _with_context(root)
             only_in_code = root / "only.py"
             only_in_code.write_text(
                 "# @cpt-algo:cpt-test-only-in-code:p1\n"
@@ -814,12 +855,11 @@ class TestDocumentedContracts(_ContextTestBase):
                 "    # @cpt-end:cpt-test-only-in-code:p1:inst-one\n",
                 encoding="utf-8",
             )
-            with patch("studio.commands.get_content._resolve_registered_artifact_scan",
-                       return_value=(object(), [(other, "PRD")])):
-                rc_art, from_other = self._run(cmd_get_content, ["--id", "cpt-test-item-1", "--artifact", str(other)])
+            rc_art, from_other = self._run(cmd_get_content, ["--id", "cpt-test-item-1", "--artifact", str(other)])
             rc_code, from_code = self._run(cmd_get_content, ["--id", "cpt-test-only-in-code", "--code", str(only_in_code)])
-        self.assertEqual((rc_art, from_other["status"]), (2, "NOT_FOUND"))  # defined in PRD.md, not in OTHER.md
-        self.assertEqual((rc_code, from_code["status"]), (0, "FOUND"))      # in no artifact at all
+        # Defined in PRD.md, not in OTHER.md: the exact documented payload.
+        self.assertEqual((rc_art, from_other), (2, {"status": "NOT_FOUND", "id": "cpt-test-item-1"}))
+        self.assertEqual((rc_code, from_code["status"]), (0, "FOUND"))  # in no artifact at all
 
     def test_list_ids_code_files_skipped_appears_only_when_nonzero(self):
         rc, clean, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 0))

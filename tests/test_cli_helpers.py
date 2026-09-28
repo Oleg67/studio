@@ -102,13 +102,15 @@ class TestReadTextSafe(unittest.TestCase):
             p.write_bytes(b"a\x00b")
             self.assertIsNone(read_text_safe(p))
 
-    def test_read_text_safe_invalid_utf8_ignores(self):
+    def test_read_text_safe_invalid_utf8_replaces_rather_than_drops(self):
+        """Replaced with U+FFFD, not deleted: deletion splices the text on either side,
+        which inside an ID produces a different, valid-looking ID."""
         with TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / "bad.txt"
-            p.write_bytes(b"hi\xff\xfe")
+            p.write_bytes(b"hi\xff\xfethere")
             lines = read_text_safe(p)
             self.assertIsNotNone(lines)
-            self.assertTrue(any("hi" in x for x in lines or []))
+            self.assertEqual(lines, ["hi��there"])
 
     def test_read_text_safe_normalizes_crlf_when_linesep_differs(self):
         import os

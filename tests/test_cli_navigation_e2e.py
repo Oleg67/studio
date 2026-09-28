@@ -10,6 +10,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scripts"))
 
@@ -548,6 +549,20 @@ class TestCLINavigationE2E(unittest.TestCase):
             payload = json.loads(stdout)
             self.assertEqual(payload["artifacts_scanned"], 1)
             self.assertEqual([item["id"] for item in payload["ids"]], ["cpt-docs-item-home"])
+
+            # Documented exception: `--include-code` is not scoped by `--source`. With an
+            # unknown source there are no artifacts, yet the project's code hits still come
+            # back. This pins the disclosure; scoping the code scan would change both.
+            code_hit = {"id": "cpt-anywhere-algo-x", "kind": "algo", "type": "code_reference",
+                        "artifact_type": "CODE", "line": 1, "artifact": "/repo/src/x.py", "marker_type": "scope"}
+            with patch("studio.commands.list_ids.scan_registered_codebase_references",
+                       return_value=([code_hit], 1, 0)):
+                exit_code, stdout, _ = _run_main(
+                    ["--json", "list-ids", "--source", "no-such-source", "--include-code"], cwd=workspace_root)
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["artifacts_scanned"], 0)
+            self.assertEqual([item["id"] for item in payload["ids"]], ["cpt-anywhere-algo-x"])
 
 if __name__ == "__main__":
     unittest.main()

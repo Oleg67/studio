@@ -429,9 +429,9 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 | `--artifact PATH` | Scan only this artifact |
 | `--all` | List every occurrence; without it, one entry per ID |
 | `--include-code` | Also scan registered codebase paths for `@cpt-*` markers |
-| `--source SOURCE` | Scan only this workspace source's registered artifacts. Returns an error outside workspace mode; a source that is unknown, or not reachable on disk, returns an empty result with exit 0. Ignored when `--artifact` is given. |
+| `--source SOURCE` | Scan only this workspace source's registered artifacts. Returns an error outside workspace mode; a source that is unknown, or not reachable on disk, yields no artifacts and exit 0. Ignored when `--artifact` is given. Does not scope `--include-code`: see below. |
 
-> Earlier revisions of this section listed `--system` and `--format`. Neither exists — JSON is the only output — and they are removed here rather than left describing a surface that does not exist.
+> Earlier revisions of this section listed `--system` and `--format`. Neither exists — JSON is the only output — and they are removed here rather than left describing a surface that does not exist. They also described `--pattern` as a glob or regex. It has only ever been a substring match (a regex with `--regex`): `--pattern 'cpt-studio-fr-*'` matches the literal `*` and finds nothing.
 
 **Output** (JSON):
 ```json
@@ -457,7 +457,8 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   registered systems' known kinds, or `null` when it cannot be.
 - `type` is `definition`, `reference`, or — with `--include-code` — `code_reference`. A
   code record also carries `marker_type` (`scope`, `block`, …), `phase`, and `inst` when
-  the marker names one, and its `kind` is the marker's. Without `--all` each ID appears
+  the marker names one, and its `kind` is the marker's, or the string `code` when the
+  marker names none — not `null`. Without `--all` each ID appears
   once — its definition when one exists, otherwise its first occurrence. Artifacts are
   read before code, so a code record is listed only for an ID that appears in no
   artifact; `--all` shows every code record. A further definition of the
@@ -465,7 +466,8 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   warning naming both locations goes to stderr. This command lists; it does not judge.
   A duplicate definition is a `duplicate-definition` error in `cfs validate`, which is
   the gate.
-- `priority` appears when the line carries one; `source` when the artifact belongs to a
+- `priority` appears when the line carries one. `list-ids` does not emit `source` —
+  unlike `where-used` and `where-defined`, which add it for an artifact that belongs to a
   workspace source.
 - `--include-code` adds `code_files_scanned`, and `code_files_skipped` when it is
   non-zero — the same counters, with the same meaning, as under `where-used`: a skipped
@@ -475,6 +477,11 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   there can mean "no code scan ran" as well as "no files"; `code_files_skipped` never
   appears in that case. `where-used` omits both counters under `--artifact`; the two
   commands differ here.
+- `--include-code` is **not** scoped by `--source`: the code scan always covers every
+  registered codebase path. So `--source X --include-code` returns code records from the
+  whole project, and for a source that is unknown or unreachable it returns *only* those —
+  `artifacts_scanned: 0` with a non-empty `ids`. To query one source, omit
+  `--include-code`.
 
 No match is an answer: `count` is `0`, `ids` is `[]`, and the exit code is `0`. An
 `--artifact` that does not exist, or no Studio project, prints
@@ -587,9 +594,12 @@ One limitation is disclosed rather than signalled. A registered artifact that ca
 read — permissions, a file that vanished after registration — is skipped: a warning
 names it on stderr, its references are absent from the result, and nothing in the JSON
 or the exit code records the skip; `artifacts_scanned` still counts it. A file holding
-bytes that are not valid UTF-8 is *not* skipped: it is read with those bytes dropped and
-its references are found. So an empty result from a project with an unreadable artifact
-is not proof of no references. `--include-code` reports `code_files_skipped` for code
+bytes that are not valid UTF-8 is *not* skipped: each invalid byte is replaced with
+U+FFFD, a warning names the file on stderr, and the rest of the file is scanned as
+usual. An ID with an invalid byte inside it is therefore not read as an ID at all — it
+is never mistaken for a different ID, as it would be if the byte were simply deleted.
+So an empty result from a project with an unreadable artifact is not proof of no
+references. `--include-code` reports `code_files_skipped` for code
 files; the artifact scan has no equivalent yet.
 
 If the target cannot be resolved — an `--artifact` that does not exist, no ID given,
@@ -613,7 +623,7 @@ cfs get-content --id <id> --code PATH [--inst INST]
 | `--id <id>` | The ID whose content to return (required) |
 | `--artifact PATH` | The artifact holding the definition; returns the block under it |
 | `--code PATH` | A code file instead; returns the marked block for the ID |
-| `--inst INST` | With `--code`: the instruction block to return, by its id *without* the `inst-` prefix — `validate-input` for `@cpt-begin:…:inst-validate-input` |
+| `--inst INST` | With `--code`: which of this ID's instruction blocks to return — `validate-input` or `inst-validate-input` for `@cpt-begin:…:inst-validate-input` |
 
 One of `--artifact` or `--code` is required. They are not checked for exclusivity: given
 both, `--code` is used and `--artifact` is ignored. `--inst` is read only with `--code`
@@ -647,13 +657,11 @@ project; `--code` reads the file directly and needs none — it works on any fil
 
 Without `--inst`, `text` is the content of the ID's **first** `@cpt-begin`/`@cpt-end`
 block in the file — or, for an ID that has only a scope marker there, that marker's
-line — and `inst` is `null`. With `--inst`, it is the named instruction's block, and the
-name is the bare id: `validate-input`, not `inst-validate-input`. The option's own help
-text shows the prefixed form, and that form never matches, because the marker parser
-stores instruction ids without their `inst-` prefix. Any `--inst` the file does not
-contain — the prefixed spelling included — falls back to that same first block with no
-error, and `inst` still echoes what was asked. Check `text`, not `inst`, to know which
-block you got.
+line — and `inst` is `null`. With `--inst`, it is that instruction's block **of this
+ID**: the name is accepted with or without its `inst-` prefix, and only the ID's own
+blocks are searched, because instruction names repeat across IDs in one file. An
+`--inst` the ID has no block for is `NOT_FOUND` with exit 2 — never another block
+reported under the name that was asked for. `inst` echoes the value as given.
 
 Several blocks for one ID are the norm, not a conflict: an algorithm's steps are
 `@cpt-begin` blocks that share its ID and differ in instruction id, and `--inst` is how

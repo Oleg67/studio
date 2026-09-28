@@ -266,6 +266,24 @@ def test_contract_an_unreadable_artifact_is_skipped_without_a_signal() -> None:
     assert not any(key.endswith("skipped") for key in data)
 
 
+def test_contract_an_invalid_byte_never_splices_a_different_id() -> None:
+    """A cp1252 smart quote (0x93) inside `cpt-example-thing-\\x93x`. Deleting the byte,
+    as the reader used to, splices the two halves into `cpt-example-thing-x` — a second,
+    phantom reference to the target. Replacing it with U+FFFD leaves no ID there, and the
+    genuine reference on another line is still found."""
+    with TemporaryDirectory() as tmp:
+        artifact = Path(tmp) / "doc.md"
+        artifact.write_bytes(
+            b"# Doc\n\n`cpt-example-thing-x`\n\nsee `cpt-example-thing-\x93x` for more\n")
+        with patch(
+            "studio.commands.where_used.resolve_target_and_artifacts",
+            return_value=("cpt-example-thing-x", object(), [(artifact, "FEATURE")], {}, None),
+        ):
+            data = _run_where_used(["cpt-example-thing-x"])
+    assert data["count"] == 1
+    assert data["references"][0]["line"] == 3
+
+
 def test_contract_a_resolution_error_exits_1() -> None:
     with TemporaryDirectory() as tmp:
         rc, data = _where_used_rc(tmp, "", ["cpt-example-thing-x"], resolve_error="Artifact not found: x.md")
