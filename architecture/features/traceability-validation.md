@@ -189,7 +189,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate �
 **Error Scenarios**:
 - `where-defined` / `get-content` for an ID that is not defined in any artifact → not-found result with exit code 2
 - `where-used` / `list-ids` with nothing to report → empty result with exit code 0: no references and no matches are answers, not failures
-- Target cannot be resolved (no Studio project, an empty ID, or an `--artifact` path that does not exist) → `ERROR` with exit code 1, for all four commands
+- Target cannot be resolved → `ERROR` with exit code 1. No Studio project, or an `--artifact` path that does not exist, applies to all four commands. An empty ID is an error for `where-defined` and `where-used`; `get-content` reports it as not found (exit 2), and `list-ids` takes no ID.
 - `get-content` with neither `--artifact` nor `--code` → `ERROR` with exit code 1; the other three treat `--artifact` as optional and scan every registered artifact without it
 
 **Steps**:

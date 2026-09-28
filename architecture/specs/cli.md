@@ -547,21 +547,40 @@ no Studio project — the command prints `{"status": "ERROR", "message": "..."}`
 Get content block for an ID definition.
 
 ```
-cfs get-content --id <id>
+cfs get-content --id <id> --artifact PATH
+cfs get-content --id <id> --code PATH [--inst INST]
 ```
 
-**Output** (JSON):
+| Option | Description |
+|--------|-------------|
+| `--id <id>` | The ID whose content to return (required) |
+| `--artifact PATH` | The artifact holding the definition; returns the block under it |
+| `--code PATH` | A code file instead; returns the marked block for the ID |
+| `--inst INST` | With `--code`: the instruction block to return, e.g. `inst-validate-input` |
+
+One of `--artifact` or `--code` is required.
+
+**Output** (JSON), `--artifact`:
 ```json
 {
-  "id": "cpt-studio-fr-core-init",
-  "file": "architecture/PRD.md",
-  "line_start": 154,
-  "line_end": 159,
-  "content": "The system MUST provide an interactive `cfs init` command..."
+  "status": "FOUND",
+  "id": "cpt-studio-component-traceability-engine",
+  "text": "##### Why this component exists\n\n...",
+  "artifact": "/path/to/project/architecture/DESIGN.md",
+  "start_line": 704,
+  "end_line": 726,
+  "kind": "DESIGN",
+  "system": "Constructor Studio",
+  "traceability": "FULL"
 }
 ```
 
-**Exit**: 0=found, 2=not found.
+With `--code` the result is `{"status": "FOUND", "id", "inst", "text"}`. An ID with no
+content block in the given file returns `{"status": "NOT_FOUND", "id": "..."}`. Neither
+`--artifact` nor `--code`, or an `--artifact` path that does not exist, returns
+`{"status": "ERROR", "message": "..."}`.
+
+**Exit**: 0 = found, 1 = neither `--artifact` nor `--code` given, or the path cannot be resolved, 2 = not found.
 
 ---
 
