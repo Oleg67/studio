@@ -184,16 +184,17 @@ Catches structural and traceability issues that AI agents miss or hallucinate �
 - User runs `cfs list-ids` → all ID definitions listed with kind, file, line, checked status
 - User runs `cfs where-defined --id <id>` → definition location returned with file path and line
 - User runs `cfs where-used --id <id>` → all reference locations returned across artifacts and code
-- User runs `cfs get-content --id <id>` → content block under the ID heading returned
+- User runs `cfs get-content --id <id> --artifact <path>` (or `--code <path>`) → content block under the ID heading, or the marked code block, returned
 
 **Error Scenarios**:
 - `where-defined` / `get-content` for an ID that is not defined in any artifact → not-found result with exit code 2
 - `where-used` / `list-ids` with nothing to report → empty result with exit code 0: no references and no matches are answers, not failures
 - Target cannot be resolved → `ERROR` with exit code 1. No Studio project, or an `--artifact` path that does not exist, applies to all four commands. An empty ID is an error for `where-defined` and `where-used`; `get-content` reports it as not found (exit 2), and `list-ids` takes no ID.
 - `get-content` with neither `--artifact` nor `--code` → `ERROR` with exit code 1; the other three treat `--artifact` as optional and scan every registered artifact without it
+- A registered artifact that cannot be read → skipped with a warning on stderr; the JSON and the exit code do not record the skip. A disclosed limitation of the artifact scan: `--include-code` reports `code_files_skipped` for code files, the artifact scan has no equivalent
 
 **Steps**:
-1. [x] - `p1` - User invokes one of: `list-ids [--kind K] [--pattern P]`, `where-defined --id <id>`, `where-used --id <id>`, `get-content --id <id>` - `inst-user-query`
+1. [x] - `p1` - User invokes one of: `list-ids [--kind K] [--pattern P]`, `where-defined --id <id>`, `where-used --id <id>`, `get-content --id <id> --artifact PATH | --code PATH` - `inst-user-query`
 2. [x] - `p1` - Load project context and resolve all registered artifacts - `inst-query-load-context`
 3. [x] - `p1` - Scan all artifacts using `cpt-studio-algo-traceability-validation-scan-ids` to build ID index - `inst-scan-all`
 4. [x] - `p1` - **IF** `list-ids --include-code`: scan codebase files for marker references - `inst-if-list-code`
@@ -921,7 +922,7 @@ The system **MUST** scan code files for `@cpt-*` markers (scope markers and bloc
 
 - [x] `p1` - **ID**: `cpt-studio-dod-traceability-validation-queries`
 
-The system **MUST** provide CLI commands for navigating the ID graph: `list-ids [--kind K] [--pattern P]` (list definitions matching criteria), `where-defined --id <id>` (find definition location), `where-used --id <id>` (find all references), `get-content --id <id>` (extract content block). All commands **MUST** output JSON, scan all registered artifacts unless `--artifact` narrows the scope to one, and exit 1 when the target cannot be resolved. A lookup of one thing — `where-defined`, `get-content` — **MUST** exit 0 when found and 2 when not found. A query whose empty result is itself an answer — `where-used` (no references), `list-ids` (no matches) — **MUST** exit 0 either way.
+The system **MUST** provide CLI commands for navigating the ID graph: `list-ids [--kind K] [--pattern P]` (list definitions matching criteria), `where-defined --id <id>` (find definition location), `where-used --id <id>` (find all references), `get-content --id <id> --artifact PATH | --code PATH` (extract the content block from a named artifact or code file). All commands **MUST** output JSON and exit 1 when the target cannot be resolved. The three that search — `list-ids`, `where-defined`, `where-used` — **MUST** scan all registered artifacts unless `--artifact` narrows the scope to one; `get-content` reads the one file it is given. A lookup of one thing — `where-defined`, `get-content` — **MUST** exit 0 when found and 2 when not found. A query whose empty result is itself an answer — `where-used` (no references), `list-ids` (no matches) — **MUST** exit 0 either way.
 
 **Implements**:
 - `cpt-studio-flow-traceability-validation-query`

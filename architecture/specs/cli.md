@@ -416,38 +416,58 @@ Two `results[]` entries have a different shape, and a consumer indexing `error_c
 
 ### list-ids
 
-List IDs matching criteria.
+List the IDs found in registered artifacts.
 
 ```
-cfs list-ids [--kind KIND] [--pattern PATTERN] [--system SYSTEM] [--format FORMAT]
+cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--all] [--include-code] [--source SOURCE]
 ```
 
 | Option | Description |
 |--------|-------------|
-| `--kind KIND` | Filter by ID kind (fr, nfr, actor, component, etc.) |
-| `--pattern PATTERN` | Glob or regex filter on ID slug |
-| `--system SYSTEM` | Limit to a specific system |
-| `--format FORMAT` | Output format: `json` (default), `table`, `ids-only` |
-| `--source SOURCE` | Filter by workspace source name. Returns error when used outside workspace mode. |
+| `--kind KIND` | Keep IDs whose inferred kind is `KIND` |
+| `--pattern PATTERN` | Keep IDs containing `PATTERN`; a regular expression with `--regex` |
+| `--artifact PATH` | Scan only this artifact |
+| `--all` | List every occurrence; without it, one entry per ID |
+| `--include-code` | Also scan registered codebase paths for `@cpt-*` markers |
+| `--source SOURCE` | Keep IDs from one workspace source. Returns an error outside workspace mode. |
+
+> Earlier revisions of this section listed `--system` and `--format`. Neither exists — JSON is the only output — and they are removed here rather than left describing a surface that does not exist.
 
 **Output** (JSON):
 ```json
 {
+  "count": 15,
+  "artifacts_scanned": 52,
   "ids": [
     {
-      "id": "cpt-studio-fr-core-init",
-      "kind": "fr",
-      "file": "architecture/PRD.md",
-      "line": 154,
-      "checked": false,
+      "id": "cpt-studio-component-traceability-engine",
+      "kind": "component",
+      "type": "definition",
+      "artifact_type": "DESIGN",
+      "line": 702,
+      "artifact": "/path/to/project/architecture/DESIGN.md",
+      "checked": true,
       "priority": "p1"
     }
-  ],
-  "total": 42
+  ]
 }
 ```
 
-**Exit**: 0.
+- `count` equals the length of `ids`. `kind` is inferred from the ID's slug against the
+  registered systems' known kinds, or `null` when it cannot be.
+- `type` is `definition` or `reference`. Without `--all` each ID appears once — its
+  definition when one exists, otherwise its first occurrence — and a further definition
+  of the same ID is recorded on that entry as `duplicate_definitions` rather than dropped.
+- `priority` appears when the line carries one; `source` when the artifact belongs to a
+  workspace source. `--include-code` adds `code_files_scanned` and `code_files_skipped`,
+  both always present.
+
+No match is an answer: `count` is `0`, `ids` is `[]`, and the exit code is `0`. An
+`--artifact` that does not exist, or no Studio project, prints
+`{"status": "ERROR", "message": "..."}`. The unreadable-artifact limitation described
+under `where-used` applies to this scan too.
+
+**Exit**: 0 = the scan ran, 1 = the target could not be resolved.
 
 ---
 
@@ -465,18 +485,32 @@ The ID is given positionally or with `--id`; `--artifact PATH` limits the search
 **Output** (JSON):
 ```json
 {
-  "id": "cpt-studio-fr-core-init",
-  "defined_in": {
-    "file": "architecture/PRD.md",
-    "line": 154,
-    "kind": "fr",
-    "checked": false,
-    "content_preview": "The system MUST provide an interactive `cfs init` command..."
-  }
+  "status": "FOUND",
+  "id": "cpt-studio-component-traceability-engine",
+  "artifacts_scanned": 52,
+  "count": 1,
+  "definitions": [
+    {
+      "artifact": "/path/to/project/architecture/DESIGN.md",
+      "artifact_type": "DESIGN",
+      "line": 702,
+      "kind": null,
+      "checked": true
+    }
+  ]
 }
 ```
 
-**Exit**: 0=found, 2=not found.
+- `status` is `FOUND` for exactly one definition, `AMBIGUOUS` for more than one (all are
+  listed, and `count` says how many), `NOT_FOUND` for none — same keys, empty list — and
+  `NO_ARTIFACTS` when there is nothing registered to scan.
+- `artifact` is an absolute path. `kind` is always `null`: this command does not infer
+  it (`list-ids` does). `source` is added when the artifact belongs to a workspace source.
+- An unresolvable target — an `--artifact` that does not exist, an empty ID, no Studio
+  project — prints `{"status": "ERROR", "message": "..."}`. The unreadable-artifact
+  limitation described under `where-used` applies to this scan too.
+
+**Exit**: 0 = found, or nothing to scan; 1 = the target could not be resolved; 2 = not found, or ambiguous.
 
 ---
 
@@ -535,10 +569,19 @@ That is also what an ID that exists nowhere returns, because a scan cannot tell 
 unreferenced ID from a mistyped one. Use `where-defined`, which exits `2` for an
 unknown ID, when that distinction matters.
 
+One limitation is disclosed rather than signalled. A registered artifact that cannot be
+read — permissions, a file that vanished after registration — is skipped: a warning
+names it on stderr, its references are absent from the result, and nothing in the JSON
+or the exit code records the skip; `artifacts_scanned` still counts it. A file holding
+bytes that are not valid UTF-8 is *not* skipped: it is read with those bytes dropped and
+its references are found. So an empty result from a project with an unreadable artifact
+is not proof of no references. `--include-code` reports `code_files_skipped` for code
+files; the artifact scan has no equivalent yet.
+
 If the target cannot be resolved — an `--artifact` that does not exist, no ID given,
 no Studio project — the command prints `{"status": "ERROR", "message": "..."}`.
 
-**Exit**: 0 = the scan ran (with or without references), 1 = the target could not be resolved.
+**Exit**: 0 = the scan ran (with or without references, and with any unreadable artifact skipped), 1 = the target could not be resolved.
 
 ---
 
@@ -556,9 +599,11 @@ cfs get-content --id <id> --code PATH [--inst INST]
 | `--id <id>` | The ID whose content to return (required) |
 | `--artifact PATH` | The artifact holding the definition; returns the block under it |
 | `--code PATH` | A code file instead; returns the marked block for the ID |
-| `--inst INST` | With `--code`: the instruction block to return, e.g. `inst-validate-input` |
+| `--inst INST` | With `--code`: the instruction block to return, by its id *without* the `inst-` prefix — `validate-input` for `@cpt-begin:…:inst-validate-input` |
 
-One of `--artifact` or `--code` is required.
+One of `--artifact` or `--code` is required. They are not checked for exclusivity: given
+both, `--code` is used and `--artifact` is ignored. `--inst` is read only with `--code`
+and is ignored otherwise.
 
 **Output** (JSON), `--artifact`:
 ```json
@@ -575,12 +620,32 @@ One of `--artifact` or `--code` is required.
 }
 ```
 
-With `--code` the result is `{"status": "FOUND", "id", "inst", "text"}`. An ID with no
-content block in the given file returns `{"status": "NOT_FOUND", "id": "..."}`. Neither
-`--artifact` nor `--code`, or an `--artifact` path that does not exist, returns
-`{"status": "ERROR", "message": "..."}`.
+**Output** (JSON), `--code`:
+```json
+{
+  "status": "FOUND",
+  "id": "cpt-studio-algo-traceability-validation-scan-ids",
+  "inst": null,
+  "text": "import re\nimport logging\n..."
+}
+```
 
-**Exit**: 0 = found, 1 = neither `--artifact` nor `--code` given, or the path cannot be resolved, 2 = not found.
+Without `--inst`, `text` is the content of the ID's **first** `@cpt-begin`/`@cpt-end`
+block in the file — or, for an ID that has only a scope marker there, that marker's
+line — and `inst` is `null`. With `--inst`, it is the named instruction's block, and the
+name is the bare id: `validate-input`, not `inst-validate-input`. The option's own help
+text shows the prefixed form, and that form never matches, because the marker parser
+stores instruction ids without their `inst-` prefix. Any `--inst` the file does not
+contain — the prefixed spelling included — falls back to that same first block with no
+error, and `inst` still echoes what was asked. Check `text`, not `inst`, to know which
+block you got. An ID with no content block in the given file
+returns `{"status": "NOT_FOUND", "id": "...", "inst": ...}` (`--code`) or
+`{"status": "NOT_FOUND", "id": "..."}` (`--artifact`). Neither
+`--artifact` nor `--code`, a path that does not exist, or a code file whose markers do
+not parse (a `marker-begin-no-end`, say — the message carries the marker findings)
+returns `{"status": "ERROR", "message": "..."}`.
+
+**Exit**: 0 = found; 1 = neither `--artifact` nor `--code` given, the path cannot be resolved, or the code file cannot be parsed; 2 = not found.
 
 ---
 

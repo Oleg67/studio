@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scripts"))
 
+from studio.commands.get_content import cmd_get_content
+from studio.commands.list_ids import cmd_list_ids
 from studio.commands.where_defined import cmd_where_defined, _human_where_defined
 from studio.commands.where_used import cmd_where_used, _human_where_used
 from studio.utils.context import StudioContext as CypilotContext, set_context
@@ -525,6 +527,179 @@ class TestHumanWhereUsed(_HumanModeBase):
                 "references": [{"artifact": "/tmp/A.md", "artifact_type": "PRD", "line": "", "type": "ref", "checked": False}],
             })
         # Should not crash
+
+
+# =========================================================================
+# The documented contracts — architecture/specs/cli.md, query commands (#292, #348)
+# =========================================================================
+
+class TestDocumentedContracts(_ContextTestBase):
+    """Each test pins one statement the CLI spec makes about a query command's JSON
+    shape or exit code, against the real command. The spec was rewritten from these
+    commands' actual output; these keep it that way."""
+
+    def setUp(self):
+        super().setUp()
+        self._json_was = __import__("studio.utils.ui", fromlist=["is_json_mode"]).is_json_mode()
+        set_json_mode(True)
+
+    def tearDown(self):
+        set_json_mode(self._json_was)
+        super().tearDown()
+
+    @staticmethod
+    def _run(cmd, argv):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            rc = cmd(argv)
+        return rc, json.loads(stdout.getvalue())
+
+    # ---- where-defined ---------------------------------------------------
+    def test_where_defined_found_shape(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, out = self._run(cmd_where_defined, ["cpt-test-item-1"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(set(out), {"status", "id", "artifacts_scanned", "count", "definitions"})
+        self.assertEqual(out["status"], "FOUND")
+        self.assertEqual(out["count"], len(out["definitions"]), 1)
+        record = out["definitions"][0]
+        self.assertEqual(set(record), {"artifact", "artifact_type", "line", "kind", "checked"})
+        self.assertIsNone(record["kind"])  # documented: this command does not infer it
+        self.assertTrue(Path(record["artifact"]).is_absolute())
+
+    def test_where_defined_not_found_keeps_the_shape_and_exits_2(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, out = self._run(cmd_where_defined, ["cpt-test-item-nowhere"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(set(out), {"status", "id", "artifacts_scanned", "count", "definitions"})
+        self.assertEqual((out["status"], out["count"], out["definitions"]), ("NOT_FOUND", 0, []))
+
+    def test_where_defined_ambiguous_lists_all_and_exits_2(self):
+        with TemporaryDirectory() as td:
+            first, second = Path(td) / "a.md", Path(td) / "b.md"
+            for path in (first, second):
+                path.write_text("# Doc\n\n**ID**: `cpt-test-item-1`\n", encoding="utf-8")
+            with patch(
+                "studio.commands.where_defined.resolve_target_and_artifacts",
+                return_value=("cpt-test-item-1", object(), [(first, "PRD"), (second, "PRD")], {}, None),
+            ):
+                rc, out = self._run(cmd_where_defined, ["cpt-test-item-1"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(out["status"], "AMBIGUOUS")
+        self.assertEqual(out["count"], len(out["definitions"]), 2)
+
+    # ---- list-ids ----------------------------------------------------------
+    def test_list_ids_no_match_is_an_empty_answer_with_exit_0(self):
+        """A real scan with nothing matching — not the hand-built dict the human
+        renderer's tests use."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, out = self._run(cmd_list_ids, ["--pattern", "zzz-matches-nothing"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, {"count": 0, "artifacts_scanned": 1, "ids": []})
+
+    # ---- get-content -------------------------------------------------------
+    @staticmethod
+    def _marked_code(td: Path) -> Path:
+        """Two blocks for one ID, so "the first block" is distinguishable from "a block"."""
+        code = td / "impl.py"
+        code.write_text(
+            "# @cpt-algo:cpt-test-algo-a:p1\n"
+            "def outer():\n"
+            "    # @cpt-begin:cpt-test-algo-a:p1:inst-one\n"
+            "    one = 1\n"
+            "    # @cpt-end:cpt-test-algo-a:p1:inst-one\n"
+            "    # @cpt-begin:cpt-test-algo-a:p1:inst-two\n"
+            "    two = 2\n"
+            "    # @cpt-end:cpt-test-algo-a:p1:inst-two\n"
+            "    return one + two\n",
+            encoding="utf-8",
+        )
+        return code
+
+    def test_get_content_code_without_inst_returns_the_first_block_with_null_inst(self):
+        with TemporaryDirectory() as td:
+            code = self._marked_code(Path(td))
+            rc, first = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code)])
+            rc_two, second = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "two"])
+        self.assertEqual((rc, rc_two), (0, 0))
+        self.assertEqual(set(first), {"status", "id", "inst", "text"})
+        self.assertIsNone(first["inst"])
+        self.assertEqual(first["text"].strip(), "one = 1")   # the first block, not the whole scope
+        self.assertEqual(second["inst"], "two")               # the bare id selects the block
+        self.assertEqual(second["text"].strip(), "two = 2")
+
+    def test_get_content_unknown_inst_falls_back_to_the_first_block_but_echoes_the_request(self):
+        """Documented as a quirk: check `text`, not `inst`, to know what came back."""
+        with TemporaryDirectory() as td:
+            code = self._marked_code(Path(td))
+            rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "absent"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["inst"], "absent")
+        self.assertEqual(out["text"].strip(), "one = 1")
+
+    def test_get_content_prefixed_inst_never_matches_and_falls_back(self):
+        """The marker parser stores `inst-two` as `two`, so the spelling the option's own
+        help text suggests is one the lookup can never match: it falls back to the first
+        block while `inst` echoes the request. Documented as the trap it is; when the
+        command learns to strip the prefix, this test and the spec change together."""
+        with TemporaryDirectory() as td:
+            code = self._marked_code(Path(td))
+            rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code), "--inst", "inst-two"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["inst"], "inst-two")
+        self.assertEqual(out["text"].strip(), "one = 1")  # not "two = 2"
+
+    def test_get_content_code_wins_when_both_paths_are_given(self):
+        """The id is defined in the registered artifact and absent from the code file;
+        the answer comes from the code file."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            code = self._marked_code(root)
+            rc, out = self._run(cmd_get_content, [
+                "--id", "cpt-test-item-1",
+                "--artifact", str(root / "architecture" / "PRD.md"),
+                "--code", str(code),
+            ])
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, {"status": "NOT_FOUND", "id": "cpt-test-item-1", "inst": None})
+
+    def test_get_content_inst_is_ignored_with_artifact(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, out = self._run(cmd_get_content, [
+                "--id", "cpt-test-item-1",
+                "--artifact", str(root / "architecture" / "PRD.md"),
+                "--inst", "inst-anything",
+            ])
+        self.assertNotEqual(out["status"], "ERROR")
+        self.assertNotIn("inst", out)  # the artifact branch never saw the flag
+
+    def test_get_content_neither_path_is_an_error(self):
+        rc, out = self._run(cmd_get_content, ["--id", "cpt-test-item-1"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["status"], "ERROR")
+
+    def test_get_content_unparsable_code_file_exits_1(self):
+        with TemporaryDirectory() as td:
+            code = Path(td) / "broken.py"
+            code.write_text("# @cpt-begin:cpt-test-algo-a:p1:inst-one\nx = 1\n", encoding="utf-8")
+            rc, out = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code)])
+        self.assertEqual(rc, 1)
+        self.assertEqual(out["status"], "ERROR")
+        self.assertIn("marker-begin-no-end", out["message"])
 
 
 if __name__ == "__main__":

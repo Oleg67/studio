@@ -11,6 +11,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "studio" / "scripts"))
 
 from studio.commands.where_used import cmd_where_used
@@ -216,6 +218,52 @@ def test_contract_include_code_is_a_no_op_with_artifact() -> None:
         mock_scan.assert_not_called()
     assert "code_files_scanned" not in data
     assert "code_files_skipped" not in data
+
+
+def test_contract_code_files_skipped_is_reported_when_nonzero() -> None:
+    """The counter is documented as present only when non-zero; the tests above cover
+    only its absence, so a regression that dropped it would have passed."""
+    with TemporaryDirectory() as tmp:
+        artifact = Path(tmp) / "doc.md"
+        artifact.write_text("no references here\n", encoding="utf-8")
+        with patch(
+            "studio.commands.where_used.resolve_target_and_artifacts",
+            return_value=("cpt-example-thing-x", object(), [(artifact, "FEATURE")], {}, None),
+        ), patch(
+            "studio.commands.where_used.scan_registered_codebase_references",
+            return_value=(_CODE_HITS, 3, 2),
+        ):
+            data = _run_where_used(["cpt-example-thing-x", "--include-code"])
+    assert data["code_files_scanned"] == 3
+    assert data["code_files_skipped"] == 2
+
+
+def test_contract_an_unreadable_artifact_is_skipped_without_a_signal() -> None:
+    """Pins the *disclosed* limitation, not a desired behaviour: an artifact that cannot
+    be read drops out of the result while `artifacts_scanned` still counts it, and no
+    field or exit code says so. When a skip counter is added, this test and the
+    `where-used` section of `architecture/specs/cli.md` change together."""
+    with TemporaryDirectory() as tmp:
+        readable = Path(tmp) / "a.md"
+        readable.write_text("# A\n\n`cpt-example-thing-x`\n", encoding="utf-8")
+        unreadable = Path(tmp) / "b.md"
+        unreadable.write_text("# B\n\n`cpt-example-thing-x`\n", encoding="utf-8")
+        os.chmod(unreadable, 0)
+        try:
+            if os.access(unreadable, os.R_OK):
+                pytest.skip("this user can read a mode-000 file (root)")
+            with patch(
+                "studio.commands.where_used.resolve_target_and_artifacts",
+                return_value=("cpt-example-thing-x", object(),
+                              [(readable, "FEATURE"), (unreadable, "FEATURE")], {}, None),
+            ):
+                data = _run_where_used(["cpt-example-thing-x"])
+        finally:
+            os.chmod(unreadable, 0o644)
+    assert data["artifacts_scanned"] == 2
+    assert data["count"] == 1
+    assert Path(data["references"][0]["artifact"]).name == "a.md"
+    assert not any(key.endswith("skipped") for key in data)
 
 
 def test_contract_a_resolution_error_exits_1() -> None:
