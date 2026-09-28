@@ -429,7 +429,7 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 | `--artifact PATH` | Scan only this artifact |
 | `--all` | List every occurrence; without it, one entry per ID |
 | `--include-code` | Also scan registered codebase paths for `@cpt-*` markers |
-| `--source SOURCE` | Keep IDs from one workspace source. Returns an error outside workspace mode. |
+| `--source SOURCE` | Scan only this workspace source's registered artifacts. Returns an error outside workspace mode; a source that is unknown, or not reachable on disk, returns an empty result with exit 0. Ignored when `--artifact` is given. |
 
 > Earlier revisions of this section listed `--system` and `--format`. Neither exists — JSON is the only output — and they are removed here rather than left describing a surface that does not exist.
 

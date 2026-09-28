@@ -523,5 +523,31 @@ class TestCLINavigationE2E(unittest.TestCase):
                 [("PRD.md", "definition", "backend-repo"), ("PRD.md", "reference", "backend-repo")],
             )
 
+    def test_workspace_list_ids_unknown_source_is_an_empty_answer(self):
+        """Documented in `architecture/specs/cli.md` § list-ids: inside a workspace, a
+        `--source` no configured source has is not an error — nothing is scanned, the
+        result is empty and the exit code is 0. A known source still narrows the scan."""
+        with TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir) / "workspace-root"
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            (workspace_root / ".git").mkdir()
+            _bootstrap_workspace_source(workspace_root / "docs-repo", source_id="cpt-docs-item-home", source_name="docs")
+            _bootstrap_workspace_source(workspace_root / "backend-repo", source_id="cpt-backend-item-api", source_name="backend")
+            exit_code, _, _ = _run_main(["--json", "workspace-init"], cwd=workspace_root)
+            self.assertEqual(exit_code, 0)
+
+            exit_code, stdout, stderr = _run_main(
+                ["--json", "list-ids", "--source", "no-such-source"], cwd=workspace_root)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stderr, "")
+            self.assertEqual(json.loads(stdout), {"count": 0, "artifacts_scanned": 0, "ids": []})
+
+            exit_code, stdout, _ = _run_main(
+                ["--json", "list-ids", "--source", "docs-repo"], cwd=workspace_root)
+            self.assertEqual(exit_code, 0)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["artifacts_scanned"], 1)
+            self.assertEqual([item["id"] for item in payload["ids"]], ["cpt-docs-item-home"])
+
 if __name__ == "__main__":
     unittest.main()

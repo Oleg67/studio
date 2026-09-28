@@ -732,6 +732,21 @@ class TestDocumentedContracts(_ContextTestBase):
                 rc, out = self._run(cmd_list_ids, argv)
         return rc, out, scan
 
+    def test_list_ids_source_is_an_error_outside_a_workspace_unless_artifact_is_given(self):
+        """Documented: `--source` needs workspace mode — and `--artifact` wins, so with
+        both the source is never consulted and the would-be error does not happen."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            rc, alone = self._run(cmd_list_ids, ["--source", "anything"])
+            rc_both, both = self._run(cmd_list_ids, [
+                "--artifact", str(root / "architecture" / "PRD.md"), "--source", "anything"])
+        self.assertEqual((rc, alone["status"]), (1, "ERROR"))
+        self.assertIn("workspace", alone["message"])
+        self.assertEqual(rc_both, 0)
+        self.assertEqual((both["artifacts_scanned"], both["count"]), (1, 1))
+
     def test_list_ids_code_files_skipped_appears_only_when_nonzero(self):
         rc, clean, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 0))
         rc2, skipped, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 2))
