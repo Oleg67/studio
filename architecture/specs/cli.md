@@ -436,7 +436,7 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 **Output** (JSON):
 ```json
 {
-  "count": 15,
+  "count": 1,
   "artifacts_scanned": 52,
   "ids": [
     {
@@ -456,11 +456,21 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 - `count` equals the length of `ids`. `kind` is inferred from the ID's slug against the
   registered systems' known kinds, or `null` when it cannot be.
 - `type` is `definition` or `reference`. Without `--all` each ID appears once — its
-  definition when one exists, otherwise its first occurrence — and a further definition
-  of the same ID is recorded on that entry as `duplicate_definitions` rather than dropped.
+  definition when one exists, otherwise its first occurrence. A further definition of the
+  same ID is not dropped: it is listed on that entry as `duplicate_definitions`, and a
+  warning naming both locations goes to stderr. This command lists; it does not judge.
+  A duplicate definition is a `duplicate-definition` error in `cfs validate`, which is
+  the gate.
 - `priority` appears when the line carries one; `source` when the artifact belongs to a
-  workspace source. `--include-code` adds `code_files_scanned` and `code_files_skipped`,
-  both always present.
+  workspace source.
+- `--include-code` adds `code_files_scanned`, and `code_files_skipped` when it is
+  non-zero — the same counters, with the same meaning, as under `where-used`: a skipped
+  file was ignored, oversized or unparsable, its markers are absent from `ids`, and the
+  exit code is unchanged. `--include-code` is ignored, without a warning, when
+  `--artifact` is given — but `code_files_scanned` is still emitted, as `0`, so a zero
+  there can mean "no code scan ran" as well as "no files"; `code_files_skipped` never
+  appears in that case. `where-used` omits both counters under `--artifact`; the two
+  commands differ here.
 
 No match is an answer: `count` is `0`, `ids` is `[]`, and the exit code is `0`. An
 `--artifact` that does not exist, or no Studio project, prints
@@ -603,7 +613,8 @@ cfs get-content --id <id> --code PATH [--inst INST]
 
 One of `--artifact` or `--code` is required. They are not checked for exclusivity: given
 both, `--code` is used and `--artifact` is ignored. `--inst` is read only with `--code`
-and is ignored otherwise.
+and is ignored otherwise. `--artifact` names a *registered* artifact and needs a Studio
+project; `--code` reads the file directly and needs none — it works on any file, anywhere.
 
 **Output** (JSON), `--artifact`:
 ```json
@@ -638,10 +649,17 @@ text shows the prefixed form, and that form never matches, because the marker pa
 stores instruction ids without their `inst-` prefix. Any `--inst` the file does not
 contain — the prefixed spelling included — falls back to that same first block with no
 error, and `inst` still echoes what was asked. Check `text`, not `inst`, to know which
-block you got. An ID with no content block in the given file
+block you got.
+
+Several blocks for one ID are the norm, not a conflict: an algorithm's steps are
+`@cpt-begin` blocks that share its ID and differ in instruction id, and `--inst` is how
+one is chosen. This is not `where-defined`'s `AMBIGUOUS`, which is an ID *defined* in more
+than one artifact. With `--artifact`, an artifact that defines the ID twice yields the
+first definition's block; that duplicate is a `duplicate-definition` error in
+`cfs validate`, which is where it is judged. An ID with no content block in the given file
 returns `{"status": "NOT_FOUND", "id": "...", "inst": ...}` (`--code`) or
 `{"status": "NOT_FOUND", "id": "..."}` (`--artifact`). Neither
-`--artifact` nor `--code`, a path that does not exist, or a code file whose markers do
+`--artifact` nor `--code`, a path that does not exist, `--artifact` outside a Studio project, or a code file whose markers do
 not parse (a `marker-begin-no-end`, say — the message carries the marker findings)
 returns `{"status": "ERROR", "message": "..."}`.
 

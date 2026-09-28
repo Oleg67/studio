@@ -189,7 +189,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate �
 **Error Scenarios**:
 - `where-defined` / `get-content` for an ID that is not defined in any artifact → not-found result with exit code 2
 - `where-used` / `list-ids` with nothing to report → empty result with exit code 0: no references and no matches are answers, not failures
-- Target cannot be resolved → `ERROR` with exit code 1. No Studio project, or an `--artifact` path that does not exist, applies to all four commands. An empty ID is an error for `where-defined` and `where-used`; `get-content` reports it as not found (exit 2), and `list-ids` takes no ID.
+- Target cannot be resolved → `ERROR` with exit code 1. No Studio project, or an `--artifact` path that does not exist, applies to `list-ids`, `where-defined`, `where-used` and `get-content --artifact`; `get-content --code` reads the file directly and needs no project. An empty ID is an error for `where-defined` and `where-used`; `get-content` reports it as not found (exit 2), and `list-ids` takes no ID.
 - `get-content` with neither `--artifact` nor `--code` → `ERROR` with exit code 1; the other three treat `--artifact` as optional and scan every registered artifact without it
 - A registered artifact that cannot be read → skipped with a warning on stderr; the JSON and the exit code do not record the skip. A disclosed limitation of the artifact scan: `--include-code` reports `code_files_skipped` for code files, the artifact scan has no equivalent
 

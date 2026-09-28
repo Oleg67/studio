@@ -701,6 +701,56 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(out["status"], "ERROR")
         self.assertIn("marker-begin-no-end", out["message"])
 
+    def test_get_content_code_needs_no_project_but_artifact_does(self):
+        """Documented asymmetry: `--code` reads the file directly, `--artifact` resolves
+        a registered artifact. Run from a directory that is not a Studio project."""
+        with TemporaryDirectory() as td:
+            outside = Path(td)
+            code = self._marked_code(outside)
+            doc = outside / "doc.md"
+            doc.write_text("# A\n\n**ID**: `cpt-test-algo-a`\n\nbody\n", encoding="utf-8")
+            cwd = os.getcwd()
+            try:
+                os.chdir(outside)
+                rc_code, from_code = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--code", str(code)])
+                rc_art, from_artifact = self._run(cmd_get_content, ["--id", "cpt-test-algo-a", "--artifact", str(doc)])
+            finally:
+                os.chdir(cwd)
+        self.assertEqual((rc_code, from_code["status"]), (0, "FOUND"))
+        self.assertEqual((rc_art, from_artifact["status"]), (1, "ERROR"))
+        self.assertIn("not initialized", from_artifact["message"])
+
+    # ---- list-ids, --include-code ---------------------------------------------
+    def _list_ids_with_code_scan(self, argv, scan_result):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            _with_context(root)
+            argv = [a.replace("<PRD>", str(root / "architecture" / "PRD.md")) for a in argv]
+            with patch("studio.commands.list_ids.scan_registered_codebase_references",
+                       return_value=scan_result) as scan:
+                rc, out = self._run(cmd_list_ids, argv)
+        return rc, out, scan
+
+    def test_list_ids_code_files_skipped_appears_only_when_nonzero(self):
+        rc, clean, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 0))
+        rc2, skipped, _ = self._list_ids_with_code_scan(["--include-code"], ([], 3, 2))
+        self.assertEqual((rc, rc2), (0, 0))
+        self.assertEqual(clean["code_files_scanned"], 3)
+        self.assertNotIn("code_files_skipped", clean)
+        self.assertEqual(skipped["code_files_skipped"], 2)
+
+    def test_list_ids_include_code_is_a_no_op_with_artifact_but_still_reports_zero(self):
+        """Pins a wart, not a wish: the scan is skipped, yet `code_files_scanned` is
+        emitted as 0 — unlike `where-used`, which omits both counters. Documented as
+        such; if list-ids is aligned with where-used, this test and the spec change
+        together."""
+        rc, out, scan = self._list_ids_with_code_scan(["--artifact", "<PRD>", "--include-code"], ([], 3, 2))
+        self.assertEqual(rc, 0)
+        scan.assert_not_called()
+        self.assertEqual(out["code_files_scanned"], 0)   # not 3: the scan never ran
+        self.assertNotIn("code_files_skipped", out)
+
 
 if __name__ == "__main__":
     unittest.main()
