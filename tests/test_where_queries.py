@@ -624,6 +624,29 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, {"count": 0, "artifacts_scanned": 1, "ids": []})
 
+    def test_an_argument_the_parser_rejects_exits_2_with_nothing_on_stdout(self):
+        """Documented under Exit Codes: argparse's own rejections exit 2 with a usage
+        message on stderr and an empty stdout, for all four query commands. Where 2 also
+        means not found, the empty stdout is what tells the two apart."""
+        cases = [
+            ["list-ids", "--bogus"],
+            ["where-used", "cpt-test-item-1", "--bogus"],
+            ["where-defined", "cpt-test-item-1", "--bogus"],
+            ["get-content", "--code", "impl.py"],  # --id is required
+        ]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                json_was = is_json_mode()
+                try:
+                    with redirect_stdout(stdout), redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+                        main(["--json", *argv])
+                finally:
+                    set_json_mode(json_was)
+                self.assertEqual(caught.exception.code, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(f"{argv[0]}: error:", stderr.getvalue())
+
     def test_list_ids_invalid_regex_is_the_error_object_before_any_scan(self):
         """An invalid `--pattern` under `--regex` used to escape as a traceback with
         nothing on stdout. It is now the JSON error with exit 1, checked first: even with

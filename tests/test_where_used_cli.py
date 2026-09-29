@@ -170,6 +170,39 @@ def test_where_used_include_code_real_scan_through_cli() -> None:
             os.chdir(cwd)
 
 
+def test_where_used_no_references_through_the_real_entry_point() -> None:
+    """The empty answer end to end, with real argv parsing, dispatch, target resolution
+    and scan, not the mocked resolver the contract tests below use. An ID nothing
+    references, in a project that has a registered artifact, is exit 0, `count: 0` and
+    `references: []`."""
+    from studio.cli import main
+    from studio.utils import toml_utils
+
+    with TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        _write_codebase_only_project(root)
+        (root / "docs").mkdir()
+        (root / "docs" / "req.md").write_text("- [x] `p1` - **ID**: `cpt-test-req-1`\n", encoding="utf-8")
+        registry = root / "adapter" / "config" / "artifacts.toml"
+        config = toml_utils.load(registry)
+        config["systems"][0]["artifacts"] = [{"path": "docs/req.md", "kind": "req"}]
+        toml_utils.dump(config, registry)
+
+        cwd, saved = os.getcwd(), is_json_mode()
+        try:
+            os.chdir(root)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main(["--json", "where-used", "cpt-test-req-nowhere"])
+        finally:
+            set_json_mode(saved)
+            os.chdir(cwd)
+    assert rc == 0
+    assert json.loads(buf.getvalue()) == {
+        "id": "cpt-test-req-nowhere", "artifacts_scanned": 1, "count": 0, "references": [],
+    }
+
+
 # ------------------------------------------------ the documented contract (#292)
 def _where_used_rc(tmp: str, text: str, argv: list[str], resolve_error=None) -> tuple[int, dict]:
     """Run the real command over a real artifact, with only target resolution mocked."""

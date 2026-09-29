@@ -154,6 +154,13 @@ cfs <command> [subcommand] [options] [arguments]
 | 1 | Error | Filesystem error, invalid arguments, runtime error |
 | 2 | FAIL | Validation failed, check failed, item not found |
 
+**Argument errors in the query commands.** `list-ids`, `where-defined`, `where-used` and
+`get-content` parse their options with argparse. An option it rejects — a missing
+`--id`, an unknown flag — exits `2` with a usage message on stderr and nothing on stdout,
+not `1`. Errors the commands detect themselves, such as no `--artifact`/`--code` or a path
+that does not exist, are the JSON `ERROR` with `1`. Where `2` also means not found
+(`where-defined`, `get-content`), the empty stdout is what tells a usage error apart.
+
 ### Common Options
 
 | Option | Description |
@@ -510,7 +517,7 @@ regular expression under `--regex` prints `{"status": "ERROR", "message": "..."}
 exits `1`; the pattern is checked before anything is scanned. The unreadable-artifact limitation described
 under `where-used` applies to this scan too.
 
-**Exit**: 0 = the scan ran, 1 = the target could not be resolved.
+**Exit**: 0 = the scan ran, 1 = the target could not be resolved, 2 = an argument the parser rejects ([see Exit Codes](#exit-codes)).
 
 ---
 
@@ -554,7 +561,7 @@ The ID is given positionally or with `--id`; given both, the positional wins, wi
   project — prints `{"status": "ERROR", "message": "..."}`. The unreadable-artifact
   limitation described under `where-used` applies to this scan too.
 
-**Exit**: 0 = found, or nothing to scan; 1 = the target could not be resolved; 2 = not found, or ambiguous.
+**Exit**: 0 = found, or nothing to scan; 1 = the target could not be resolved; 2 = not found, or ambiguous — or an argument the parser rejects, which prints nothing on stdout ([see Exit Codes](#exit-codes)).
 
 ---
 
@@ -635,7 +642,7 @@ files; the artifact scan has no equivalent yet.
 If the target cannot be resolved — an `--artifact` that does not exist, no ID given,
 no Studio project — the command prints `{"status": "ERROR", "message": "..."}`.
 
-**Exit**: 0 = the scan ran (with or without references, and with any unreadable artifact skipped), 1 = the target could not be resolved.
+**Exit**: 0 = the scan ran (with or without references, and with any unreadable artifact skipped), 1 = the target could not be resolved, 2 = an argument the parser rejects ([see Exit Codes](#exit-codes)).
 
 ---
 
@@ -706,7 +713,7 @@ returns `{"status": "NOT_FOUND", "id": "...", "inst": ...}` (`--code`) or
 not parse (a `marker-begin-no-end`, say — the message carries the marker findings)
 returns `{"status": "ERROR", "message": "..."}`.
 
-**Exit**: 0 = found; 1 = neither `--artifact` nor `--code` given, the path cannot be resolved, or the code file cannot be parsed; 2 = not found.
+**Exit**: 0 = found; 1 = neither `--artifact` nor `--code` given, the path cannot be resolved, or the code file cannot be parsed; 2 = not found — or an argument the parser rejects, such as a missing `--id`, which prints nothing on stdout ([see Exit Codes](#exit-codes)).
 
 ---
 
