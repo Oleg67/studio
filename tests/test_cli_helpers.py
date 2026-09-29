@@ -104,13 +104,17 @@ class TestReadTextSafe(unittest.TestCase):
 
     def test_read_text_safe_invalid_utf8_replaces_rather_than_drops(self):
         """Replaced with U+FFFD, not deleted: deletion splices the text on either side,
-        which inside an ID produces a different, valid-looking ID."""
+        which inside an ID produces a different, valid-looking ID. The warning naming the
+        file is the only sign a caller gets that the read was lossy."""
         with TemporaryDirectory() as tmpdir:
             p = Path(tmpdir) / "bad.txt"
             p.write_bytes(b"hi\xff\xfethere")
-            lines = read_text_safe(p)
+            with self.assertLogs("studio.utils.document", level="WARNING") as logs:
+                lines = read_text_safe(p)
             self.assertIsNotNone(lines)
             self.assertEqual(lines, ["hi��there"])
+            self.assertEqual(len(logs.records), 1)
+            self.assertIn(f"Non-UTF-8 bytes replaced with U+FFFD while reading {p}:", logs.output[0])
 
     def test_read_text_safe_normalizes_crlf_when_linesep_differs(self):
         import os
