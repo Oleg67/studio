@@ -407,10 +407,10 @@ Rules:
   grandfathered set rests on those three paths being narrow and reviewed — not on
   a default that has been demonstrated.
 - **`TYPE` is read only in the menu's declaration region:** from the menu
-  header up to the first section that is not `TITLE`, `TYPE`, or `SHAPE` (the
-  two declarations share one region -- see "Declared menu shape" below). A
-  declaration outside a menu, nested in its body, or trailing it is inert,
-  and is reported rather than ignored.
+  header up to the first section that is not `TITLE`, `TYPE`, `SHAPE`, or
+  `KEY` (all three declarations share one region -- see "Declared menu shape"
+  and "Declared gate key" below). A declaration outside a menu, nested in its
+  body, or trailing it is inert, and is reported rather than ignored.
 - **A line indented deeper than the menu's other sub-headers is continuation
   text of the header above it**, not a header of its own — so a title running
   onto a second line is read as title text. A `TYPE:` written there is not read
@@ -518,12 +518,13 @@ Rules:
   **Unlike `TYPE`'s undeclared-defaults-to-`blocking` contract, this fallback
   is live, executable behaviour today** — it is what routes every menu
   predating this declaration, not a deferred intent.
-- `SHAPE` and `TYPE` **share one declaration region**: it runs from the menu
-  header up to the first section that is not `TITLE`, `TYPE`, or `SHAPE`.
-  Neither header ends the other's region, so either may be declared first —
-  `SHAPE` before `TYPE`, or `TYPE` before `SHAPE`, both read correctly. A
-  declaration outside a menu, nested in its body, or trailing it is inert, and
-  is reported rather than ignored.
+- `SHAPE`, `TYPE`, and `KEY` **share one declaration region**: it runs from
+  the menu header up to the first section that is not `TITLE`, `TYPE`,
+  `SHAPE`, or `KEY`. No one of the three ends another's region, so all six
+  orderings of the three read correctly — declaration order never affects the
+  region or which header sets its indentation level (see "Declared gate key"
+  below). A declaration outside a menu, nested in its body, or trailing it is
+  inert, and is reported rather than ignored.
 - **A line indented deeper than the menu's other sub-headers is continuation
   text of the header above it**, not a header of its own, exactly as for
   `TYPE` — see that rule above; it applies identically to `SHAPE`.
@@ -550,6 +551,115 @@ Rules:
   region, at the right indent) inert.
 - An **empty** value is not prose, for the same reason as `TYPE:` — `shape:`
   and `Shape:` are reported as near-misses and `SHAPE:` as a non-literal.
+
+### Declared gate key
+
+> **Reviewed** (constructorfabric/studio#327). The mechanics below (region,
+> indentation, near-miss detection) follow directly from `TYPE` and `SHAPE`'s
+> precedent. Key syntax and namespace scope — the two design calls with no
+> precedent to copy from — are confirmed as proposed below; the one addition
+> from review is a non-blocking follow-up on kit-over-core key collisions,
+> noted where it applies.
+
+A decision or confirmation menu may declare the key it resolves by, so an
+economy filter can answer it from a plan rather than matching on prose. This
+is the declared-source counterpart to `GateRuling.decision_key`
+(`skills/studio/scripts/studio/utils/decision_log.py`) — the frozen
+resolution contract's first field, `decision_key → value → provenance →
+status` (`architecture/features/core-infra.md`, `inst-log-gate-ruling`). That
+contract already assumes a gate's decision key exists as a fact a plan can
+answer — `gate_chain.py`'s own docstring states it as given ("a plan can
+answer a decision key") — but nothing in PDSL lets a gate *declare* one today.
+This section, and the plan-and-ledger economy filter that reads it, close
+that gap (HYP-2984, a subtask of 2871).
+
+```pdsl
+MENU DeployTargetGate:
+  TITLE: Which environment?
+  TYPE: decision
+  SHAPE: fixed-choice
+  KEY: deploy_target
+  OPTIONS:
+    1 staging -> CONTINUE CurrentWorkflow
+    2 prod -> CONTINUE CurrentWorkflow
+  INVALID:
+    EMIT "Reply with 1 or 2."
+    WAIT user.reply
+    STOP_TURN
+```
+
+`TITLE`, `TYPE`, `SHAPE`, and `KEY` may be declared in any order — order
+never affects the declaration region or which sub-header sets the menu's
+indentation level (see "declared menu header" rules above). Three
+declarations sharing one region is a new interaction with no `TYPE`/`SHAPE`
+precedent, so this is not left to ride on the claim that it transfers: the
+implementation must assert it directly, over all six orderings of the three,
+plus one case confirming a fourth recognized section still ends the region
+regardless of order (see the design note's Tests section).
+
+Rules:
+
+- `KEY` is a **declared identifier**, not a token from a closed table — the
+  one way it differs in kind from `TYPE`/`SHAPE`, both of which validate
+  membership in a fixed 2-3-token set. **Confirmed: a bare lowercase
+  identifier matching `^[a-z][a-z0-9_]*$`** (letters, digits, `_`; must start
+  with a letter, no hyphens) — the same shape `GateRuling.decision_key`
+  already accepts as a plain `str`, made checkable at declaration time. `KEY`
+  is a *data* identifier — it is also a key in the plan's `[[gate_decisions]]`
+  table, resolved by exact string match with no normalisation
+  (`plan_decisions.py`) — so it stays snake_case rather than adopting
+  `UNIT`/`MENU`'s PascalCase or `@cpt-`'s kebab-case, keeping all three
+  identifier kinds visually un-confusable. Grouping, where wanted, is a prefix
+  convention (`plan_produce_approach`, `plan_next_action`), not a hierarchy
+  separator — a dot was considered and rejected: it buys nothing an
+  exact-match resolver needs and clashes with TOML's own dotted-key syntax.
+  Never interpolated, never a variable, never carrying a `WHEN` clause.
+- At most one `KEY` per menu.
+- **`KEY` may be omitted.** An undeclared decision/confirmation gate is valid
+  today; a *newly added* decision/confirmation gate must declare one, so
+  gates migrate one at a time, the same way `TYPE` migrated in #162 — the
+  undeclared set can only shrink.
+- **A missing `KEY` is fail-safe.** Exactly as an undeclared `TYPE` is read as
+  `blocking` under the contract this spec records (not necessarily current
+  behaviour — see `TYPE`'s own rules above on that distinction): a gate
+  without a declared `KEY` cannot be matched by the plan-and-ledger economy
+  filter and the chain leaves its existing stop standing, i.e. it asks. A
+  **malformed or duplicate `KEY` fails** — it is reported, the same direction
+  as `TYPE`'s near-miss rule: the failure mode is always more friction, never
+  more autonomy.
+- **`KEY` is read only in the menu's declaration region**, identically to
+  `TYPE`/`SHAPE` — see the region and continuation-text rules above, which
+  apply to `KEY` unchanged. `KEY` is not exempt from the indentation rule,
+  the same bucket as `TYPE`/`SHAPE`, not `TITLE`/`OPTIONS`/`INVALID`.
+- A sub-header **in that region** that is a near-miss of `KEY` is an error,
+  using the same edit-distance-1 + alias-folding mechanism as `TYPE`/`SHAPE`.
+  **PROPOSED** rejected alternatives: `ID`, `DECISION_KEY`, `GATE_KEY`,
+  `RESOLVE_KEY`, `KEY_ID`.
+- **Keys must be unique. Confirmed namespace scope: repo-wide** — every
+  declared `KEY` across the whole PDSL corpus is a single flat namespace, the
+  same scope the existing `@cpt-` traceability-ID uniqueness check already
+  uses (`_validate_duplicate_definitions`,
+  `skills/studio/scripts/studio/utils/constraints.py`). A narrower scope
+  (per-kit, per-workflow-file) was considered and rejected: the plan-and-ledger
+  filter resolves a gate by key alone, with no file or kit qualifier in
+  `GateRuling`, so a key that collides across files would be ambiguous exactly
+  where it is read. This is the one rule with no `TYPE`/`SHAPE` precedent at
+  all — both are validated per-menu, never across files.
+  **Known gap, not blocking this proposal:** repo-wide lint only covers the
+  core corpus at authoring time. A kit is authored and distributed
+  separately, so its keys cannot be checked against core's before install —
+  yet at runtime a kit gate and a core gate can resolve against the same
+  active plan, a real collision the repo-wide lint cannot see. Tracked as a
+  follow-up: a naming convention where core keys stay unprefixed and each kit
+  is required to prefix its own, so a kit can never shadow a core key — the
+  same shape as the existing rule that a kit inherits behaviour only by
+  declaring its own.
+- **The boundary, stated rather than implied**, is the same as `TYPE`'s:
+  decoration is discarded, not listed, so a declaration with another token
+  embedded in it, a near-miss outside the region or written as continuation
+  text, and a name spelled in lookalikes at two or more positions are not
+  detected — each is prose, or (inside the region, at the right indent)
+  inert.
 
 ---
 
