@@ -11,6 +11,7 @@ IMPORTANT: This module MUST NOT contain business logic.
 """
 
 # @cpt-algo:cpt-studio-algo-core-infra-route-command:p1
+import os
 import sys
 import logging
 from pathlib import Path
@@ -20,9 +21,35 @@ from typing import Callable, List, Optional
 from .utils import decision_log
 
 _CLI_STDERR_HANDLER_NAME = "studio-cli-stderr"
+_LOG_LEVEL_ENV = "CF_STUDIO_LOG_LEVEL"
 
 
 # @cpt-begin:cpt-studio-algo-core-infra-route-command:p1:inst-route-helpers
+def _studio_log_level() -> int:
+    """The level the `studio` logger family runs at, WARNING unless overridden.
+
+    WARNING is the right default: these diagnostics share stderr with command
+    output, and a CLI that narrates its own cache reads is a CLI people stop
+    reading. But pinning it unconditionally made every `logger.debug` in the
+    package unreachable through the shipped CLI -- including the atomic-write
+    cleanup diagnostics added precisely so that a failed write could be
+    investigated. They could be read from a test's `caplog` and from nowhere
+    else, which is not what "reports at debug" is supposed to mean
+    (#236 review).
+
+    An environment variable rather than a flag because it has to work for every
+    command without each one growing an argument, and because the person who
+    needs it is usually re-running a command that already failed. An
+    unrecognised value falls back to WARNING rather than failing the command:
+    this knob exists to investigate a problem, so it must not become one.
+    """
+    requested = os.environ.get(_LOG_LEVEL_ENV, "").strip().upper()
+    if not requested:
+        return logging.WARNING
+    level = logging.getLevelName(requested)
+    return level if isinstance(level, int) else logging.WARNING
+
+
 def _configure_studio_logging() -> None:
     """Route studio diagnostics to stderr with a stable handler."""
     studio_logger = logging.getLogger("studio")
@@ -38,7 +65,7 @@ def _configure_studio_logging() -> None:
     handler.set_name(_CLI_STDERR_HANDLER_NAME)
     handler.setFormatter(logging.Formatter("%(message)s"))
     studio_logger.addHandler(handler)
-    studio_logger.setLevel(logging.WARNING)
+    studio_logger.setLevel(_studio_log_level())
     studio_logger.propagate = False
 
 
@@ -125,6 +152,10 @@ def _cmd_validate_toc(argv: List[str]) -> int:
 def _cmd_spec_coverage(argv: List[str]) -> int:
     from .commands.spec_coverage import cmd_spec_coverage
     return cmd_spec_coverage(argv)
+
+def _cmd_declared_stops(argv: List[str]) -> int:
+    from .commands.declared_stops import cmd_declared_stops
+    return cmd_declared_stops(argv)
 
 def _cmd_chunk_input(argv: List[str]) -> int:
     from .commands.chunk_input import cmd_chunk_input
@@ -237,6 +268,7 @@ _COMMAND_DESCRIPTIONS = {
     "validate-kits": "Validate kit structure, templates, and examples",
     "validate-toc": "Validate Table of Contents in Markdown files",
     "spec-coverage": "Measure CDSL marker coverage in code",
+    "declared-stops": "Fail when a workflow declares more stops than its baseline",
     "check-language": "Check artifacts for disallowed Unicode scripts (LANG001)",
     "kit": "Kit management (install, update)",
     "init": "Initialize Constructor Studio in a project",
@@ -274,7 +306,7 @@ _COMMAND_DESCRIPTIONS = {
 
 _COMMAND_SECTIONS = [
     ("Setup & Configuration", ["init", "update", "info", "resolve-vars", "generate-agents", "agents"]),
-    ("Validation", ["validate", "validate-kits", "validate-toc", "spec-coverage", "check-language"]),
+    ("Validation", ["validate", "validate-kits", "validate-toc", "spec-coverage", "declared-stops", "check-language"]),
     ("Search & Navigation", ["list-ids", "list-id-kinds", "get-content", "where-defined", "where-used"]),
     ("Kit Management", ["kit"]),
     ("Utility", [
@@ -311,6 +343,7 @@ _COMMAND_HANDLERS: dict[str, str] = {
     "toc": "_cmd_toc",
     "validate-toc": "_cmd_validate_toc",
     "spec-coverage": "_cmd_spec_coverage",
+    "declared-stops": "_cmd_declared_stops",
     "chunk-input": "_cmd_chunk_input",
     "doc-index": "_cmd_doc_index",
     "tfidf-score": "_cmd_tfidf_score",
@@ -353,6 +386,7 @@ _COMMAND_HANDLER_REFERENCES: tuple[CommandHandler, ...] = (
     _cmd_toc,
     _cmd_validate_toc,
     _cmd_spec_coverage,
+    _cmd_declared_stops,
     _cmd_chunk_input,
     _cmd_doc_index,
     _cmd_tfidf_score,

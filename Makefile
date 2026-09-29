@@ -1,5 +1,5 @@
 # @cpt-algo:cpt-studio-spec-init-structure-change-infrastructure:p1
-.PHONY: test test-verbose test-quick test-coverage test-coverage-diff validate validate-examples validate-feature validate-code validate-code-feature self-check validate-kits validate-kits-sdlc vulture vulture-ci pylint install install-pipx install-proxy install-prompt-tests clean help check-pytest check-pytest-cov check-pipx check-vulture check-pylint check-versions check-prompt-tests bootstrap-init bootstrap-repair update update-local seed-cache ensure-bootstrap generate-agents spec-coverage ci lint-ci test-prompts test-prompts-view
+.PHONY: test test-verbose test-quick test-coverage test-coverage-diff validate validate-examples validate-feature validate-code validate-code-feature self-check validate-kits validate-kits-sdlc vulture vulture-ci pylint install install-pipx install-proxy install-prompt-tests clean help check-pytest check-pytest-cov check-pipx check-vulture check-pylint check-versions check-prompt-tests bootstrap-init bootstrap-repair update update-local seed-cache ensure-bootstrap generate-agents spec-coverage ci lint-ci test-prompts test-prompts-view declared-stops
 
 # Detect container architecture for act (arm64 on Apple Silicon, amd64 otherwise)
 UNAME_M := $(shell uname -m)
@@ -256,6 +256,11 @@ spec-coverage: ensure-bootstrap
 	@echo "Checking spec coverage (Constructor Studio system)..."
 	$(PYTHON) $(BOOTSTRAP_STUDIO) spec-coverage --system studio --min-coverage 90 --min-file-coverage 60 --min-granularity 0.45
 
+# Declared-stop non-regression gate (the story's CI invariant)
+declared-stops:
+	@echo "Checking declared stops against the recorded baseline..."
+	$(PYTHON) $(SOURCE_STUDIO) declared-stops --root .
+
 # Check version consistency
 check-versions:
 	@$(PYTHON) scripts/check_versions.py
@@ -337,9 +342,13 @@ install-proxy: check-pipx
 #                        installed by `make install-proxy`)
 #
 # Test runs spin up fresh `cfs init`-ed tmpdir sandboxes and consume real
-# Claude / Codex API tokens. Defaults to cheap models (Haiku 4.5, gpt-5.4-mini
-# at low effort, 128k context); override via CF_UX_* env vars — see
-# tests/prompts/cf-ux/README.md.
+# Claude / Codex API tokens. Defaults to cheap models at low effort and 128k
+# context; override via CF_UX_* env vars — see tests/prompts/cf-ux/README.md.
+#
+# The slugs themselves are deliberately not repeated here. They are withdrawn
+# over time, and this comment is the copy that went stale last time: it still
+# named gpt-5.4-mini after the default had moved on. The values live next to
+# the code that uses them, in tests/prompts/cf-ux/providers/.
 check-prompt-tests:
 	@command -v claude >/dev/null 2>&1 || { \
 		echo ""; \

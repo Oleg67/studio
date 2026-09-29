@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
+from .home_prefix import blank_if_could_carry_home
 
 logger = logging.getLogger(__name__)
 
@@ -302,12 +303,10 @@ def _redact(value: Any) -> Any:
             # feeding it back through the failed redactor would be a leak as well as a loop.
             logger.warning("the shared home-redaction pattern is unavailable, so a value is "
                            "blanked rather than risk leaking a path: %s", type(exc).__name__)
-            # Cross-separator and case-folded, the same holes `_home_pattern` itself closes:
-            # blank the value if the home prefix could appear in it under either separator or
-            # case, and pass through only text that plainly cannot carry it. A plain
-            # same-case substring test would let a forward-slash Windows path slip out raw.
-            prefix = home.lower().replace("\\", "/")
-            return "..." if prefix in value.lower().replace("\\", "/") else value
+            # `home_prefix` imports nothing, so it is imported at module scope above rather
+            # than here: an import that happened at load time cannot be the thing missing now.
+            # `redaction.home_collapsed` falls back to the same helper.
+            return blank_if_could_carry_home(value, home)
     if isinstance(value, dict):
         return {_redact(k): _redact(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

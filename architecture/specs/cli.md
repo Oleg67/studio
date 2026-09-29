@@ -57,6 +57,7 @@ drivers:
   - [validate-kits](#validate-kits)
   - [map](#map)
   - [spec-coverage](#spec-coverage)
+  - [declared-stops](#declared-stops)
   - [delegate](#delegate)
 - [Mirror Commands](#mirror-commands)
   - [mirror override](#mirror-override)
@@ -143,6 +144,8 @@ cfs <command> [subcommand] [options] [arguments]
 
 **Exception 1**: the `cfs mirror *` subcommand family (`mirror override`, `mirror list`, `mirror remove`, `mirror clear`, and the `--help` / no-subcommand fallback) is user-facing and emits **plain-text** output to stdout instead of JSON. The JSON-only convention does NOT apply to these subcommands.
 
+**Exception 2 — human-readable default with `--json` opt-in**: a command MAY render its result to stdout as human-readable text by default, provided the **same** result data is available as JSON on stdout when `--json` is passed. Where this applies, `--json` is the stable machine-readable contract and the default rendering is presentation only; the two MUST carry the same fields, and no data may exist in one form and not the other. This exception is **not yet in force for any shipped command**: it applies to the routing-summary output of `agents` and `generate-agents` (the per-harness `routing` section) only once `cpt-studio-feature-hook-based-session-routing` ships — that feature is currently `planned` in DECOMPOSITION.md and unimplemented, so today both commands remain JSON-only on stdout like every other command. Commands not named here remain JSON-only on stdout in all cases.
+
 ### Exit Codes
 
 | Code | Meaning | When |
@@ -157,9 +160,11 @@ cfs <command> [subcommand] [options] [arguments]
 |--------|-------------|
 | `--version` | Show cache and project skill versions |
 | `--help` | Show help for command |
-| `--json` | Force JSON output (default, explicit for clarity) |
+| `--json` | Force JSON output (default, explicit for clarity) — see the note below for the `agents` / `generate-agents` routing output |
 | `--quiet` | Suppress stderr |
 | `--verbose` | Increase stderr detail |
+
+Stdout is JSON by default for every command except the `cfs mirror *` family ([Exception 1](#output)), so passing `--json` changes nothing today. The one planned departure from that default is [Exception 2](#output) under Output: once `cpt-studio-feature-hook-based-session-routing` ships, the routing summary of `agents` and `generate-agents` will render as human-readable text by default and as JSON only when `--json` is passed.
 
 ---
 
@@ -349,6 +354,14 @@ cfs validate [--artifact PATH] [--skip-code] [--verbose] [--output FILE]
 A warning-only failure adds `"failed_on": "warnings"` alongside `"status": "FAIL"`. `severity_overrides` and `suppressed_count` appear only when non-empty. An override that a `locked` entry refused carries `"applied": false` and names the entry as `"<type>:<id>"`, for example `"heading:prd-metrics"`.
 
 Both `errors` and `warnings` are emitted on every run, passing or failing. When a rule is set to `off`, the findings it removed are counted under `suppressed_count`; when a project lowers a rule, or a `locked` entry refuses a lowering, each is listed under `severity_overrides`. `--fail-on-warnings` (or `fail_on_warnings = true` in `core.toml`) turns a warning-only run into `status: FAIL`, exit 2, with `failed_on: "warnings"`.
+
+**What it does not check**: formatting. `validate`, `validate-toc` and `validate-kits`
+judge structure — which sections exist, at which level and in which order, which
+identifiers live under them, and whether the declared relationships hold. Table
+alignment, bullet markers, heading capitalisation, line length and spelling are outside
+every rule set, and no configuration key turns such a check on; `markdownlint` and
+formatters cover them and are not Studio gates. Whether the content is any *good* is
+the checklist review's question, not this command's.
 
 **Flags**: `--artifact`, `--skip-code`, `--verbose`, `--output`, `--local-only`, `--source`, `--fail-on-warnings`, `--explain-severity [--kind K] [--rule R]`.
 
@@ -563,6 +576,13 @@ combined with `--artifact`. Output gains a `code_files_scanned` count (and a
 `code_files_skipped` count, when non-zero) so a caller can tell "flag not
 passed" apart from "flag passed but every candidate file was ignored,
 oversized, or unparsable".
+
+One locus, one record. A reference written bare and the same reference written as a
+markdown link are two places and appear once each; a single line that names the id
+twice — in prose and again in a link, say — is one place to go and look, and is
+reported once. The count is a count of places, not of syntax. A definition written in
+link form is neither a definition nor a use and is not listed at all, with or without
+`--include-definitions`; `cfs validate` reports it under `def-link-form-not-allowed`.
 
 **Output** (JSON):
 ```json
@@ -807,9 +827,13 @@ cfs generate-agents [--agent AGENT | --openai] [--root PATH] [--cf-studio-root P
 | `--cf-studio-root PATH` | Explicit Constructor Studio core root (optional override) |
 | `--cf-constructor-root PATH` | Legacy alias for `--cf-studio-root` |
 | `--config PATH` | Path to agents config JSON (optional; built-in defaults used when omitted) |
-| `--dry-run` | Compute planned changes without writing files |
+| `--dry-run` | Compute planned changes without writing files (including all session-routing writes — see below) |
 
 **Without `--agent`**: regenerate for all agents.
+
+**`--agent` scoping exception — routing state**: `--agent` scopes which agent's files are generated, with one documented exception in the session-routing behavior described in `architecture/features/hook-based-session-routing.md`. The `AGENTS.md`/`CLAUDE.md` routing marker is a single project-wide resource shared by all agents, so a scoped run's marker outcome can change the routing state of in-scope harnesses the run did **not** name — most notably when a shared-marker write fails and every harness depending on that marker is marked `errored`. In that case the run also writes those harnesses' own routing state files (`<agent-config-dir>/.cf-studio-routing-state.json`), so a later `cfs agents` reports the fresh state rather than a stale one. The write set for routing state is therefore the run's *affected* set, not the `--agent` selection; see that feature's affected-dependent-set rule (`cpt-studio-algo-hook-based-session-routing-reconcile-marker`, step `inst-for-each-finalize`). No other surface is affected: an unselected agent's hook entry, execution receipt, and generated workflow/skill/subagent files are never touched by a scoped run.
+
+**`--dry-run` and routing**: routing participates in the write-free `--dry-run` contract with no exception. `--dry-run` computes and reports the `routing` summary that a real run would produce — per-agent `routing_mode`, paths, and warnings — while writing no hook entry, no execution receipt, no routing state file, and no change to the shared `AGENTS.md`/`CLAUDE.md` marker.
 
 **Behavior**:
 1. Collect `SKILL.md` extensions from all installed kits.
@@ -862,6 +886,12 @@ Legacy per-tool manifest skill files are migrated away only when they match gene
   `subagents`
 - unsupported provider capabilities are reported through skip metadata instead of
   silent omission
+- a routing state-file persistence failure (per-harness `.cf-studio-routing-state.json`
+  write fails after the harness's routing mode was otherwise resolved cleanly) also
+  triggers `PARTIAL`, reported as a `level: error` entry in that harness's routing
+  `warnings` array rather than a downgrade of `routing_mode` — see
+  `cpt-studio-feature-hook-based-session-routing`'s algorithm step
+  `inst-persist-failure-partial`
 
 **Exit**: 0.
 
@@ -991,7 +1021,7 @@ cfs map [--out PATH] [--format html|json] [--config FILE] [--no-source] [--local
 Measure CDSL marker coverage in codebase files.
 
 ```
-cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity N] [--min-file-granularity N] [--system SLUG]... [--verbose] [--output PATH]
+cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity N] [--min-file-granularity N] [--system SLUG]... [--verbose] [--output PATH] [--requirement ALGO]... [--block ALGO:INST]...
 ```
 
 | Option | Description |
@@ -1003,6 +1033,10 @@ cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity 
 | `--system SLUG` | Limit coverage to one or more system slugs; can be repeated and matches nested child systems |
 | `--verbose` | Include per-file marker details in output |
 | `--output PATH` | Write report to file instead of stdout |
+| `--requirement ALGO` | Limit the `--semantic` pass to every block implementing this requirement; can be repeated. Takes a bare `<algo>`; given an `<algo>:<inst>` it exits 2 and names `--block`. A selector matching nothing is reported rather than silently empty. Requires `--semantic`; alone it exits 2 |
+| `--block ALGO:INST` | Limit the `--semantic` pass to one instruction; can be repeated. Not necessarily one block, as block ids are not unique. The instruction may be written with or without its source `inst-` prefix. Given a bare `<algo>` or an empty instruction it exits 2 and names `--requirement`. A selector matching nothing is reported rather than silently empty. Requires `--semantic`; alone it exits 2 |
+
+Supplied together, `--requirement` and `--block` combine as a **union**: every block either names is assessed, and a block named by both is assessed once. They are not intersected — that would select nothing whenever the two name different algos.
 
 **Drivers**: `cpt-studio-fr-core-traceability`, `cpt-studio-fr-core-cdsl`
 
@@ -1035,6 +1069,51 @@ cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity 
 - 0 — coverage meets all thresholds (or no thresholds specified)
 - 1 — error (no project found, no codebase entries configured)
 - 2 — coverage or granularity below a specified threshold, or one or more `--system` selectors are invalid
+
+---
+
+### declared-stops
+
+Fail the build when a workflow declares more stops (places it interrupts the user) than its recorded per-workflow baseline. The count is a static reachability walk of `workflows/` and `skills/`, an upper bound on how often a workflow can stop, not a trace of one run.
+
+```
+cfs declared-stops [--root PATH] [--baseline PATH] [--update]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--root PATH` | The tree to walk (default: the current directory) |
+| `--baseline PATH` | The recorded counts (default: `architecture/baselines/declared-stops.json` under `--root`) |
+| `--update` | Rewrite the baseline from what was measured, after review — the only way it ever changes |
+
+**Drivers**: `cpt-studio-algo-developer-experience-declared-stop-gate`
+
+**Behavior**:
+1. Walk `--root`'s `workflows/` and `skills/` and count each workflow's declared stops (reusing the gate-surface reader).
+2. If the walk skipped anything — an unreadable file or a missing `LOAD` target — the count is a floor, so exit 1 (a fault) rather than compare an under-count.
+3. Compare per workflow against the baseline: a rise **or** a workflow the baseline has never recorded fails (exit 2); a fall or a vanished workflow is reported for re-recording but does not fail.
+4. With `--update`, rewrite the baseline atomically from the measured counts and exit 0.
+
+**Stdout** (JSON):
+```json
+{
+  "status": "FAIL",
+  "total_declared_stops": 415,
+  "needs_recording": true,
+  "risen": [{"workflow": "workflows/plan.md", "before": 9, "now": 11}],
+  "fallen": [],
+  "added": [],
+  "gone": []
+}
+```
+A fault emits `{"status": "ERROR", "message": ...}`; `--update` emits `{"status": "OK", "recorded": N, "total_declared_stops": N, "baseline": PATH, "dropped": [workflow, ...]}`, where `dropped` names workflows the old baseline recorded that the tree no longer has (plus `"dropped_undetermined": <reason>` when a prior baseline existed but could not be read, so `dropped` is empty for lack of a comparison rather than because nothing vanished).
+
+**Stderr**: human-readable summary; the failing workflow and both its numbers first.
+
+**Exit codes**:
+- 0 — no workflow stops more than its baseline (a fall/removal is reported but passes)
+- 1 — a fault: a malformed argument, the walk failed, the tree or baseline could not be read, the baseline is malformed, or the surface was a floor
+- 2 — a check failed: a workflow rose, or one is not recorded in the baseline
 
 ---
 
@@ -1507,6 +1586,7 @@ CI pipelines should check for exit code 2 to detect validation failures.
 | `CFS_NO_VERSION_CHECK` | Disable background version check | unset |
 | `CFS_NO_COLOR` | Disable colored stderr output | unset |
 | `NO_COLOR` | Standard no-color convention (respected) | unset |
+| `CF_STUDIO_LOG_LEVEL` | Level for the `studio` logger family. Lower it to `DEBUG` to read diagnostics the default hides, such as the atomic-write cleanup reports. An unrecognised value falls back to the default rather than failing the command. | `WARNING` |
 
 ---
 

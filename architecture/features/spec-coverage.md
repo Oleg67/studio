@@ -73,7 +73,7 @@ Without spec coverage, teams have no visibility into which parts of the codebase
 - No code files found → report with `applicable: false` naming how many registered entries resolved to no files, and 0% coverage
 
 **Steps**:
-1. [x] - `p1` - User invokes `cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity N] [--min-file-granularity N] [--verbose] [--semantic]` - `inst-user-spec-coverage`
+1. [x] - `p1` - User invokes `cfs spec-coverage [--min-coverage N] [--min-file-coverage N] [--min-granularity N] [--min-file-granularity N] [--verbose] [--semantic] [--requirement ALGO] [--block ALGO:INST]` - `inst-user-spec-coverage`
 2. [x] - `p1` - Load project context: studio config, registry, systems, codebase entries - `inst-load-context`
 3. [x] - `p1` - Resolve all code files from registered codebase entries - `inst-resolve-code-files`
 4. [x] - `p1` - **FOR EACH** code file, scan for `@cpt-*` markers using `cpt-studio-algo-spec-coverage-scan` - `inst-foreach-file`
@@ -87,6 +87,10 @@ Without spec coverage, teams have no visibility into which parts of the codebase
 - [x] - `p1` - Imports and module setup for spec-coverage command - `inst-coverage-imports`
 - [x] - `p1` - Reject a non-finite threshold at parse time, so a NaN floor cannot be dropped from the demanded set and let an empty scope pass a gate it never ran - `inst-threshold-argtype`
 - [x] - `p1` - Build CLI parser for threshold, system, verbosity, and output flags - `inst-build-parser`
+- [x] - `p1` - Check `--requirement` and `--block` against each other — each refuses the other's granularity and names the flag that wants it — and combine them into one selector list, a union rather than an intersection - `inst-resolve-selectors`
+- [x] - `p1` - Refuse each selector flag's opposite shape at parse time, naming the flag that wants it: `--requirement` rejects an `<algo>:<inst>` and points at `--block`, `--block` rejects a bare `<algo>` or an empty instruction and points at `--requirement`, so the granularity a caller gets is the one they asked for rather than one a colon decided - `inst-selector-shape-refusal`
+- [x] - `p1` - Combine the two validated flags into one selector list — a union, because the matcher already accepts either granularity and intersecting them would select nothing whenever they name different algos - `inst-selector-combine`
+- [x] - `p1` - Name the flag a selector arrived on, so an unmatched-selector warning quotes the flag the user actually typed - `inst-selector-flag`
 - [x] - `p1` - Collect known system slugs from nested system tree for selector validation - `inst-collect-system-slugs`
 - [x] - `p1` - Collect codebase file paths from registered entries and recurse into child systems - `inst-collect-codebase-files`
 - [x] - `p1` - Validate selected `--system` values and build unknown-system failure payloads - `inst-validate-systems`
@@ -177,14 +181,20 @@ A file with good granularity has approximately 1 CDSL instruction (`@cpt-begin`/
 
 **Input**: registered artifacts (for id→doc resolution), the scanned code files, the coverage report (for scope)
 
-**Output**: an advisory `semantic` report section — never affects status/exit. Success shape: `assessed` / `presumed_covered` / `unjudgeable[]` / `findings[]` / `skipped_excluded` / `schema_version` / `advisory`. If the pass raises, it degrades to `{advisory: true, error: <message>}` instead.
+**Output**: an advisory `semantic` report section — never affects status/exit. Success shape: `assessed` / `presumed_covered` / `unjudgeable[]` / `findings[]` / `skipped_excluded` / `schema_version` / `advisory`, plus `unmatched_selectors[]` **only when `--requirement` or `--block` named a selector that matched nothing** — omitted otherwise, so a clean run keeps the shape above and no consumer must special-case an empty list. If the pass raises, it degrades to `{advisory: true, error: <message>}` instead.
+
+`--requirement <algo>` selects every block implementing that requirement; `--block <algo>:<inst>` narrows to one instruction. Each flag names one granularity and **refuses the other's shape**, naming the flag that wants it — selecting a requirement and selecting an instruction have very different blast radii, and a colon is too small a thing to carry that difference silently. Both narrow this section and nothing else, so both require `--semantic`; used alone either is rejected at parse time (exit 2) rather than silently filtering nothing. **Supplied together they combine as a union**, not an intersection: every block either names is assessed, and a block named by both is assessed once. Intersecting them would select nothing whenever the two name different algos, which is never what supplying both is asking for.
 
 **Steps**:
 1. [x] - `p1` - Build the id→declaring-artifact map from cpt definition hits across the registered artifacts - `inst-scov-defmap`
 2. [x] - `p1` - Build one pairing per marked block: code = the block's lines, requirement = the algo declaration resolved from the block's id (unjudgeable when unresolved) - `inst-scov-pairings`
-3. [x] - `p1` - Run the advisory engine (`assess`) over the pairings, passing the coverage report for scope, and serialise the result as the `semantic` section (`advisory: true`) - `inst-scov-run`
-4. [x] - `p1` - Render a one-line advisory human summary (counts + weak/wrong tally) - `inst-scov-summary`
-5. [x] - `p1` - Name the weak/wrong requirements beneath that summary (findings whose verdict is `wrong`/`partial`, by `block_id` + `path:line`, `wrong` before `partial` so a cap keeps the most severe; presumed-covered and unjudgeable omitted — unjudgeable is dominated by no-judge noise but also holds permanent pre-filter gaps, neither actionable here), capped with a `+N more` continuation, so a reader need not open `--json` - `inst-scov-flagged`
+3. [x] - `p1` - Expand a selector into the forms a reader may reasonably type: as given, and with a leading `inst-` stripped from its instruction part, because a source marker reads `inst-<name>` while the parsed `block_id` carries `<name>` — a bare `<algo>` selector has no instruction part and is returned unchanged - `inst-scov-selector-forms`
+4. [x] - `p1` - Narrow the pairings to the given selectors, accepting either granularity — a bare `<algo>` (from `--requirement`) selects every block implementing that requirement, `<algo>:<inst>` (from `--block`) narrows to one instruction (**not** necessarily one block: block ids are not unique, so every block carrying that id is selected), accepting the instruction with or without the `inst-` prefix it carries in the source — matching on a colon-anchored prefix so a shorter id cannot silently also select a longer one. Reporting the selectors that matched nothing is a separate step - `inst-scov-select`
+5. [x] - `p1` - Return every selector that matched nothing rather than dropping it: an empty selection and a typo render identically — no findings — and mean opposite things, so the caller names the unmatched selector before the summary, this pass being unable to change the exit code - `inst-scov-unmatched`
+5. [x] - `p1` - Run the advisory engine (`assess`) over the pairings, passing the coverage report for scope, and serialise the result as the `semantic` section (`advisory: true`) - `inst-scov-run`
+6. [x] - `p1` - Render a one-line advisory human summary (counts + weak/wrong tally) - `inst-scov-summary`
+
+7. [x] - `p1` - Name the weak/wrong requirements beneath that summary (findings whose verdict is `wrong`/`partial`, by `block_id` + `path:line`, `wrong` before `partial` so a cap keeps the most severe; presumed-covered and unjudgeable omitted — unjudgeable is dominated by no-judge noise but also holds permanent pre-filter gaps, neither actionable here), capped with a `+N more` continuation, so a reader need not open `--json` - `inst-scov-flagged`
 
 **Supporting**:
 - [x] - `p1` - Module imports and setup for the semantic-coverage pass - `inst-scov-imports`

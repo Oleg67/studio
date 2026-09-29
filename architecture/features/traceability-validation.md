@@ -208,6 +208,8 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 **Supporting**:
 - [x] - `p1` - Imports and module setup for query commands (list-ids, where-defined, where-used) - `inst-query-imports`
 - [x] - `p1` - Resolve the code files one registered codebase entry covers, applying the shared exclusion policy and returning how many candidates were excluded - `inst-query-resolve-entry-files`
+- [x] - `p1` - Decide each candidate once across overlapping codebase entries, keyed on a symlink's own path and on any other file's resolved path, so neither the file list nor the excluded count is inflated by the overlap - `inst-query-dedupe-across-entries`
+- [x] - `p1` - Walk a directory entry: collect candidates by extension, resolve each once, and exclude those under a conventional non-source directory or escaping the project - `inst-query-walk-directory-entry`
 - [x] - `p1` - Refuse a candidate that is a symlink or resolves outside the project root, so a link cannot re-open an excluded tree - `inst-query-escapes-project`
 - [x] - `p1` - Argument parsing, context resolution, and artifact collection for query commands - `inst-query-resolve`
 - [x] - `p1` - Deduplicate scan hits per ID, preferring a definition record and surfacing conflicting duplicate definitions - `inst-scan-dedupe`
@@ -221,15 +223,16 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 
 **Input**: Path to a Markdown artifact file
 
-**Output**: List of ID hits: `{id, line, type (definition|reference), checked, has_task, has_priority, priority}`
+**Output**: List of ID hits: `{id, line, type (definition|definition-link-form|reference), checked, has_task, has_priority, priority}`
 
 **Steps**:
 1. [x] - `p1` - Read file as UTF-8 lines - `inst-read-file`
 2. [x] - `p1` - **FOR EACH** line (skipping fenced code blocks) - `inst-foreach-line`
    1. [x] - `p1` - Match ID definition pattern: `**ID**: \`cpt-...\`` with optional checkbox and priority - `inst-match-def`
    2. [x] - `p1` - **IF** definition matched, extract id, checked, has_task, priority and append as definition hit - `inst-if-def`
-   3. [x] - `p1` - **ELSE** match standalone reference pattern: `\`cpt-...\`` with optional checkbox - `inst-match-ref`
-   4. [x] - `p1` - **ELSE** scan for inline backticked `cpt-*` references - `inst-match-inline`
+   3. [x] - `p1` - **ELSE** match a definition written as a markdown link and append it under its own type, so the spelling is reported rather than read as a reference to the id it meant to declare; scan only the text after the link for inline references - `inst-match-def-link`
+   4. [x] - `p1` - **ELSE** match standalone reference pattern, bare or link-form, with optional checkbox - `inst-match-ref`
+   5. [x] - `p1` - **ELSE** scan for inline backticked `cpt-*` references - `inst-match-inline`
 3. [x] - `p1` - **RETURN** ordered list of hits - `inst-return-hits`
 4. [x] - `p1` - Parse a `cpt-{system}-{kind}-{slug}` identifier: extract system, kind, slug with composite ID support - `inst-parse-cpt`
 
@@ -239,6 +242,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 - [x] - `p1` - Content scoped extraction: hash-fence blocks, heading scopes, ID-definition scopes - `inst-scan-ids-get-content`
 - [x] - `p1` - File I/O utilities: safe text reader, text file iterator, relative path converter - `inst-scan-ids-file-utils`
 - [x] - `p1` - Wrapper function for `parse_cpt` identifier parser - `inst-parse-cpt-fn`
+- [x] - `p1` - One predicate for whether the scan classifies a line as a whole-line ID definition or standalone reference, shared by every caller that must step around ID lines - `inst-scanned-id-line`
 
 ### CPT Reference Scan
 
@@ -252,7 +256,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 
 **Steps**:
 1. [x] - `p1` - Iterate every `scan_cpt_ids` hit across the artifacts, yielding it with its artifact context â€” the shared scan the query commands reuse - `inst-scan-records`
-2. [x] - `p1` - Project the scan into references to a target id, optionally including its definitions - `inst-references`
+2. [x] - `p1` - Project the scan into references to a target id, optionally including its definitions, one record per locus so a line naming the id twice is one place to look - `inst-references`
 3. [x] - `p1` - Project the scan into a target id's definitions only - `inst-definitions`
 4. [x] - `p1` - Assemble a cpt-id's defâ†”ref graph view (`defined_in` / `referenced_in`) for the artifact-quality detectors - `inst-graph-for`
 
@@ -327,6 +331,7 @@ site.
 2. [x] - `p1` - **IF** headings errors exist **RETURN** early (IDs depend on correct structure) - `inst-if-headings-fail`
    1. [x] - `p1` - Decide that gate on error-severity heading findings only, so a rule lowered to `warning` no longer hides the TOC and identifier phases behind it - `inst-gate-on-errors`
 3. [x] - `p1` - Scan IDs using `cpt-studio-algo-traceability-validation-scan-ids` - `inst-scan-ids`
+   1. [x] - `p1` - Report every definition written as a markdown link, which declares nothing and is counted as neither a definition nor a reference - `inst-link-form-def`
 4. [x] - `p1` - Scan CDSL instructions using `cpt-studio-algo-traceability-validation-scan-cdsl` - `inst-scan-cdsl`
 5. [x] - `p1` - **FOR EACH** CDSL step where parent ID is checked but step is unchecked - `inst-foreach-cdsl-mismatch`
    1. [x] - `p1` - Emit error: CDSL step unchecked but parent already checked - `inst-emit-cdsl-error`
@@ -631,7 +636,8 @@ Deterministic infrastructure only, matching `doc_index.py`/`tfidf.py`: no LLM ca
 
 Shared by every local cache/bundle writer in this package (`doc_index.py`, `okf.py`) once a second consumer needed the exact same two behaviors a first implementation had already solved once -- extracted rather than reimplemented a second time. Mirrors the fallback shape `decision_log.py`'s own locking already established for this codebase (exclusive `fcntl` lock where available, unlocked elsewhere), kept separate since that module also bakes in log-rotation behavior these callers don't need.
 
-1. [x] - `p1` - Write text to a path atomically: temp file + `os.replace`, so a reader racing a concurrent writer sees either the old complete file or the new complete one, never a torn write - `inst-atomic-write`
+1. [x] - `p1` - Write text to a path atomically: temp file + `os.replace`, so a reader racing a concurrent writer sees either the old complete file or the new complete one, never a torn write; the descriptor `mkstemp` hands back is closed even when `os.fdopen` never takes ownership of it - `inst-atomic-write`
+   - [x] - `p1` - Remove the temp file on the failure path without becoming the failure: `unlink` inside an `except` can raise too, and its exception replaced the one that explained what actually went wrong - `inst-atomic-discard`
 2. [x] - `p1` - Run a read-modify-write callback under an exclusive lock on a sibling lock file, serializing concurrent callers so two overlapping cycles can't each read the same base state and have whichever writes last silently discard the other's update. An optional `timeout` bounds the wait instead of blocking forever (`None` keeps every existing caller's original block-forever behavior unchanged) - `inst-atomic-lock`
 3. [x] - `p1` - Poll for the lock under a bounded timeout via non-blocking `flock` attempts, retrying only the errno that means "someone else holds this lock right now" (`EAGAIN`/`EWOULDBLOCK`) and raising `TimeoutError` once the deadline passes; any other `OSError` (a real filesystem/descriptor failure, not contention) propagates immediately instead of being misdiagnosed as an ordinary wait - `inst-atomic-lock-poll`
 

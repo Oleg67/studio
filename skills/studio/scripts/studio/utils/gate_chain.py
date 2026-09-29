@@ -21,12 +21,23 @@ orders them. **No filters ship in it** -- with none registered every gate return
 which is identical to today. The filters (scope, reversibility, blocker; already-answered,
 plan-and-ledger) and the ledger write path are later increments, wired then. Nothing here is
 called by a runtime yet.
+
+**Failure philosophy — where this raises and where it degrades.** Runtime *data* never raises
+here: an unrecognised ``declared_type`` fails closed to ``ASK``, and the filters degrade to
+``INDETERMINATE`` rather than throw -- the same line the sibling ``decision_log`` holds on its
+write path, where instrumentation warns rather than fail a caller's command. The only raises are
+the ``__post_init__`` guards on ``ChainOutcome``/``EconomyVerdict``, and they guard a *construction
+invariant* -- an ill-formed value object a programmer built, such as a ``RESOLVE`` with no ruling --
+not a runtime value. ``GateRuling`` needs no such guard because it has no ill-formed combination
+(every field defaults to ``UNSPECIFIED``); ``ChainOutcome`` does, so it fails loud in a test rather
+than let a wrong decision be constructed silently.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Protocol
+from pathlib import Path
+from typing import List, Optional, Protocol, Tuple
 
 from .decision_log import GateRuling
 
@@ -36,6 +47,45 @@ from .decision_log import GateRuling
 #: ceiling costs no parser import -- the same reason ``decision_log`` reads ``GATE_TYPES``
 #: lazily. If the token is renamed in ``pdsl.GATE_TYPES`` the binding test fails here.
 BLOCKING = "blocking"
+
+#: The declared types whose stop an economy filter may remove. Everything else -- ``blocking``,
+#: or an unrecognised or misspelled type -- keeps the stop: the ceiling fails **closed** on an
+#: input it does not recognise, rather than treating an unknown as economy-eligible. Bound to
+#: ``pdsl.GATE_TYPES`` by a test (these two plus ``blocking`` are the whole set).
+CONFIRMATION = "confirmation"
+DECISION = "decision"
+_ECONOMY_ELIGIBLE = frozenset({CONFIRMATION, DECISION})
+
+
+# @cpt-begin:cpt-studio-algo-core-infra-gate-chain:p1:inst-chain-gate
+@dataclass(frozen=True)
+class Gate:
+    """One gate under evaluation, carrying only what the safety filters read.
+
+    The runtime populates it from the menu option being considered; the filters are pure
+    functions of it, so they are tested against constructed ``Gate``s with no runtime. Frozen
+    like its siblings -- a gate is an observation, not a mutable accumulator.
+    """
+
+    #: The option's visible action path (`SET … ; CONTINUE …` / `WRITE …` text). Read by the
+    #: blocker (does it name a never-auto-answer operation?) and, indirectly, by scope.
+    option_action: str = ""
+    #: Project files the option would create or modify. Read by scope and reversibility. Three
+    #: states, deliberately distinct: ``None`` (the default) means the write set is **undetermined**
+    #: -- the seam did not populate it -- and fails closed; the empty tuple ``()`` means the option
+    #: is **known to write nothing** and clears; a non-empty tuple is the files. "Don't know" and
+    #: "writes nothing" must never be the same value, or an unpopulated gate would clear.
+    target_files: Optional[Tuple[str, ...]] = None
+    #: The checkout root, for the reversibility probe. ``None`` means it cannot be checked.
+    project_root: Optional[Path] = None
+    #: The active plan's directory (holding ``plan.toml`` and its phase files), for scope.
+    #: ``None`` means no plan is in scope, which scope treats as fail-closed.
+    plan_dir: Optional[Path] = None
+    #: The number of the phase being executed, for scope. Scope allows a write only within the
+    #: outputs declared by this phase and the ones before it, never a future phase's. ``None``
+    #: means the active phase is unknown, which scope treats as fail-closed.
+    active_phase: Optional[int] = None
+# @cpt-end:cpt-studio-algo-core-infra-gate-chain:p1:inst-chain-gate
 
 
 # @cpt-begin:cpt-studio-algo-core-infra-gate-chain:p1:inst-chain-outcome
@@ -68,6 +118,8 @@ class ChainOutcome:
             raise ValueError(f"a {self.kind.name} outcome must not carry a ruling")
         if self.kind is OutcomeKind.DEFER and not self.defer_reason:
             raise ValueError("a DEFER outcome must say why it could not resolve")
+        if self.kind is not OutcomeKind.DEFER and self.defer_reason:
+            raise ValueError(f"a {self.kind.name} outcome must not carry a defer_reason")
 
     @classmethod
     def ask(cls) -> "ChainOutcome":
@@ -137,21 +189,21 @@ class EconomyVerdict:
 class SafetyFilter(Protocol):  # pylint: disable=too-few-public-methods
     """May only add a stop. Return ``INDETERMINATE`` when unsure -- the chain fails it closed."""
 
-    def check(self, gate: object) -> SafetyVerdict:
+    def check(self, gate: "Gate") -> SafetyVerdict:
         """Report whether this filter clears the gate, requires a stop, or cannot tell."""
 
 
 class EconomyFilter(Protocol):  # pylint: disable=too-few-public-methods
     """May only remove a stop the declared type created. Return ``NO_OPINION`` to abstain."""
 
-    def check(self, gate: object) -> EconomyVerdict:
+    def check(self, gate: "Gate") -> EconomyVerdict:
         """Report whether this filter removes the stop, abstains, or cannot rule."""
 # @cpt-end:cpt-studio-algo-core-infra-gate-chain:p1:inst-chain-filters
 
 
 # @cpt-begin:cpt-studio-algo-core-infra-gate-chain:p1:inst-chain-resolve
 def resolve_gate(
-    gate: object,
+    gate: Gate,
     declared_type: str,
     safety: List[SafetyFilter],
     economy: List[EconomyFilter],
@@ -174,10 +226,16 @@ def resolve_gate(
             # added stop is not something economy is allowed to reach, let alone remove.
             return ChainOutcome.ask()
 
-    if declared_type == BLOCKING:
-        # The ceiling. A blocking gate's stop is not one the type lets anything remove, so
-        # economy never runs for it. Which economy filter may act on a confirmation vs a
-        # decision gate is settled when the economy filters land (increment 3).
+    if not isinstance(declared_type, str) or declared_type not in _ECONOMY_ELIGIBLE:
+        # The ceiling, failing closed. A `blocking` gate's stop is not one the type lets
+        # anything remove; and an unrecognised or misspelled type is treated the same way
+        # rather than slipping through as economy-eligible -- the one input that decides
+        # whether the ceiling applies must not fail open. The `isinstance` guard runs first so
+        # a non-string (a caller violating the type hint with a list or dict) fails closed to
+        # ASK rather than raising `TypeError` from the frozenset membership test -- the
+        # never-raises contract in this module's docstring holds for that input too. Which
+        # economy filter may act on a confirmation vs a decision gate is settled with the
+        # economy filters.
         return ChainOutcome.ask()
 
     verdicts = [economy_filter.check(gate) for economy_filter in economy]

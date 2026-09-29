@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from .home_prefix import blank_if_could_carry_home
 
 
 # @cpt-begin:cpt-studio-algo-core-infra-armed-reversal:p1:inst-redact-home
@@ -119,7 +120,8 @@ def home_collapsed(value: object, *, logger: logging.Logger, subject: str) -> st
             logger.warning("%s: the home-redaction pattern is unavailable, so a value is "
                            "blanked rather than risk leaking a path: %s", subject,
                            type(exc).__name__)
-            prefix = home.lower().replace("\\", "/")
-            reported = "..." if prefix in reported.lower().replace("\\", "/") else reported
+            # The same helper `decision_log._redact` falls back to; it imports nothing, so both
+            # take it at module scope instead of inside a handler for a failed import.
+            reported = blank_if_could_carry_home(reported, home)
     return reported
 # @cpt-end:cpt-studio-algo-core-infra-armed-reversal:p1:inst-redact-home

@@ -8,12 +8,40 @@ import time
 from pathlib import Path
 from typing import Any
 
-from _sandbox import SandboxError, sandbox
+from _sandbox import (SandboxError, child_env, isolated_home, redact_secrets, safe_head,
+                      safe_tail, sandbox)
 
 CODEX_BIN = "codex"
+#: Where this CLI keeps its credential, relative to its home -- or under `CODEX_HOME`.
+_CODEX_CREDENTIAL = ".codex/auth.json"
+
+
+def _codex_credential() -> Path:
+    codex_home = os.environ.get("CODEX_HOME")
+    return (Path(codex_home) if codex_home else Path.home() / ".codex") / "auth.json"
+
+#: Namespaces the `codex` CLI is entitled to. It runs with `approval_policy="never"`,
+#: so it acts without asking -- and inherited the whole runner environment until
+#: constructorfabric/studio#229's review pointed out that only its sibling was fixed.
+_CHILD_ENV_PREFIXES = ("OPENAI_", "CODEX_")
 CALL_TIMEOUT_S = 850  # under promptfoo worker timeout (900s)
 
-DEFAULT_MODEL = os.environ.get("CF_UX_CODEX_MODEL", "gpt-5.4-mini")
+#: A slug, not a promise: the set a `codex` account is entitled to changes, and
+#: this one is only the cheapest of that set as of 2026-09-18 (`codex` reports
+#: gpt-5.6-sol, -terra, -luna, gpt-6-astra, gpt-5.5). Its predecessor here,
+#: `gpt-5.4-mini`, had been withdrawn, and every codex case in the pilot errored
+#: with `The 'gpt-5.4-mini' model is not supported when using Codex with a
+#: ChatGPT account.` -- half the suite red for a reason that had nothing to do
+#: with the skill under test. When that happens again, re-pick from `codex` and
+#: move the date; `CF_UX_CODEX_MODEL` is the escape hatch meanwhile.
+#:
+#: Not shared with `studio.commands.agents._MODEL_MATRIX`, which names OpenAI
+#: slugs for generated agent configs, and deliberately so: that matrix maps a
+#: *tier* a user chose onto a model, while this picks the cheapest thing that
+#: can run a test. One constant serving both would make a pilot cost decision
+#: change what users' agents run. They do go stale together, though, so a
+#: withdrawal found here is worth checking there.
+DEFAULT_MODEL = os.environ.get("CF_UX_CODEX_MODEL", "gpt-5.6-sol")
 # "minimal" is incompatible with image_gen / web_search tools — use "low".
 DEFAULT_EFFORT = os.environ.get("CF_UX_CODEX_EFFORT", "low")
 # Shrink context window from default 400k to keep cold-start fast and cheap.
@@ -58,15 +86,21 @@ def _invoke(prompt: str, cwd: Path, started: float) -> dict:
     for plugin in DISABLED_PLUGINS:
         cmd += ["-c", f'plugins."{plugin}".enabled=false']
     cmd.append(invoked)
+    # Built once: the same mapping spawns the child and defines what must not come back
+    # out of it, exactly as in `claude_provider`. Applying the allowlist to all three
+    # providers and the redaction to one of them was the same half-fix twice (#229).
+    home = isolated_home(cwd, _codex_credential(), _CODEX_CREDENTIAL)
+    env = child_env(*_CHILD_ENV_PREFIXES, tmpdir=cwd, home=home)
     proc = subprocess.run(
         cmd, cwd=cwd, capture_output=True, text=True, timeout=CALL_TIMEOUT_S, check=False,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL, env=env,
     )
     duration = time.monotonic() - started
 
     if proc.returncode != 0:
         return {
-            "error": f"codex exited {proc.returncode}: {proc.stderr.strip()[:500]}",
+            "error": f"codex exited {proc.returncode}: "
+                     f"{safe_head(proc.stderr.strip(), env)}",
             "metadata": {"duration_s": round(duration, 2)},
         }
 
@@ -75,6 +109,12 @@ def _invoke(prompt: str, cwd: Path, started: float) -> dict:
     metadata: dict[str, Any] = {
         "duration_s": round(duration, 2),
         "sandbox": str(cwd),
-        "stderr_tail": proc.stderr.strip()[-500:] if proc.stderr else None,
+        # An isolated run is a different measurement (no competing plugins), so
+        # the report says which one this was.
+        "home": "isolated" if home is not None else "runner",
+        "stderr_tail": (safe_tail(proc.stderr.strip(), env)
+                        if proc.stderr else None),
     }
-    return {"output": output_text, "metadata": metadata}
+    # Redacted, not capped, as in `claude_provider`: the whole answer is what gets
+    # graded, and it is model-authored (#229 review).
+    return {"output": redact_secrets(output_text, env), "metadata": metadata}

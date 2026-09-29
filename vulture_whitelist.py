@@ -11,8 +11,8 @@
 # least one hit and the instruction reads as already satisfied — which would have the entry
 # deleted while the name is still genuinely unused, failing the dead-code gate. Two further
 # kinds of hit are not consumers either: the defining module itself, and a mention in a
-# docstring or comment (`redaction.py` names `armed_reversal` in its own module docstring,
-# for instance, and imports nothing from it). A consumer is production code that imports
+# docstring or comment (a module may name another in its own docstring, for instance, without
+# importing anything from it). A consumer is production code that imports
 # and calls the name. Tests do not count; vulture does not scan them, which is why the
 # entry is needed at all. Raised in review, where the instructions were unqualified.
 
@@ -213,22 +213,6 @@ finding_json_schema  # noqa: B018
 from studio.utils.cpt_reference_scan import graph_for  # noqa: E402
 graph_for  # noqa: B018
 
-# armed_reversal — the whole module, which nothing imports yet and that is the point.
-# It asserts a reversal mechanism is armed before an autonomous edit; the caller that will
-# consult it is the PDSL side of the same task, and the autonomy paths that exist today
-# select menu options rather than editing files, so there is currently nothing for it to
-# guard. Built before the consumer deliberately: putting the check in place before
-# autonomous editing ships is the only order in which it is cheap.
-# REMOVAL TRIGGER — delete these entries once a dispatch or eligibility module consults it
-# (grep `armed_reversal` per the header above; today it hits only this file, the module
-# itself, and a docstring mention in `redaction.py` — none of which is a consumer).
-# The algorithm is declared in
-# architecture/features/core-infra.md (### Assert an Armed Reversal).
-from studio.utils.armed_reversal import ReversalCheck, armed_reversal  # noqa: E402
-armed_reversal  # noqa: B018
-ReversalCheck.mechanism  # noqa: B018
-ReversalCheck.refused  # noqa: B018
-
 # plan_decisions.PhaseOutlook.will_run — the forecast a caller reads, with no caller yet.
 # `preflight` returns `blocked_on` and uses `PlanLookup.resolved` itself; `will_run` is the
 # shape the consumer wants and the consumer is the enforcement increment, which does not
@@ -294,3 +278,16 @@ _ = resolve_gate
 _ = SafetyVerdict.ADD_STOP
 _ = EconomyVerdict.no_opinion
 _ = EconomyVerdict.indeterminate
+
+# gate_filters -- the three safety filters (reversibility, scope, blocker), and `BLOCKING` (the
+# token the ceiling excludes, now referenced only by its binding test since the ceiling checks
+# the eligible set instead). Not wired to a runtime yet: the seam that builds a Gate and runs the
+# chain is a later increment. REMOVAL TRIGGER -- delete each once the runtime seam constructs and
+# runs a filter (grep `ReversibilityFilter`/`ScopeFilter`/`BlockerFilter` outside gate_filters.py
+# and its tests). The algorithm is declared in architecture/features/core-infra.md (### The Gate Chain).
+from studio.utils.gate_chain import BLOCKING  # noqa: E402
+from studio.utils.gate_filters import BlockerFilter, ReversibilityFilter, ScopeFilter  # noqa: E402
+_ = BLOCKING
+_ = ReversibilityFilter
+_ = ScopeFilter
+_ = BlockerFilter

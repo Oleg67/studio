@@ -497,3 +497,360 @@ class TestNoAbsolutePathReachesALogRecord:
         assert "unparseable" in logged
         assert str(tmp_path) not in logged
         assert "bad.py" in logged
+
+
+# --- --block selection (#196) ----------------------------------------------
+
+class TestBlockSelection:
+    """`--block` narrows the pass so one requirement can be opened and checked.
+
+    The judge phase makes this a prerequisite rather than a convenience: once real verdicts come
+    back across ~2,096 blocks, a verdict nobody can open is a verdict nobody can trust. The
+    narrowest filter before this was `--system`, a whole area of the product.
+    """
+
+    @staticmethod
+    def _pairings():
+        def mk(bid):
+            return sem.Pairing(block_id=bid, inst=bid.split(":")[-1], path="m.py",
+                               start_line=1, code="x", requirement="r")
+
+        return [mk(f"{_ALGO}:inst-strong"), mk(f"{_ALGO}:inst-weak"),
+                mk(f"{_ALGO}-extended:inst-other")]
+
+    def test_no_selector_keeps_everything(self) -> None:
+        kept, unmatched = sc._select_blocks(self._pairings(), None)
+        assert len(kept) == 3, [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_a_bare_algo_id_selects_every_block_of_that_requirement(self) -> None:
+        """One requirement is shared across an algo's blocks, so the coarse form must take them all."""
+        kept, unmatched = sc._select_blocks(self._pairings(), [_ALGO])
+        assert [p.inst for p in kept] == ["inst-strong", "inst-weak"], [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_a_full_block_id_narrows_to_that_instruction(self) -> None:
+        kept, unmatched = sc._select_blocks(self._pairings(), [f"{_ALGO}:inst-weak"])
+        assert [p.inst for p in kept] == ["inst-weak"], [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_a_shared_block_id_selects_every_block_carrying_it(self) -> None:
+        """The narrow form is not a promise of one block, and must not be described as one.
+
+        Block ids are not unique in this repository: 263 of 1935 are shared, the worst by ten
+        blocks. An earlier version of this flag's help, docstring and spec step all said
+        `<algo>:<inst>` "selects exactly one" — measurably false, and caught in review. Selecting
+        all of them is the right behaviour; claiming there is only one was the defect.
+        """
+        def mk(bid, inst):
+            return sem.Pairing(block_id=bid, inst=inst, path="m.py", start_line=1,
+                               code="x", requirement="r")
+
+        shared = [mk(f"{_ALGO}:inst-dup", "inst-dup"), mk(f"{_ALGO}:inst-dup", "inst-dup"),
+                  mk(f"{_ALGO}:inst-other", "inst-other")]
+        kept, unmatched = sc._select_blocks(shared, [f"{_ALGO}:inst-dup"])
+        assert len(kept) == 2, [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_the_inst_prefix_from_the_source_is_accepted(self, tmp_path: Path) -> None:
+        """A marker reads `inst-weak`; the parsed `block_id` is `:weak`. Both must select it.
+
+        Every example first written for this flag used the `inst-` form, and **none of them
+        worked** — the selector matched nothing, which on screen reads as "this requirement is
+        clean". Hand-made `Pairing` fixtures hid it, because they encoded the assumed id rather
+        than the real one. Built from a real marked file for that reason.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        defs = sc._definition_map(ctx)
+        pairings = sc._pairings_for_files([code_path], defs, getattr(ctx, "project_root", None))
+        assert [p.block_id for p in pairings] == [f"{_ALGO}:strong", f"{_ALGO}:weak"], \
+            "the fixture no longer produces the ids this test reasons about"
+
+        for form in (f"{_ALGO}:weak", f"{_ALGO}:inst-weak"):
+            kept, unmatched = sc._select_blocks(pairings, [form])
+            assert [p.block_id for p in kept] == [f"{_ALGO}:weak"], (form, kept)
+            assert unmatched == [], form
+
+    def test_a_bare_algo_selector_is_left_alone_by_the_prefix_rule(self) -> None:
+        """`inst-` stripping applies to the instruction part only; a bare algo has none."""
+        assert sc._selector_forms(_ALGO) == [_ALGO]
+
+    def test_an_instruction_not_starting_with_inst_is_unchanged(self) -> None:
+        assert sc._selector_forms(f"{_ALGO}:weak") == [f"{_ALGO}:weak"]
+
+    def test_an_empty_selector_list_behaves_like_no_selector(self) -> None:
+        """`[]` and `None` must agree: argparse yields `None`, a caller may pass `[]`."""
+        kept, unmatched = sc._select_blocks(self._pairings(), [])
+        assert len(kept) == 3, [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_a_shorter_id_does_not_swallow_a_longer_one(self) -> None:
+        """The prefix rule is anchored on the colon.
+
+        A bare `startswith` would make `cpt-studio-algo-fixture` also select
+        `cpt-studio-algo-fixture-extended`, handing a reviewer a wider set than they asked for
+        while looking like it worked — the failure mode is silent, which is why it is pinned.
+        """
+        kept, _ = sc._select_blocks(self._pairings(), [_ALGO])
+        assert all(p.block_id.startswith(f"{_ALGO}:") for p in kept), [p.block_id for p in kept]
+        assert f"{_ALGO}-extended:inst-other" not in [p.block_id for p in kept]
+
+    def test_a_selector_matching_nothing_is_named_not_dropped(self) -> None:
+        """An empty result and a typo are the same picture on screen and mean opposite things."""
+        kept, unmatched = sc._select_blocks(self._pairings(), ["cpt-studio-algo-typo"])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == ["cpt-studio-algo-typo"]
+
+    def test_a_good_and_a_bad_selector_together_report_only_the_bad_one(self) -> None:
+        kept, unmatched = sc._select_blocks(self._pairings(), [_ALGO, "nope"])
+        assert len(kept) == 2, [p.block_id for p in kept]
+        assert unmatched == ["nope"]
+
+    def test_duplicate_selectors_are_reported_once(self) -> None:
+        kept, unmatched = sc._select_blocks(self._pairings(), ["nope", "nope"])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == ["nope"]
+
+    # Malformed selector shapes. None of these is a defect — every one fails closed and is named
+    # back to the user — but none of them was pinned, so the colon handling could have changed
+    # shape without a test noticing. The property that matters is the same in all four: a selector
+    # that is not understood must select NOTHING and be reported, never select everything silently.
+
+    def test_a_trailing_colon_selects_nothing_and_says_so(self) -> None:
+        """`--block <algo>:` is not read as the bare `<algo>`.
+
+        The prefix rule is colon-anchored, so this looks for ids beginning `<algo>::`. Nothing
+        matches, and the selector comes back named — which is the whole signal, since this pass
+        cannot change the exit code.
+        """
+        kept, unmatched = sc._select_blocks(self._pairings(), [f"{_ALGO}:"])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == [f"{_ALGO}:"]
+
+    def test_an_instruction_that_is_only_the_prefix_collapses_but_still_reports(self) -> None:
+        """`<algo>:inst-` strips to `<algo>:`, so both forms are empty of an instruction."""
+        assert sc._selector_forms(f"{_ALGO}:inst-") == [f"{_ALGO}:inst-", f"{_ALGO}:"]
+        kept, unmatched = sc._select_blocks(self._pairings(), [f"{_ALGO}:inst-"])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == [f"{_ALGO}:inst-"]
+
+    def test_only_the_first_colon_splits_the_selector(self) -> None:
+        """`partition` splits once, so an extra colon stays inside the instruction part."""
+        assert sc._selector_forms(f"{_ALGO}:inst-strong:extra") == [
+            f"{_ALGO}:inst-strong:extra", f"{_ALGO}:strong:extra"]
+        kept, unmatched = sc._select_blocks(self._pairings(), [f"{_ALGO}:inst-strong:extra"])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == [f"{_ALGO}:inst-strong:extra"]
+
+    def test_an_empty_selector_string_matches_nothing_rather_than_everything(self) -> None:
+        """The dangerous shape: `""` is falsy per selector but the LIST is not empty.
+
+        `_select_blocks` returns early only on an empty or absent list. A single empty string is a
+        real selector, and if it were treated as a bare prefix it would match every block while
+        reading as a deliberate narrowing — the exact silent-wrong-answer this flag exists to stop.
+        """
+        kept, unmatched = sc._select_blocks(self._pairings(), [""])
+        assert kept == [], [p.block_id for p in kept]
+        assert unmatched == [""]
+
+    def test_a_block_matched_by_two_selectors_is_kept_once(self) -> None:
+        """Otherwise the same pairing is judged twice and the counts double.
+
+        The unmatched list is asserted too. Discarding it here is what hid the defect below for a
+        round: this test covered the half that worked.
+        """
+        kept, unmatched = sc._select_blocks(self._pairings(), [_ALGO, f"{_ALGO}:inst-weak"])
+        assert len(kept) == 2, [p.block_id for p in kept]
+        assert unmatched == [], unmatched
+
+    def test_an_overlapping_requirement_and_block_report_nothing_unmatched(self) -> None:
+        """A selector that DID select something must never be reported as having selected nothing.
+
+        `--requirement <algo> --block <algo>:<inst>` overlap by construction. An earlier version
+        stopped at the first selector that matched a pairing, so the second was never recorded and
+        came back as "matched no block — nothing was assessed for it" — about an instruction that
+        had just been assessed. That is the false-clean this flag exists to prevent, pointed the
+        other way, and it is worse: it invites a reader to re-run something already done, or to
+        distrust a verdict that is real. Raised in review as a question about union semantics.
+        """
+        kept, unmatched = sc._select_blocks(self._pairings(), [_ALGO, f"{_ALGO}:inst-weak"])
+        assert unmatched == [], f"{unmatched} were all matched"
+        assert [p.block_id for p in kept] == [f"{_ALGO}:inst-strong", f"{_ALGO}:inst-weak"], kept
+
+    def test_selectors_combine_as_a_union_not_an_intersection(self) -> None:
+        """Two selectors of different granularity widen the selection; they do not narrow it.
+
+        Intersecting them would select nothing whenever they name different algos, which is never
+        what supplying both is asking for. Pinned because it is a user-facing choice that the help
+        text and the feature doc now both state.
+        """
+        kept, unmatched = sc._select_blocks(
+            self._pairings(), [_ALGO, f"{_ALGO}-extended:inst-other"])
+        assert len(kept) == 3, [p.block_id for p in kept]
+        assert unmatched == []
+
+    def test_unmatched_selectors_reach_the_human_output(self, tmp_path: Path, capsys) -> None:
+        """The message is the whole signal: this pass cannot change the exit code by design, and an
+        all-zero summary for a typo is indistinguishable from a clean one.
+
+        Driven through `cmd_spec_coverage` in human mode rather than the renderer alone, so the
+        wiring is exercised too — `ui` is a no-op while JSON mode is on, which it is by default.
+        """
+        from studio.utils.ui import set_json_mode
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        section = {"advisory": True, "assessed": 0, "presumed_covered": 0, "unjudgeable": [],
+                   "findings": [], "skipped_excluded": 0, "schema_version": 1,
+                   "unmatched_selectors": ["cpt-studio-algo-typo"]}
+        set_json_mode(False)
+        try:
+            with patch("studio.utils.context.get_context", return_value=ctx):
+                with patch("studio.utils.semantic_coverage.run_semantic_pass", return_value=section):
+                    cmd_spec_coverage(["--semantic", "--requirement", "cpt-studio-algo-typo"])
+            out = capsys.readouterr().out
+        finally:
+            set_json_mode(True)
+        assert "semantic (advisory, never gates)" in out, out    # the report ran at all
+        assert "cpt-studio-algo-typo" in out, out
+        assert "matched no block" in out, out
+        assert "--requirement" in out, "the warning must name the flag the user typed"
+
+    def test_only_the_selected_pairings_reach_assess(self, tmp_path: Path) -> None:
+        """The handoff inside `run_semantic_pass`, which neither neighbouring test covers.
+
+        `_select_blocks` is unit-tested in isolation, and the CLI test mocks `run_semantic_pass`
+        away entirely — so the filter-to-`assess` step between them was never exercised with a
+        real selector. Raised in review.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        seen = {}
+        real_assess = sem.assess          # bound before patching, or the spy calls itself
+
+        def _spy(pairings, judge_fn=None, report=None):
+            seen["ids"] = [p.block_id for p in pairings]
+            return real_assess(pairings, judge_fn=judge_fn, report=report)
+
+        with patch.object(sem, "assess", side_effect=_spy):
+            sc.run_semantic_pass(ctx, [code_path], {}, blocks=[f"{_ALGO}:inst-weak"])  # the inst- form
+        assert seen["ids"] == [f"{_ALGO}:weak"], seen
+        assert all("strong" not in i for i in seen["ids"]), seen
+
+    def test_the_selector_reaches_the_pass(self, tmp_path: Path) -> None:
+        """Wiring: the selectors must arrive at `run_semantic_pass`, not stop at the parser.
+
+        Both flags feed one list, so this also pins that `--requirement` is not dropped on the way.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        section = {"advisory": True, "assessed": 0, "presumed_covered": 0, "unjudgeable": [],
+                   "findings": [], "skipped_excluded": 0, "schema_version": 1}
+        with patch("studio.utils.context.get_context", return_value=ctx):
+            with patch("studio.utils.semantic_coverage.run_semantic_pass",
+                       return_value=section) as run:
+                cmd_spec_coverage(["--semantic", "--requirement", _ALGO, "--requirement", "other"])
+        assert run.call_args.kwargs["blocks"] == [_ALGO, "other"], run.call_args
+
+    def test_block_without_semantic_is_rejected_not_ignored(self) -> None:
+        """`--block` narrows the semantic pass and nothing else.
+
+        Alone it would filter nothing and say nothing — a full report comes back and a reader
+        reasonably concludes the filter applied. That is the same silent no-op this flag exists
+        to prevent one level down, so it is caught at parse time, which is before the advisory
+        wall and therefore free to stop. Exit 2 matches how this command already rejects a bad
+        flag (`--min-coverage nan`); no JSON-safe parser is in play here.
+        """
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_spec_coverage(["--block", f"{_ALGO}:inst-weak"])    # well-formed, so only the
+        assert excinfo.value.code == 2                              # missing --semantic can fail it
+
+    def test_requirement_without_semantic_is_rejected_too(self) -> None:
+        """The sibling flag carries the same coupling; a guard on one of two is not a guard."""
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_spec_coverage(["--requirement", _ALGO])
+        assert excinfo.value.code == 2
+
+    def test_requirement_refuses_an_instruction_and_names_the_other_flag(self, capsys) -> None:
+        """Each flag names one granularity, so it must not quietly do the other one.
+
+        Selecting a whole requirement and selecting one instruction have very different blast
+        radii — potentially dozens of blocks across many files against one — and a colon is too
+        small a thing to carry that difference silently. Raised in review (#297).
+        """
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_spec_coverage(["--semantic", "--requirement", f"{_ALGO}:inst-weak"])
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "--block" in err, err          # points at the flag that does want this shape
+
+    def test_block_refuses_a_bare_algo_and_names_the_other_flag(self, capsys) -> None:
+        """The mirror of the above: the wider selection must be asked for by name."""
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_spec_coverage(["--semantic", "--block", _ALGO])
+        assert excinfo.value.code == 2
+        err = capsys.readouterr().err
+        assert "--requirement" in err, err
+
+    def test_a_block_selector_with_an_empty_instruction_is_refused(self, capsys) -> None:
+        """`<algo>:` has no instruction, so it selects nothing; refuse rather than report empty."""
+        import pytest
+        with pytest.raises(SystemExit) as excinfo:
+            cmd_spec_coverage(["--semantic", "--block", f"{_ALGO}:"])
+        assert excinfo.value.code == 2
+        assert "--requirement" in capsys.readouterr().err
+
+    def test_the_pass_itself_carries_unmatched_alongside_the_normal_shape(self, tmp_path: Path) -> None:
+        """`run_semantic_pass` builds the returned dict by spreading `unmatched_selectors` into it.
+
+        `_select_blocks` is unit-tested and the CLI test mocks the pass away entirely, so that dict
+        construction — the one line where the field meets the rest of the report — was covered by
+        neither. A refactor could have dropped the field, or broken its coexistence with the other
+        keys, with nothing failing. Raised in review; driven unmocked here.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        section = sc.run_semantic_pass(ctx, [code_path], {}, blocks=["cpt-studio-algo-typo"])
+        assert section["unmatched_selectors"] == ["cpt-studio-algo-typo"], section
+        for key in ("advisory", "assessed", "presumed_covered", "unjudgeable",
+                    "findings", "skipped_excluded", "schema_version"):
+            assert key in section, f"{key} missing beside unmatched_selectors: {section}"
+
+    def test_an_unresolved_requirement_is_unjudgeable_not_unmatched(self, tmp_path: Path) -> None:
+        """Two diagnostics that mean opposite things must not collect the same block.
+
+        `_select_blocks` matches on `block_id` alone, deliberately: whether the block's requirement
+        resolved is not its question. A selector naming a real block whose requirement is `None`
+        has therefore matched something — the block exists and was assessed — and belongs in
+        `unjudgeable`, which says "I found it and could not judge it". Reporting it under
+        `unmatched_selectors` would say the opposite, "there is no such block", and send a reader
+        hunting for a typo in a selector that was right. Raised in review.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        section = sc.run_semantic_pass(ctx, [code_path], {}, blocks=[f"{_ALGO}:weak"])
+        assert "unmatched_selectors" not in section, section
+        assert any("weak" in str(u) for u in section["unjudgeable"]), section["unjudgeable"]
+
+    def test_the_two_diagnostics_stay_distinct_when_both_apply(self, tmp_path: Path) -> None:
+        """One selector that matches an unjudgeable block, one that matches nothing at all.
+
+        Each must land in its own list. A refactor that merged them, or that let the unmatched
+        branch swallow the unresolved one, would read as either "your selector was wrong" or "all
+        clear" — and the whole point of both fields is that those are different answers.
+        """
+        code_path = _marked(tmp_path)
+        ctx = _ctx(tmp_path, code_path)
+        section = sc.run_semantic_pass(
+            ctx, [code_path], {}, blocks=[f"{_ALGO}:weak", "cpt-studio-algo-typo"])
+        assert section["unmatched_selectors"] == ["cpt-studio-algo-typo"], section
+        assert any("weak" in str(u) for u in section["unjudgeable"]), section["unjudgeable"]
+
+    def test_the_section_omits_the_key_when_every_selector_matched(self) -> None:
+        """A clean run must not carry an empty list a consumer has to special-case."""
+        kept, unmatched = sc._select_blocks(self._pairings(), [_ALGO])
+        assert unmatched == []
