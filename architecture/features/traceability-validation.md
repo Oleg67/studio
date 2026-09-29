@@ -198,7 +198,7 @@ Catches structural and traceability issues that AI agents miss or hallucinate â€
 1. [x] - `p1` - User invokes one of: `list-ids [--kind K] [--pattern P]`, `where-defined --id <id>`, `where-used --id <id>`, `get-content --id <id> --artifact PATH | --code PATH` - `inst-user-query`
 2. [x] - `p1` - **IF** `list-ids`, `where-defined` or `where-used`: load project context and collect the registered artifacts to scan â€” every one, only the one named by `--artifact`, or, for `list-ids --source`, only that workspace source's - `inst-query-load-context`
 3. [x] - `p1` - Scan the collected artifacts using `cpt-studio-algo-traceability-validation-scan-ids` to build ID index - `inst-scan-all`
-4. [x] - `p1` - **IF** `list-ids --include-code`: scan codebase files for marker references - `inst-if-list-code`
+4. [x] - `p1` - **IF** `list-ids --include-code`: scan codebase files for marker references, each file once however many registered entries cover it - `inst-if-list-code`
 5. [x] - `p1` - **IF** `list-ids`: filter index by `--kind` and `--pattern`, return definitions - `inst-if-list`
 6. [x] - `p1` - **IF** `where-defined`: find definition entries for the given ID - `inst-if-where-def`
 7. [x] - `p1` - **IF** `where-used`: find reference entries for the given ID across artifacts and code - `inst-if-where-used`

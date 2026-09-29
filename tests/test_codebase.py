@@ -92,6 +92,27 @@ class TestScanRegisteredCodebaseReferences:
             {**common, "line": 2, "kind": "code", "marker_type": "block", "inst": "step"},
         ]
 
+    @pytest.mark.parametrize("second_entry", ["src/pkg", "src/pkg/a.py"], ids=["nested-dir", "same-file"])
+    def test_overlapping_entries_scan_and_count_a_file_once(self, tmp_path: Path, second_entry: str):
+        """A root and a directory inside it, or one file registered twice: the marker is
+        one reference in one file, not two, and `code_files_scanned` says one."""
+        pkg = tmp_path / "src" / "pkg"
+        pkg.mkdir(parents=True)
+        (pkg / "a.py").write_text(
+            "# @cpt-begin:cpt-app-algo-x:p1:inst-work\nwork = 1\n# @cpt-end:cpt-app-algo-x:p1:inst-work\n"
+        )
+        ctx = _FakeCtx(tmp_path, [
+            _FakeCodebaseEntry(tmp_path / "src", [".py"]),
+            _FakeCodebaseEntry(tmp_path / second_entry, [".py"]),
+        ])
+
+        hits, code_files_scanned, code_files_skipped = scan_registered_codebase_references(ctx)
+
+        assert [(hit["id"], hit["artifact"], hit["line"]) for hit in hits] == [
+            ("cpt-app-algo-x", str(pkg / "a.py"), 1),
+        ]
+        assert (code_files_scanned, code_files_skipped) == (1, 0)
+
     def test_default_ignored_directories_are_skipped_without_explicit_ignore(self, tmp_path: Path):
         code_dir = tmp_path / "src"
         code_dir.mkdir()

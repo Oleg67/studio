@@ -922,6 +922,7 @@ def _scan_codebase_entries(scan_ctx) -> Tuple[List[Dict[str, object]], int, int]
     hits: List[Dict[str, object]] = []
     scanned = 0
     skipped = 0
+    seen: Set[Path] = set()
     root = scan_ctx.project_root.resolve()
     for cb_entry, _system_node in scan_ctx.meta.iter_all_codebase():
         code_path = (root / cb_entry.path).resolve()
@@ -937,6 +938,14 @@ def _scan_codebase_entries(scan_ctx) -> Tuple[List[Dict[str, object]], int, int]
         # unparsable", and a policy exclusion is the first of those.
         skipped += entry_excluded
         for file_path in entry_files:
+            # Entries can overlap — a root and a directory inside it, or one file
+            # registered twice — and a file is still one file: scanned and counted
+            # once. Symlinked candidates never reach here, so the resolved path is
+            # the file's identity.
+            identity = file_path.resolve()
+            if identity in seen:
+                continue
+            seen.add(identity)
             file_hits = _scan_code_file_references(file_path, scan_ctx)
             if file_hits is None:
                 skipped += 1
