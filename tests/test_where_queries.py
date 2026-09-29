@@ -624,6 +624,26 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, {"count": 0, "artifacts_scanned": 1, "ids": []})
 
+    def test_list_ids_invalid_regex_is_the_error_object_before_any_scan(self):
+        """An invalid `--pattern` under `--regex` used to escape as a traceback with
+        nothing on stdout. It is now the JSON error with exit 1, checked first: even with
+        no project there, the pattern is what gets reported. A valid one still filters."""
+        with TemporaryDirectory() as td:
+            no_project = Path(td) / "empty"
+            no_project.mkdir()
+            answers = [self._run_main(no_project, ["list-ids", "--pattern", bad, "--regex"])
+                       for bad in ("(", "a\\")]
+            root = Path(td) / "project"
+            root.mkdir()
+            _setup_project(root)
+            rc_ok, matched, _ = self._run_main(root, ["list-ids", "--pattern", r"item-\d$", "--regex"])
+        for rc, out, stderr in answers:
+            self.assertEqual(rc, 1)
+            self.assertEqual(out["status"], "ERROR")
+            self.assertTrue(out["message"].startswith("Invalid --pattern regular expression: "), out)
+            self.assertNotIn("Traceback", stderr)
+        self.assertEqual((rc_ok, [h["id"] for h in matched["ids"]]), (0, ["cpt-test-item-1"]))
+
     # ---- get-content -------------------------------------------------------
     @staticmethod
     def _marked_code(td: Path) -> Path:

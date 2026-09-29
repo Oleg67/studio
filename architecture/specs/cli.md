@@ -505,8 +505,9 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
   one source, omit `--include-code`.
 
 No match is an answer: `count` is `0`, `ids` is `[]`, and the exit code is `0`. An
-`--artifact` that does not exist, or no Studio project, prints
-`{"status": "ERROR", "message": "..."}`. The unreadable-artifact limitation described
+`--artifact` that does not exist, no Studio project, or a `--pattern` that is not a valid
+regular expression under `--regex` prints `{"status": "ERROR", "message": "..."}` and
+exits `1`; the pattern is checked before anything is scanned. The unreadable-artifact limitation described
 under `where-used` applies to this scan too.
 
 **Exit**: 0 = the scan ran, 1 = the target could not be resolved.
