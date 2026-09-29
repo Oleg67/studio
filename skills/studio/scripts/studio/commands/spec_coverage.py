@@ -550,6 +550,9 @@ def _resolve_selectors(parser: argparse.ArgumentParser, args: argparse.Namespace
         named = "--block" if blocks else "--requirement"
         parser.error(f"{named} requires --semantic (it narrows the semantic pass only)")
 
+# @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-resolve-selectors
+
+    # @cpt-begin:cpt-studio-flow-spec-coverage-report:p1:inst-selector-shape-refusal
     for selector in requirements:
         if ":" in selector:
             parser.error(
@@ -562,9 +565,11 @@ def _resolve_selectors(parser: argparse.ArgumentParser, args: argparse.Namespace
             parser.error(
                 f"--block takes '<algo>:<inst>', but got '{selector}'. "
                 f"Use --requirement {algo} to select every block of that requirement.")
+    # @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-selector-shape-refusal
 
+    # @cpt-begin:cpt-studio-flow-spec-coverage-report:p1:inst-selector-combine
     return (requirements + blocks) or None
-# @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-resolve-selectors
+    # @cpt-end:cpt-studio-flow-spec-coverage-report:p1:inst-selector-combine
 
 
 # @cpt-begin:cpt-studio-flow-spec-coverage-report:p1:inst-selector-flag

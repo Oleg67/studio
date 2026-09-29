@@ -201,8 +201,14 @@ def _select_blocks(pairings: List[eval_semantic.Pairing],
                 hit = True
         if hit:
             kept.append(pairing)
-    return kept, [selector for selector in wanted if selector not in matched]
 # @cpt-end:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-select
+
+    # @cpt-begin:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-unmatched
+    # Returned, not dropped: an empty selection and a typo look identical on screen — no findings —
+    # and mean opposite things. A selector absent from `matched` selected nothing, and the caller
+    # names it before the summary, because this pass cannot change the exit code.
+    return kept, [selector for selector in wanted if selector not in matched]
+    # @cpt-end:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-unmatched
 
 
 # @cpt-begin:cpt-studio-algo-semantic-coverage-pass:p1:inst-scov-run
