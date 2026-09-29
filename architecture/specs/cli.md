@@ -468,8 +468,11 @@ cfs list-ids [--kind KIND] [--pattern PATTERN [--regex]] [--artifact PATH] [--al
 
 - `count` equals the length of `ids`. `kind` is inferred from the ID's slug against the
   registered systems' known kinds, or `null` when it cannot be.
-- `type` is `definition`, `reference`, or — with `--include-code` — `code_reference`. A
-  code record also carries `marker_type` (`scope`, `block`, …), `phase`, and `inst` when
+- `type` is `definition`, `reference`, or — with `--include-code` — `code_reference`, or
+  `definition-link-form` for a definition written as a markdown link. That last is listed
+  with its checkbox and priority, but it is neither a definition nor a reference: it never
+  wins the dedupe as a definition, and `cfs validate` reports it under
+  `def-link-form-not-allowed`. A code record also carries `marker_type` (`scope`, `block`, …), `phase`, and `inst` when
   the marker names one, and its `kind` is the marker's, or the string `code` when the
   marker names none — not `null`. Without `--all` each ID appears
   once — its definition when one exists, otherwise its first occurrence. Artifacts are
@@ -542,7 +545,8 @@ The ID is given positionally or with `--id`; given both, the positional wins, wi
 
 - `status` is `FOUND` for exactly one definition, `AMBIGUOUS` for more than one (all are
   listed, and `count` says how many), `NOT_FOUND` for none — same keys, empty list — and
-  `NO_ARTIFACTS` when there is nothing registered to scan.
+  `NO_ARTIFACTS` when there is nothing registered to scan. A definition written as a
+  markdown link does not count, so an ID defined only that way is `NOT_FOUND`.
 - `artifact` is an absolute path. `kind` is always `null`: this command does not infer
   it (`list-ids` does). `source` is added when the artifact belongs to a workspace source.
 - An unresolvable target — an `--artifact` that does not exist, an empty ID, no Studio

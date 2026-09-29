@@ -580,6 +580,24 @@ class TestDocumentedContracts(_ContextTestBase):
         self.assertEqual(set(out), {"status", "id", "artifacts_scanned", "count", "definitions"})
         self.assertEqual((out["status"], out["count"], out["definitions"]), ("NOT_FOUND", 0, []))
 
+    def test_a_link_form_definition_is_listed_by_type_and_is_not_a_definition(self):
+        """`list-ids` lists it as `definition-link-form`, with its checkbox and priority;
+        `where-defined` does not count it, so an ID defined only that way is NOT_FOUND."""
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            _setup_project(root)
+            (root / "architecture" / "PRD.md").write_text(
+                "- [x] `p1` - **ID**: [`cpt-test-item-linked`](spec.md)\n", encoding="utf-8")
+            _with_context(root)
+            rc_list, listed = self._run(cmd_list_ids, ["--pattern", "linked"])
+            rc_def, defined = self._run(cmd_where_defined, ["cpt-test-item-linked"])
+        self.assertEqual(rc_list, 0)
+        self.assertEqual(
+            [(h["id"], h["type"], h["checked"], h.get("priority")) for h in listed["ids"]],
+            [("cpt-test-item-linked", "definition-link-form", True, "p1")],
+        )
+        self.assertEqual((rc_def, defined["status"], defined["count"]), (2, "NOT_FOUND", 0))
+
     def test_where_defined_ambiguous_lists_all_and_exits_2(self):
         with TemporaryDirectory() as td:
             first, second = Path(td) / "a.md", Path(td) / "b.md"
