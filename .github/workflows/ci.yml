@@ -227,6 +227,24 @@ jobs:
       - name: Check version consistency
         run: make check-versions
 
+  declared-stops:
+    name: Declared Stops (no rise or unrecorded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      # Runs the command from source, not the bootstrap the other governance gates use: this
+      # command is new and is not in the released cfs the bootstrap installs, so invoking it
+      # through the bootstrap would fail with "unknown command". It walks the repository's own
+      # workflows/ and skills/ (no released kit needed); once it ships in a release, this can
+      # move to the bootstrapped CLI like the rest.
+      - name: Check declared stops against the baseline
+        run: make declared-stops
+
   spec-coverage:
     name: Spec Coverage
     runs-on: ubuntu-latest
